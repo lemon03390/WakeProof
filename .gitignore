@@ -32,11 +32,10 @@ Package.pins
 Package.resolved
 *.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
 
-## CocoaPods
+## CocoaPods (not used, but ignore Pods/ if someone runs pod init)
 Pods/
-*.xcworkspace
 
-## Carthage
+## Carthage (not used)
 Carthage/Build/
 Carthage/Checkouts
 
