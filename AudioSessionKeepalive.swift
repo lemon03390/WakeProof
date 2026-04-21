@@ -1,0 +1,152 @@
+//
+//  AudioSessionKeepalive.swift
+//  WakeProof
+//
+//  Keeps an AVAudioSession alive in the background so the app can produce
+//  audio at alarm time even with the screen locked. This is the Alarmy-style
+//  workaround for iOS's lack of a public Alarm API.
+//
+//  This file exists primarily for the Day 1 GO/NO-GO test. If the test fails,
+//  the whole architecture pivots to a Shortcuts-based hybrid approach.
+//
+//  Requires:
+//  - Background Modes > Audio, AirPlay, and Picture in Picture enabled in target capabilities
+//  - A silent audio loop file (1–30s of silence) in the bundle, named "silence.m4a"
+//
+//  Reference: https://developer.apple.com/documentation/avfaudio/avaudiosession
+//
+
+import AVFoundation
+import Foundation
+import os
+
+@Observable
+final class AudioSessionKeepalive {
+
+    // MARK: - Public
+
+    static let shared = AudioSessionKeepalive()
+
+    private(set) var isActive: Bool = false
+    private(set) var lastError: String?
+
+    /// Activate the audio session with .playback category and start looping silence.
+    /// Call this on app launch, before any alarm schedule is relevant.
+    func start() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(
+                .playback,
+                mode: .default,
+                options: [.mixWithOthers]
+            )
+            try session.setActive(true, options: [])
+
+            logger.info("Audio session activated. category=\(session.category.rawValue, privacy: .public) isOtherAudioPlaying=\(session.isOtherAudioPlaying)")
+
+            try startSilentLoop()
+            isActive = true
+            lastError = nil
+        } catch {
+            lastError = "Failed to activate audio session: \(error.localizedDescription)"
+            logger.error("\(self.lastError ?? "", privacy: .public)")
+            isActive = false
+        }
+
+        observeInterruptions()
+    }
+
+    /// Stop the keepalive. Use when the user explicitly disables alarms.
+    func stop() {
+        silentPlayer?.stop()
+        silentPlayer = nil
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            logger.error("Failed to deactivate audio session: \(error.localizedDescription, privacy: .public)")
+        }
+        isActive = false
+    }
+
+    /// Play a short audible tone — used for the Day 1 GO/NO-GO test to confirm
+    /// the audio session survived a long background period.
+    func triggerTestTone() {
+        guard let url = Bundle.main.url(forResource: "test-tone", withExtension: "m4a") else {
+            logger.error("test-tone.m4a missing from bundle")
+            return
+        }
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.volume = 1.0
+            player.play()
+            testTonePlayer = player // retain
+            logger.info("Test tone triggered at \(Date().ISO8601Format(), privacy: .public)")
+        } catch {
+            logger.error("Failed to play test tone: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Private
+
+    private let logger = Logger(subsystem: "com.wakeproof.audio", category: "session")
+    private var silentPlayer: AVAudioPlayer?
+    private var testTonePlayer: AVAudioPlayer?
+
+    private init() {}
+
+    private func startSilentLoop() throws {
+        guard let url = Bundle.main.url(forResource: "silence", withExtension: "m4a") else {
+            throw KeepaliveError.missingSilenceAsset
+        }
+        let player = try AVAudioPlayer(contentsOf: url)
+        player.numberOfLoops = -1 // infinite
+        player.volume = 0.0 // inaudible but keeps session hot
+        guard player.prepareToPlay(), player.play() else {
+            throw KeepaliveError.playerRefusedToStart
+        }
+        silentPlayer = player
+        logger.info("Silent loop started")
+    }
+
+    private func observeInterruptions() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            guard let info = note.userInfo,
+                  let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+                return
+            }
+            switch type {
+            case .began:
+                self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
+            case .ended:
+                self.logger.info("Audio session interruption ENDED — reactivating")
+                do {
+                    try AVAudioSession.sharedInstance().setActive(true, options: [])
+                    try self.startSilentLoop()
+                } catch {
+                    self.logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
+                }
+            @unknown default:
+                break
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            self?.logger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+        }
+    }
+
+    enum KeepaliveError: Error {
+        case missingSilenceAsset
+        case playerRefusedToStart
+    }
+}
