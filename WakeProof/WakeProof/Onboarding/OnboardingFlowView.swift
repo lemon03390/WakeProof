@@ -38,7 +38,7 @@ struct OnboardingFlowView: View {
                 case .notifications:
                     PermissionStep(
                         title: "Let us wake you",
-                        body: "WakeProof needs notification permission to ring your alarm. Critical Alert permission is requested too — that's the one that bypasses silent mode when your morning self has muted your phone.",
+                        message: "WakeProof needs notification permission to ring your alarm. Critical Alert permission is requested too — that's the one that bypasses silent mode when your morning self has muted your phone.",
                         action: "Enable notifications",
                         handler: {
                             await permissions.requestNotifications()
@@ -48,7 +48,7 @@ struct OnboardingFlowView: View {
                 case .camera:
                     PermissionStep(
                         title: "The contract needs a witness",
-                        body: "When your alarm rings, you'll take one live photo at your designated wake-location. Claude Opus 4.7 checks you're actually there and actually awake. No photos leave your device except that single verification call.",
+                        message: "When your alarm rings, you'll take one live photo at your designated wake-location. Claude Opus 4.7 checks you're actually there and actually awake. No photos leave your device except that single verification call.",
                         action: "Enable camera",
                         handler: {
                             await permissions.requestCamera()
@@ -58,7 +58,7 @@ struct OnboardingFlowView: View {
                 case .health:
                     PermissionStep(
                         title: "Last night in context",
-                        body: "If you wear an Apple Watch, WakeProof reads your sleep data to show a summary when you successfully wake up. Optional — skip and everything else still works.",
+                        message: "If you wear an Apple Watch, WakeProof reads your sleep data to show a summary when you successfully wake up. Optional — skip and everything else still works.",
                         action: "Enable Health",
                         secondary: "Skip",
                         handler: {
@@ -70,7 +70,7 @@ struct OnboardingFlowView: View {
                 case .motion:
                     PermissionStep(
                         title: "Catch the natural wake",
-                        body: "WakeProof watches for the micro-movements that mean you're already drifting toward consciousness, and times your alarm to that moment instead of jolting you out of deep sleep.",
+                        message: "WakeProof watches for the micro-movements that mean you're already drifting toward consciousness, and times your alarm to that moment instead of jolting you out of deep sleep.",
                         action: "Enable motion",
                         secondary: "Skip",
                         handler: {
@@ -134,7 +134,7 @@ private struct WelcomeStep: View {
 
 private struct PermissionStep: View {
     let title: String
-    let body: String
+    let message: String
     let action: String
     var secondary: String? = nil
     let handler: @MainActor () async -> Void
@@ -148,7 +148,7 @@ private struct PermissionStep: View {
             Text(title)
                 .font(.system(size: 34, weight: .bold))
                 .multilineTextAlignment(.center)
-            Text(body)
+            Text(message)
                 .font(.body)
                 .foregroundStyle(.white.opacity(0.8))
                 .multilineTextAlignment(.center)
