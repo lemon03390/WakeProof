@@ -80,6 +80,73 @@ Special prizes worth targeting:
 - No force unwraps in committed code. No `!` outside of test fixtures.
 - Info.plist usage descriptions are required for every permission — see `docs/info-plist-requirements.md`.
 
+## Core development principles (promoted from CLAUDE-Reference.md)
+
+Project-agnostic rules that apply regardless of language/framework. The RN/TypeScript-specific patterns in CLAUDE-Reference.md do NOT apply here — see that file only for the universal principles.
+
+### Work style
+- **小步前進** — each change must compile. No big-bang refactors.
+- **先理解再動手** — find 3 similar existing implementations before writing new code.
+- **務實不教條** — adapt to the project's reality, don't over-engineer for abstract theory.
+- **單一職責** — each function/view does one thing.
+- **避免過早抽象** — wait for the third repetition before extracting.
+- **意圖清晰** — pick the most direct phrasing; if it needs explaining, it's too complex.
+
+### 卡關協議 (CRITICAL)
+Same problem, max 3 attempts. Then STOP:
+1. Record what was tried + exact error messages
+2. Question assumptions — wrong abstraction level? simpler framing? fewer layers not more?
+3. Report to user with 2-3 alternative directions
+
+### 決策框架 (tie-breaker order when multiple options exist)
+1. **Testability** — can this be verified easily (device test counts)?
+2. **Readability** — understandable in 6 months?
+3. **Consistency** — matches existing project patterns?
+4. **Simplicity** — simplest viable path?
+5. **Reversibility** — how hard to change later?
+
+### Review issue handling (MANDATORY)
+Any issue surfaced by `adversarial-review`, `/simplify`, `uat-review`, or peer review — **regardless of severity** (Critical/Important/Medium/Low) — must be addressed:
+- **Fix** — modify code to resolve, OR
+- **Explicitly mark "won't fix"** — with a technical reason (e.g. "protected by iOS sandbox", "pre-existing design tradeoff — see decision N")
+
+Never skip by severity. Never defer Medium/Low while fixing only Critical. Never pass a phase gate with open review issues.
+
+### Commit gate (mandatory before every commit)
+- [ ] Builds successfully, no new warnings in touched files
+- [ ] Relevant verification gate passed (device test if touched runtime-sensitive code)
+- [ ] Error paths use `Logger` from `os`, not silent catch / `print()`
+- [ ] No force unwraps, no `!` outside test fixtures
+- [ ] No hardcoded API keys outside `Services/Secrets.swift`
+- [ ] Commit message explains WHY, not WHAT
+
+### 禁止事項
+- `--no-verify` to bypass commit hooks
+- Disabling failing tests instead of fixing them
+- Committing non-compiling code
+- Assumptions — read existing code to verify before changing
+- Undocumented TODOs (each TODO must cite a reason)
+
+### 費用安全與不可逆操作 (confirmation required)
+Must have explicit user confirmation before executing:
+- `git push` / `git push --force` / `git rebase` / `git reset --hard`
+- Any `rm -rf` / destructive file deletion
+- Anthropic API batch runs or > ~20 calls in succession (we have $500 total budget)
+- TestFlight submission / App Store Connect upload
+- Auto-generating new `.md` documentation files (unless user asked)
+
+Safe to auto-execute: `git add`, `git commit` (only when asked), reads/searches, Xcode builds, single planned API calls.
+
+### Multi-phase review pipeline (when doing large changes)
+When a feature spans multiple Waves/phases, each phase goes through in order:
+1. Implement
+2. `adversarial-review` (red-team the diff)
+3. Fix surfaced issues
+4. `/simplify` (reuse + quality pass)
+5. `pr-review-toolkit:review-pr` if branch is PR-bound
+6. Fix surfaced issues → `/simplify` again → re-review until zero issues
+7. Only then advance to next phase
+
 ## What Claude Code should NOT do
 
 - Do not add React Native, JS bridges, or Expo anything.
@@ -104,8 +171,10 @@ This is a 5-day hackathon build — no XCTest suite is mandated, but:
 
 ## Reference docs
 
-- `docs/build-plan.md` — day-by-day schedule, hard deadlines, pivot triggers
+- `docs/build-plan.md` — day-by-day schedule (reference only, not hard rule; we can run ahead)
 - `docs/technical-decisions.md` — locked architectural decisions with rejected alternatives
-- `docs/go-no-go-audio-test.md` — the Day 1 test that determines whether this whole approach works
+- `docs/go-no-go-audio-test.md` — the foundation test that determines whether this whole approach works
 - `docs/info-plist-requirements.md` — every permission key + copy
 - `docs/vision-prompt.md` — the Opus 4.7 verification prompt (versioned)
+- `docs/plans/` — implementation plans produced by `writing-plans` skill; phase gates are hard checkpoints
+- `CLAUDE-Reference.md` — universal engineering principles (source of the "Core development principles" section above)
