@@ -189,14 +189,11 @@ git -C /Users/mountainfung/Desktop/WakeProof-Hackathon commit -m "Phase 1: use e
 
 - [ ] **Step 2:** Same panel → `+ Capability` → **HealthKit**. Do not tick "Clinical Health Records".
 
-- [ ] **Step 3:** Open the auto-generated `WakeProof.entitlements` file → add to the dict:
+- [ ] **Step 3:** Critical Alerts entitlement — submit a request **first**, then add to entitlements **only after approval**.
 
-```xml
-<key>com.apple.developer.usernotifications.critical-alerts</key>
-<true/>
-```
+Apple's restricted entitlements (including `com.apple.developer.usernotifications.critical-alerts`) cannot be included in the entitlements file before Apple approves the team+bundle combination; doing so causes `Automatic signing failed → "Entitlement ... requires approval from Apple to include in a profile"` at build time. Apple's own instruction: "remove entitlement and add upon approval". This applies to paid Developer Program accounts too (the paid/free distinction is irrelevant here).
 
-(Apple will reject critical-alerts on a personal dev account — that is expected; the request being present is a demo narration point per CLAUDE.md and `docs/info-plist-requirements.md`.)
+Submit request at https://developer.apple.com/contact/request/notifications-critical-alerts-entitlement/ — App Type = "Personal Safety and Security", bundle ID `com.vincent.WakeProof`, frequency "Once per day". Keep the Swift code requesting `.criticalAlert` in `UNAuthorizationOptions` as-is — iOS silently ignores the flag when the entitlement is absent, so no runtime change is needed. Add the entitlement block to `WakeProof.entitlements` once Apple's approval arrives.
 
 - [ ] **Step 4:** Build on device.
 

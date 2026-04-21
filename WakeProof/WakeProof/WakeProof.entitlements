@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<!--
+		com.apple.developer.usernotifications.critical-alerts: request submitted to
+		Apple via developer.apple.com/contact/request/notifications-critical-alerts-entitlement/
+		on 2026-04-22. Entitlement MUST be absent from the provisioning profile until
+		Apple approves, or automatic signing fails with "Entitlement ... requires
+		approval from Apple to include in a profile" (Apple's own instruction:
+		"remove entitlement and add upon approval").
+
+		Swift code in PermissionsManager.requestNotifications() still passes
+		UNAuthorizationOptions.criticalAlert — iOS silently ignores the flag when
+		the entitlement is absent, so no runtime change is needed. Re-add the
+		entitlement below once Apple approves.
+	-->
+</dict>
+</plist>
