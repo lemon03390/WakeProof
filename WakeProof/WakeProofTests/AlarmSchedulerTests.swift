@@ -170,4 +170,73 @@ final class AlarmSchedulerTests: XCTestCase {
         scheduler.updateWindow(WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: false))
         XCTAssertNil(scheduler.nextFireAt)
     }
+
+    // MARK: - Day 3 phase extensions
+
+    func testBeginVerifyingFromCapturingTransitionsToVerifying() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        XCTAssertEqual(scheduler.phase, .verifying)
+    }
+
+    func testBeginVerifyingIgnoredFromRinging() {
+        scheduler.fireNow()
+        scheduler.beginVerifying()  // still in .ringing
+        XCTAssertEqual(scheduler.phase, .ringing)
+    }
+
+    func testReturnToRingingAfterVerifyingClearsVerifyingPhase() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        scheduler.returnToRingingAfterVerifying(error: "Verification failed: bed")
+        XCTAssertEqual(scheduler.phase, .ringing)
+        XCTAssertEqual(scheduler.lastCaptureError, "Verification failed: bed")
+    }
+
+    func testBeginAntiSpoofPromptFromVerifyingTransitionsToAntiSpoofPrompt() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        scheduler.beginAntiSpoofPrompt(instruction: "Blink twice")
+        guard case let .antiSpoofPrompt(instruction) = scheduler.phase else {
+            return XCTFail("expected antiSpoofPrompt")
+        }
+        XCTAssertEqual(instruction, "Blink twice")
+    }
+
+    func testBeginCapturingFromAntiSpoofPromptAllowsReEntry() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        scheduler.beginAntiSpoofPrompt(instruction: "Show your right hand")
+        scheduler.beginCapturing()  // re-entry from anti-spoof
+        XCTAssertEqual(scheduler.phase, .capturing)
+    }
+
+    func testReturnToRingingWithErrorFromVerifyingIsAllowed() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        scheduler.returnToRingingWith(error: "network down")
+        XCTAssertEqual(scheduler.phase, .ringing)
+        XCTAssertEqual(scheduler.lastCaptureError, "network down")
+    }
+
+    func testFinishVerifyingVerifiedClearsEverything() {
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        scheduler.beginVerifying()
+        scheduler.finishVerifyingVerified()
+        XCTAssertEqual(scheduler.phase, .idle)
+        XCTAssertNil(scheduler.lastFireAt)
+    }
+
+    func testFinishVerifyingVerifiedIgnoredFromOtherPhases() {
+        scheduler.fireNow()
+        scheduler.finishVerifyingVerified()  // still in .ringing
+        XCTAssertEqual(scheduler.phase, .ringing)
+        XCTAssertNotNil(scheduler.lastFireAt)
+    }
 }

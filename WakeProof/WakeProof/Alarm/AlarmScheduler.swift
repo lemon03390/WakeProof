@@ -17,14 +17,15 @@ import Observation
 import UserNotifications
 import os
 
-/// Three-phase state machine for the alarm. A single fullScreenCover at the root swaps
-/// between AlarmRingingView (phase == .ringing) and CameraCaptureFlow (phase == .capturing);
-/// nested covers caused SwiftUI's outer-cover binding setter to fire during transitions,
-/// dismissing everything when the user tapped "Prove you're awake".
+/// Four-phase state machine for the alarm. A single ZStack overlay at the root swaps between
+/// the phase-specific views. .verifying and .antiSpoofPrompt were added in Day 3; the comment
+/// about nested fullScreenCover regressions still applies and the ZStack pattern prevents them.
 enum AlarmPhase: Equatable {
     case idle
     case ringing
     case capturing
+    case verifying
+    case antiSpoofPrompt(instruction: String)
 }
 
 @Observable
@@ -169,7 +170,14 @@ final class AlarmScheduler {
 
     /// Transition ringing → capturing when the user taps "Prove you're awake".
     func beginCapturing() {
-        guard phase == .ringing else {
+        // Accept either the initial ringing→capturing entry OR the anti-spoof re-entry.
+        let isValidSource: Bool
+        switch phase {
+        case .ringing: isValidSource = true
+        case .antiSpoofPrompt: isValidSource = true
+        default: isValidSource = false
+        }
+        guard isValidSource else {
             logger.warning("beginCapturing ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
@@ -181,13 +189,71 @@ final class AlarmScheduler {
     /// Transition capturing → ringing when the camera cancels, fails, or persistence fails.
     /// An `error` message surfaces as a banner on AlarmRingingView so the user knows why they're back.
     func returnToRingingWith(error: String?) {
-        guard phase == .capturing else {
+        // Accept return from either capturing or verifying (network error mid-verify).
+        let isValidSource: Bool
+        switch phase {
+        case .capturing: isValidSource = true
+        case .verifying: isValidSource = true
+        default: isValidSource = false
+        }
+        guard isValidSource else {
             logger.warning("returnToRingingWith ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
         lastCaptureError = error
         phase = .ringing
         logger.info("Phase → ringing (error=\(error ?? "none", privacy: .public))")
+    }
+
+    /// Transition capturing → verifying when the camera flow successfully persists a WakeAttempt
+    /// and VisionVerifier is about to call Claude. The ring audio stays on (volume reduction is
+    /// an app-root concern so the scheduler stays audio-agnostic).
+    func beginVerifying() {
+        guard phase == .capturing else {
+            logger.warning("beginVerifying ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = nil
+        phase = .verifying
+        logger.info("Phase → verifying")
+    }
+
+    /// Transition verifying → antiSpoofPrompt when Claude returns RETRY. The instruction is chosen
+    /// by VisionVerifier from a fixed bank; the prompt view displays it to the user, who taps
+    /// "I'm ready" to move back into .capturing.
+    func beginAntiSpoofPrompt(instruction: String) {
+        guard phase == .verifying else {
+            logger.warning("beginAntiSpoofPrompt ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = nil
+        phase = .antiSpoofPrompt(instruction: instruction)
+        logger.info("Phase → antiSpoofPrompt (instruction=\(instruction, privacy: .public))")
+    }
+
+    /// Transition verifying → ringing when Claude returns REJECTED or a network error occurred.
+    /// `error` surfaces on the ringing banner.
+    func returnToRingingAfterVerifying(error: String?) {
+        guard phase == .verifying else {
+            logger.warning("returnToRingingAfterVerifying ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = error
+        phase = .ringing
+        logger.info("Phase → ringing after verifying (error=\(error ?? "none", privacy: .public))")
+    }
+
+    /// Transition verifying → idle when Claude returns VERIFIED. Wraps `stopRinging()` behind a
+    /// source-phase guard so the method is named for intent (not just side-effect). `stopRinging`
+    /// already clears `phase`, `lastFireAt`, and `lastCaptureError` — calling it is a single source
+    /// of truth and avoids the `persistLastFireAt` didSet firing twice.
+    func finishVerifyingVerified() {
+        guard phase == .verifying else {
+            logger.warning("finishVerifyingVerified ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        stopRinging()
+        logger.info("Phase → idle after verified")
     }
 
     /// Called by `CameraCaptureFlow` when a capture succeeded and a WakeAttempt row was

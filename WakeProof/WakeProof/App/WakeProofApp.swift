@@ -168,6 +168,15 @@ struct RootView: View {
                 audioKeepalive.stopAlarmSound()
                 scheduler.stopRinging()
             })
+        case .verifying:
+            // Stub for B.1 compile-unblock; B.3 wires VerifyingView (which needs VisionVerifier from A.4).
+            EmptyView()
+        case .antiSpoofPrompt(let instruction):
+            // Wired directly to the A.6 view; B.3 may refine with additional context later.
+            AntiSpoofActionPromptView(
+                instruction: instruction,
+                onReady: { scheduler.beginCapturing() }
+            )
         }
     }
 }
