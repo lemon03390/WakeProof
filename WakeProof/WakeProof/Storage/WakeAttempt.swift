@@ -14,7 +14,12 @@ final class WakeAttempt {
     var scheduledAt: Date
     var capturedAt: Date?
     var imageData: Data?
-    var verdict: String?  // "VERIFIED" | "REJECTED" | "RETRY"
+
+    /// Verdict is intentionally a raw String for now. Day 3's vision-verification plan
+    /// introduces a `Verdict: String, Codable` enum whose `rawValue` maps to this column,
+    /// so current rows migrate without a schema rename. Typing it as String today avoids
+    /// a forced migration of the on-device store built up during Phase 6 testing.
+    var verdict: String?  // "VERIFIED" | "REJECTED" | "RETRY" | "TIMEOUT"
     var verdictReasoning: String?
     var retryCount: Int
     var dismissedAt: Date?

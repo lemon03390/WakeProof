@@ -39,6 +39,10 @@ final class AlarmScheduler {
     private let backupNotificationIdentifier = "com.wakeproof.alarm.next"
     private var fireTask: Task<Void, Never>?
 
+    /// Loading the window from UserDefaults in init is intentional: the owning
+    /// `@State private var scheduler = AlarmScheduler()` in WakeProofApp means this
+    /// init runs exactly once per scene, not on every view redraw. SwiftUI `@State`
+    /// preserves the reference across redraws for class types.
     init() {
         self.window = WakeWindow.load()
     }

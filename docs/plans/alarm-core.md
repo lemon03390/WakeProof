@@ -1184,3 +1184,41 @@ Each bullet is a known Day 3+ deliverable surfaced here so the subagent does not
 - HealthKit sleep-summary display on dismiss screen (Day 4 plan)
 
 Day numbers from `docs/build-plan.md` are reference only; advance when gates pass, not on calendar rollover.
+
+---
+
+## Appendix — Phase C.1 adversarial-review disposition (2026-04-22)
+
+Adversarial-review on the full alarm-core diff (A.1–B.2) surfaced 18 findings: 3 Critical, 8 Important, 5 Medium, 2 Low. Per `CLAUDE.md` auto-promoted rule, every finding is either fixed or explicitly marked won't-fix with a technical reason. Commits `7edcff8`, `d9713bc`, `e869240`, `3bf23d3` address 16 of them; the remaining 2 are documented below as deliberate deferrals.
+
+### Fixed
+
+| ID | Commit | Summary |
+|---|---|---|
+| C1 | `e869240` | AlarmSoundEngine 10-min ring ceiling via onCeilingReached callback |
+| C2 | `e869240` | CameraCaptureView distinguishes onCancelled vs onFailed(error); AlarmRingingView surfaces both as inline banners |
+| C3 / M5 | `7edcff8` | fire() guards against re-entrance from DEBUG spam or internal re-schedule chain |
+| I1 | `e869240` | AlarmRingingView.persist uses do/catch with os.Logger + modelContext.rollback |
+| I2 | `e869240` | Capture copies video to Documents/WakeAttempts/<uuid>.mov; WakeAttempt stores relative filename only |
+| I3 | `7edcff8` | WakeWindow.load/save emit os.Logger errors instead of silent try? |
+| I4 | `7edcff8` | nextFireDate uses Calendar.nextDate so DST transitions are handled natively |
+| I5 | `3bf23d3` | UNCalendarNotificationTrigger backup + scenePhase reconcile protect against Task.sleep suspension past 30 min |
+| I6 | `e869240` | WakeProofApp.wireSchedulerOnFireIfNeeded installs onFire once; missing alarm.m4a logs rather than silently returns |
+| I7 | `e869240` | AlarmSchedulerView shows inline caption explaining disabled Save button + documents cross-midnight as unsupported |
+| I8 | `e869240` | CameraCaptureView branches at compile time; simulator gets SimulatorCameraStubView instead of silent photoLibrary fallback |
+| L1 | `e869240` | Frame extraction moved to 75% of duration with a 0.3s floor |
+| L2 | `d9713bc` | 30-min test-tone scheduler retired from AudioSessionKeepalive (Phase 6 PASSED) |
+| M2 | `d9713bc` | AudioSessionKeepalive marked @MainActor; observers use MainActor.assumeIsolated |
+| M3 | `d9713bc` | playAlarmSound stops+nils prior player before creating the new one |
+| M4 | `e869240` | ModelContainer init failure logs `.critical` before fatalError for breadcrumb |
+
+### Won't-fix (this plan)
+
+**M1 — `WakeAttempt.verdict: String?` is not an enum.**
+**Why:** Pre-existing field the additive A.7 commit did not modify. Day 3's `vision-verification.md` plan introduces a `Verdict: String, Codable` enum whose `rawValue` maps to this column, so current rows migrate without a schema rename. Typing it as String now avoids a forced migration of the on-device SwiftData store that carried Phase 6 baseline data. `WakeAttempt.swift` line 19 carries an inline comment with the same explanation.
+**How to apply:** Day 3 plan must add the `Verdict` enum as its first task and rewrite all read/write sites in a single commit.
+
+**L3 — `@State private var scheduler = AlarmScheduler()` with init-side-effect.**
+**Why:** Not actionable per the reviewer; the pattern is correct SwiftUI idiom for `@Observable` class owned by a scene (`@State` preserves the reference across redraws; the init runs exactly once per scene). Added a `///` doc comment at `AlarmScheduler.init()` recording the intent so future readers do not "fix" it.
+**How to apply:** none. Documented only.
+
