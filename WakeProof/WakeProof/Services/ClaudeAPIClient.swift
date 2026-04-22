@@ -119,6 +119,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        // Required for requests made directly from a client where the API key is embedded
+        // (mobile apps, single-page JS apps). Without this, Anthropic's gateway returns
+        // HTTP 403 "Request not allowed" as a policy-layer rejection. The "dangerous" in
+        // the name acknowledges that the key is exposed to the client; WakeProof is a solo
+        // hackathon build shipping a hackathon-specific $500-credit key, so the tradeoff is
+        // acceptable — production apps would proxy through a backend instead.
+        request.setValue("true", forHTTPHeaderField: "anthropic-dangerous-direct-browser-access")
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let start = Date()
@@ -143,7 +150,14 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         guard (200..<300).contains(http.statusCode) else {
             let snippet = String(data: data.prefix(300), encoding: .utf8) ?? "<non-utf8>"
-            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s; body snippet: \(snippet, privacy: .public)")
+            // Capture Anthropic's request_id so we can cross-reference in their logs if we
+            // need to file support. The header name can arrive in different cases, so try a few.
+            let requestID = http.value(forHTTPHeaderField: "request-id")
+                ?? http.value(forHTTPHeaderField: "Request-Id")
+                ?? http.value(forHTTPHeaderField: "x-request-id")
+                ?? "unknown"
+            let bodyBytes = request.httpBody?.count ?? -1
+            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_id=\(requestID, privacy: .public), request_body=\(bodyBytes, privacy: .public) bytes); body snippet: \(snippet, privacy: .public)")
             throw ClaudeAPIError.httpError(status: http.statusCode, snippet: snippet)
         }
 
