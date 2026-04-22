@@ -96,14 +96,10 @@ struct RootView: View {
             }
         }
         .fullScreenCover(isPresented: .init(
-            get: { scheduler.isRinging },
+            get: { scheduler.phase != .idle },
             set: { if !$0 { scheduler.stopRinging() } }
         )) {
-            AlarmRingingView(onVerificationCaptured: { _ in
-                soundEngine.stop()
-                audioKeepalive.stopAlarmSound()
-                scheduler.stopRinging()
-            })
+            alarmPhaseContent
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
@@ -111,6 +107,25 @@ struct RootView: View {
                 // — the backup notification will have beeped; this promotes the in-app ringing UI.
                 scheduler.reconcileAfterForeground()
             }
+        }
+    }
+
+    /// Single cover swaps content by phase. Nested fullScreenCover inside AlarmRingingView
+    /// triggered SwiftUI's outer-cover binding setter during the inner presentation, which
+    /// called `stopRinging()` and dismissed the whole thing.
+    @ViewBuilder
+    private var alarmPhaseContent: some View {
+        switch scheduler.phase {
+        case .idle:
+            EmptyView()
+        case .ringing:
+            AlarmRingingView(onRequestCapture: { scheduler.beginCapturing() })
+        case .capturing:
+            CameraCaptureFlow(onSuccess: { _ in
+                soundEngine.stop()
+                audioKeepalive.stopAlarmSound()
+                scheduler.stopRinging()
+            })
         }
     }
 }

@@ -17,6 +17,16 @@ import Observation
 import UserNotifications
 import os
 
+/// Three-phase state machine for the alarm. A single fullScreenCover at the root swaps
+/// between AlarmRingingView (phase == .ringing) and CameraCaptureFlow (phase == .capturing);
+/// nested covers caused SwiftUI's outer-cover binding setter to fire during transitions,
+/// dismissing everything when the user tapped "Prove you're awake".
+enum AlarmPhase: Equatable {
+    case idle
+    case ringing
+    case capturing
+}
+
 @Observable
 @MainActor
 final class AlarmScheduler {
@@ -24,8 +34,15 @@ final class AlarmScheduler {
     // MARK: - Observable state
 
     private(set) var window: WakeWindow
-    private(set) var isRinging: Bool = false
+    private(set) var phase: AlarmPhase = .idle
     private(set) var nextFireAt: Date?
+    /// Last capture-attempt error, surfaced in AlarmRingingView after the user bails out of
+    /// or fails the camera flow. Cleared when a new capture begins or the alarm resets.
+    private(set) var lastCaptureError: String?
+
+    /// Convenience for call sites that only care whether the alarm is active (ringing OR
+    /// mid-capture). RootView uses `phase != .idle` directly for cover presentation.
+    var isRinging: Bool { phase != .idle }
 
     // MARK: - Dependencies (late-bound; Phase B wires these)
 
@@ -93,8 +110,32 @@ final class AlarmScheduler {
     }
 
     func stopRinging() {
-        isRinging = false
-        logger.info("Ringing cleared")
+        lastCaptureError = nil
+        phase = .idle
+        logger.info("Ringing cleared (phase → idle)")
+    }
+
+    /// Transition ringing → capturing when the user taps "Prove you're awake".
+    func beginCapturing() {
+        guard phase == .ringing else {
+            logger.warning("beginCapturing ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = nil
+        phase = .capturing
+        logger.info("Phase → capturing")
+    }
+
+    /// Transition capturing → ringing when the camera cancels, fails, or persistence fails.
+    /// An `error` message surfaces as a banner on AlarmRingingView so the user knows why they're back.
+    func returnToRingingWith(error: String?) {
+        guard phase == .capturing else {
+            logger.warning("returnToRingingWith ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = error
+        phase = .ringing
+        logger.info("Phase → ringing (error=\(error ?? "none", privacy: .public))")
     }
 
     /// Call from SwiftUI `.onChange(of: scenePhase)` when the app becomes active.
@@ -102,7 +143,7 @@ final class AlarmScheduler {
     /// process overnight) — the backup notification will have beeped, but our in-process
     /// ringing UI needs a nudge to catch up.
     func reconcileAfterForeground() {
-        guard !isRinging, let expected = nextFireAt else { return }
+        guard phase == .idle, let expected = nextFireAt else { return }
         if Date() >= expected {
             logger.warning("Foreground reconcile: Task.sleep missed fire by \(Date().timeIntervalSince(expected), privacy: .public)s — firing now")
             fire()
@@ -115,8 +156,8 @@ final class AlarmScheduler {
         // Guard against double-fire: DEBUG fireNow() spam, re-entrance from onFire, or
         // scheduleNextFireIfEnabled() chaining. Without this, playAlarmSound would be
         // invoked twice concurrently and onFire closures would stack.
-        guard !isRinging else {
-            logger.info("fire() skipped — already ringing")
+        guard phase == .idle else {
+            logger.info("fire() skipped — phase=\(String(describing: self.phase), privacy: .public) not idle")
             return
         }
         // Clear any delivered backup notification so its iOS-side sound (up to 30 s) doesn't
@@ -124,7 +165,8 @@ final class AlarmScheduler {
         // as a belt-and-suspenders cleanup before the next-day scheduling below.
         notificationCenter.removeDeliveredNotifications(withIdentifiers: [backupNotificationIdentifier])
         logger.info("Alarm firing at \(Date().ISO8601Format(), privacy: .public)")
-        isRinging = true
+        lastCaptureError = nil
+        phase = .ringing
         onFire?()
         // Re-schedule the next day's fire. Cheap: this just sets up another Task.sleep
         // plus a backup notification for tomorrow.
