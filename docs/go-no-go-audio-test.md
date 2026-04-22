@@ -77,3 +77,41 @@ All go through `Logger(subsystem: "com.wakeproof.audio", category: "session")` s
 ## Hard deadline
 
 This test must be PASS or FAIL decided by end of Day 1 (Apr 22 HKT evening). Do not proceed to Day 2 alarm work without a clear answer. If the test is still running at bedtime, start the 8-hour overnight run and read results in the morning before beginning Day 2.
+
+---
+
+## Appendix: Phase 6 live result (2026-04-22)
+
+**Status: PASS**
+
+The foreground audio session survived 30 minutes of background + screen-locked + silent-mode state on real hardware and fired the scheduled 1 kHz tone audibly at the planned instant.
+
+**Device + conditions:**
+- iPhone 18,1, iOS 26.4.1 (build 23E254)
+- Plugged to charger
+- Media volume 50%
+- Ring/silent physical switch: **SILENT**
+- All Focus modes OFF
+- Low Power Mode OFF
+
+**Timestamps (from Xcode console, `com.wakeproof.audio session` subsystem):**
+- Launch + session activation → `Audio session activated. category=AVAudioSessionCategoryPlayback isOtherAudioPlaying=false`
+- Keepalive confirmed → `Silent loop started`
+- Scheduler set → `30-min test tone scheduled for 2026-04-22T08:43:00Z`
+- (Screen locked, device face-down, no user interaction for 30 minutes)
+- Scheduler woke → `30-min mark reached — firing test tone`
+- Tone fired → `Test tone triggered at 2026-04-22T08:44:00Z` (≈1 minute past scheduled, within acceptable iOS scheduling jitter)
+
+**Audible confirmation:** user heard the 2-second 1 kHz tone from the silent-mode device.
+
+**What this validates:**
+- `AVAudioSession` with `.playback` category survives iOS's background budget and screen-lock lifecycle for at least 30 minutes on iOS 26.4.1.
+- Silent physical switch does NOT silence a `.playback` category session (the architecture's central claim).
+- The structured-concurrency `Task.sleep(for:)` scheduler correctly fires after a 30-minute suspension and hits `triggerTestTone()` on the main actor.
+
+**What this does NOT yet validate:**
+- 8-hour overnight survival — still to be run at natural bedtime per Phase 8 of `docs/plans/foundation-hardening.md`.
+- Behaviour under Low Power Mode — pending Phase 8.
+- Behaviour when device unplugged at low battery — pending Phase 8.
+
+Decision 8 pivot (iOS Clock + Shortcuts hybrid) is **not triggered**. The original Alarmy-style foreground-audio-session architecture is the confirmed path forward for alarm sound delivery.
