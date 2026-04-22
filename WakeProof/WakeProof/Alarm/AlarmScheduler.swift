@@ -81,6 +81,13 @@ final class AlarmScheduler {
     // MARK: - Private
 
     private func fire() {
+        // Guard against double-fire: DEBUG fireNow() spam, re-entrance from onFire, or
+        // scheduleNextFireIfEnabled() chaining. Without this, playAlarmSound would be
+        // invoked twice concurrently and onFire closures would stack.
+        guard !isRinging else {
+            logger.info("fire() skipped — already ringing")
+            return
+        }
         logger.info("Alarm firing at \(Date().ISO8601Format(), privacy: .public)")
         isRinging = true
         onFire?()

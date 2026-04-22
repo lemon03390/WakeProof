@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import os
 
 struct WakeWindow: Codable, Equatable {
     var startHour: Int
@@ -23,31 +24,43 @@ struct WakeWindow: Codable, Equatable {
     )
 
     private static let key = "com.wakeproof.alarm.wakeWindow"
+    private static let logger = Logger(subsystem: "com.wakeproof.alarm", category: "wakeWindow")
 
     static func load(from defaults: UserDefaults = .standard) -> WakeWindow {
-        guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(WakeWindow.self, from: data) else {
+        guard let data = defaults.data(forKey: key) else {
             return .defaultWindow
         }
-        return decoded
+        do {
+            return try JSONDecoder().decode(WakeWindow.self, from: data)
+        } catch {
+            logger.error("Failed to decode WakeWindow — falling back to default: \(error.localizedDescription, privacy: .public)")
+            return .defaultWindow
+        }
     }
 
     func save(to defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        defaults.set(data, forKey: Self.key)
+        do {
+            let data = try JSONEncoder().encode(self)
+            defaults.set(data, forKey: Self.key)
+        } catch {
+            Self.logger.error("Failed to encode WakeWindow: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
-    /// The next Date matching this window's start time, relative to `now`.
-    /// If the start time already passed today, returns tomorrow's occurrence.
+    /// The next Date matching this window's start time, after `now`. Uses
+    /// `Calendar.nextDate(after:matching:)` so DST spring-forward / fall-back
+    /// is handled by the calendar, not hand-rolled.
     func nextFireDate(after now: Date = .now, calendar: Calendar = .current) -> Date? {
-        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        var components = DateComponents()
         components.hour = startHour
         components.minute = startMinute
         components.second = 0
-        guard let candidate = calendar.date(from: components) else { return nil }
-        if candidate > now {
-            return candidate
-        }
-        return calendar.date(byAdding: .day, value: 1, to: candidate)
+        return calendar.nextDate(
+            after: now,
+            matching: components,
+            matchingPolicy: .nextTime,
+            repeatedTimePolicy: .first,
+            direction: .forward
+        )
     }
 }
