@@ -2,8 +2,9 @@
 //  WakeAttempt.swift
 //  WakeProof
 //
-//  Per-alarm log of the user's verification attempts.
-//  Day 1 scaffolding — populated properly starting Day 3.
+//  Per-alarm log of the user's verification attempts. The full vision-verdict pipeline
+//  populates `verdict` + `verdictReasoning` later; today's writes set `verdict` to
+//  CAPTURED / TIMEOUT / UNRESOLVED based on which terminal state the alarm reached.
 //
 
 import Foundation
@@ -15,17 +16,15 @@ final class WakeAttempt {
     var capturedAt: Date?
     var imageData: Data?
 
-    /// Verdict is intentionally a raw String for now. Day 3's vision-verification plan
-    /// introduces a `Verdict: String, Codable` enum whose `rawValue` maps to this column,
-    /// so current rows migrate without a schema rename. Typing it as String today avoids
-    /// a forced migration of the on-device store built up during Phase 6 testing.
+    /// Stored as raw String (not the `Verdict` enum) so adding new cases later doesn't
+    /// force a SwiftData schema migration. Read via `verdictEnum` for the safe path.
     var verdict: String?
     var verdictReasoning: String?
     var retryCount: Int
     var dismissedAt: Date?
 
-    // Additive fields for Day 2 alarm-core. SwiftData treats new optional @Attribute
-    // properties as a lightweight migration — the on-device store is preserved.
+    // SwiftData treats new optional properties as a lightweight migration — the
+    // on-device store is preserved across releases that add fields here.
     var videoPath: String?
     var triggeredWindowStart: Date?
     var triggeredWindowEnd: Date?
@@ -35,19 +34,23 @@ final class WakeAttempt {
         self.retryCount = 0
     }
 
-    /// String constants matching the Day-3 enum spec. Storing as String preserves the
-    /// migration-free property; the namespace prevents typos at call sites.
+    /// Safe accessor for the verdict column. Routes through `Verdict.init(legacyRawValue:)`
+    /// so any unrecognised stored string surfaces as `.unresolved` instead of crashing or
+    /// returning a blank value at the call site.
+    var verdictEnum: Verdict { Verdict(legacyRawValue: verdict) }
+
+    /// String constants stored in the `verdict` column. Adding cases is migration-free.
     enum Verdict: String {
-        case captured       = "CAPTURED"        // user produced a video; vision verdict pending (Day 3)
+        case captured       = "CAPTURED"        // user produced a video; vision verdict pending
         case verified       = "VERIFIED"        // vision call confirmed
         case rejected       = "REJECTED"        // vision call disagreed
-        case retry          = "RETRY"           // user cancelled/failed mid-capture
+        case retry          = "RETRY"           // user cancelled or failed mid-capture
         case timeout        = "TIMEOUT"         // ring ceiling reached without capture
         case unresolved     = "UNRESOLVED"      // alarm fired but app died before resolution
 
-        /// Decode a stored value, treating any unrecognised string as `.unresolved` rather
-        /// than nil. Old rows from pre-enum schema persisted arbitrary strings; without
-        /// this fallback, Day-3 history views would crash or display blank verdicts.
+        /// Decode a stored value, treating nil or any unrecognised string as `.unresolved`
+        /// so callers don't have to defensively handle pre-enum migration data or future
+        /// rolled-back deployments leaving stray strings.
         init(legacyRawValue: String?) {
             guard let raw = legacyRawValue, let value = Verdict(rawValue: raw) else {
                 self = .unresolved

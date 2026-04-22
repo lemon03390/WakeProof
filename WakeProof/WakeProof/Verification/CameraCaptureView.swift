@@ -3,19 +3,16 @@
 //  WakeProof
 //
 //  Wake-time capture: a short (≤2 s) video plus a middle-frame still extracted
-//  for the Opus 4.7 vision prompt on Day 3. For Day 2 we only persist both
-//  outputs locally; no API call yet.
+//  for the vision-verification prompt. Both outputs are persisted locally first;
+//  vision API is invoked downstream from the persisted artifacts.
 //
-//  On simulator: falls through to a stub that injects a dummy result so
-//  home-flow UI iteration doesn't dead-end at an unavailable camera. Device
-//  path is unaffected.
+//  Simulator: falls through to a stub that injects a dummy result so home-flow
+//  UI iteration doesn't dead-end at an unavailable camera. Device path is unaffected.
 //
-//  Device path uses a CameraHostController (plain UIViewController) that, once
-//  appeared, presents UIImagePickerController MODALLY. Embedding the picker
-//  directly as a SwiftUI representable's wrapped VC violates Apple's rule
-//  ("must present modally, must not install as subview") — when we tried that,
-//  the camera framework initialized but the UI never rendered. The host VC
-//  gives the picker a proper modal presentation parent.
+//  Device path: CameraHostController (plain UIViewController) presents
+//  UIImagePickerController MODALLY. Embedding the picker as a SwiftUI representable's
+//  wrapped VC violates Apple's "must present modally, must not install as subview"
+//  rule — the camera framework initializes but the UI never renders.
 //
 
 import AVFoundation

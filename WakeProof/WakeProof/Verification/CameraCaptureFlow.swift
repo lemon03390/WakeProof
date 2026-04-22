@@ -109,9 +109,8 @@ struct CameraCaptureFlow: View {
         return CameraCaptureResult(stillImage: result.stillImage, videoURL: durableVideoURL)
     }
 
-    /// Reject obvious sham captures (zero-byte simulator stubs that escape into prod, accidental
-    /// 0.1 s tap-and-cancel videos). Skipped on simulator so the GO/NO-GO + UI flow stub still
-    /// works end-to-end.
+    /// Reject obvious sham captures (zero-byte stub files, 0.1 s tap-and-cancel videos).
+    /// Skipped on simulator so the synthetic-result UI flow still works end-to-end.
     private func validate(_ videoURL: URL) async throws {
         #if targetEnvironment(simulator)
         return

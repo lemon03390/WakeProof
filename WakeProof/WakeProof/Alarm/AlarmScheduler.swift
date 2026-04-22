@@ -47,7 +47,7 @@ final class AlarmScheduler {
     /// or fails the camera flow. Cleared when a new capture begins or the alarm resets.
     private(set) var lastCaptureError: String?
 
-    // MARK: - Dependencies (late-bound; wired by WakeProofApp at startup)
+    // MARK: - Dependencies (late-bound; wired by the app root at startup)
 
     /// Invoked at fire-time. The Date argument is the actual fire instant — callers must
     /// use this rather than `nextFireAt`, which `fire()` re-points at tomorrow before the
@@ -144,7 +144,8 @@ final class AlarmScheduler {
         backupScheduleTask?.cancel()
         backupScheduleTask = nil
         nextFireAt = nil
-        schedulingGeneration &+= 1
+        // Generation bumping happens in scheduleNextFireIfEnabled, not here — Task.isCancelled
+        // is sufficient when cancel runs without a follow-up schedule.
         notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
         // Intentionally NOT removing delivered notifications here — see fire(). Delivered
         // banners auto-dismiss when the user opens the app. Aggressive removal would kill
@@ -201,28 +202,17 @@ final class AlarmScheduler {
     /// timeout, audio is stopped, and the unresolved-fire marker is cleared.
     func handleRingCeiling() {
         let firedAt = lastFireAt ?? Date()
-        if persistAttempt == nil {
-            // Symmetric with recoverUnresolvedFireIfNeeded — silently dropping a TIMEOUT
-            // row defeats the audit-trail contract and would let a sleep-through go
-            // unrecorded.
-            logger.fault("handleRingCeiling: persistAttempt closure not wired — TIMEOUT row dropped")
-        }
-        persistAttempt?(.timeout, firedAt)
+        recordAttempt(.timeout, at: firedAt)
         lastFireAt = nil
         stopRinging()
     }
 
-    /// Inserts UNRESOLVED rows for any fire that the previous app session began but never
-    /// resolved (force-quit during ring). Call once at app launch from WakeProofApp.
-    /// Surfaces a fault if `persistAttempt` is unwired at this point — silently dropping
-    /// the recovery row would defeat the audit-trail contract that motivated this method.
+    /// Inserts an UNRESOLVED row for any fire that the previous app session began but never
+    /// resolved (force-quit during ring). Call once at app launch from the app root.
     func recoverUnresolvedFireIfNeeded() {
         guard let firedAt = lastFireAt else { return }
         logger.warning("Recovering unresolved fire from previous session at \(firedAt.ISO8601Format(), privacy: .public)")
-        if persistAttempt == nil {
-            logger.fault("recoverUnresolvedFireIfNeeded: persistAttempt closure not wired — UNRESOLVED row dropped")
-        }
-        persistAttempt?(.unresolved, firedAt)
+        recordAttempt(.unresolved, at: firedAt)
         lastFireAt = nil
     }
 
@@ -323,5 +313,14 @@ final class AlarmScheduler {
         } else {
             UserDefaults.standard.removeObject(forKey: Self.lastFireAtDefaultsKey)
         }
+    }
+
+    /// Single sink for all WakeAttempt persistence calls. Centralises the unwired-closure
+    /// fault-log so a future third caller can't forget it.
+    private func recordAttempt(_ verdict: WakeAttempt.Verdict, at firedAt: Date, source: String = #function) {
+        if persistAttempt == nil {
+            logger.fault("\(source, privacy: .public): persistAttempt closure not wired — \(verdict.rawValue, privacy: .public) row dropped")
+        }
+        persistAttempt?(verdict, firedAt)
     }
 }

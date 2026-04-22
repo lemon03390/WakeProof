@@ -106,9 +106,9 @@ struct AlarmSchedulerView: View {
         let w = WakeWindow(
             startHour: hour,
             startMinute: minute,
-            // The end-time UI is intentionally absent in this build. The model field is
-            // preserved for the Day 3 flexibility-window feature; for now it carries the
-            // previous saved value (or the default) so UserDefaults migration stays clean.
+            // End-time UI is intentionally absent — the model field is preserved for a
+            // future flexibility-window feature; the previously-saved value is carried
+            // forward so the JSON-encoded UserDefaults blob stays decodable.
             endHour: scheduler.window.endHour,
             endMinute: scheduler.window.endMinute,
             isEnabled: isEnabled

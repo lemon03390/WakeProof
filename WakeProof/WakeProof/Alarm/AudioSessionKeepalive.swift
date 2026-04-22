@@ -3,8 +3,8 @@
 //  WakeProof
 //
 //  Keeps an AVAudioSession alive in the background so the app can produce
-//  audio at alarm time even with the screen locked. This is the Alarmy-style
-//  workaround for iOS's lack of a public Alarm API.
+//  audio at alarm time even with the screen locked. Works around iOS's lack
+//  of a public Alarm API by playing a silent loop under the .playback category.
 //
 //  Requires:
 //  - Background Modes > Audio, AirPlay, and Picture in Picture enabled in target capabilities
@@ -100,10 +100,8 @@ final class AudioSessionKeepalive {
     }
 
     private func startSilentLoop() throws {
-        // Stop and release any prior silent player before allocating a new one. Without this,
-        // interruption.ended → handleInterruptionEnded → startSilentLoop spawns a new player
-        // while the old one is still mid-loop; ARC eventually reclaims the old, but for a
-        // moment two players contend for the audio session and a non-determinism slips in.
+        // Stop and release any prior player before allocating; otherwise interruption recovery
+        // briefly contends two players over the same session before ARC reclaims the old one.
         silentPlayer?.stop()
         silentPlayer = nil
         guard let url = Bundle.main.url(forResource: "silence", withExtension: "m4a") else {
@@ -179,10 +177,9 @@ final class AudioSessionKeepalive {
         } catch {
             logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
             lastError = "Audio session interruption recovery failed: \(error.localizedDescription)"
-            // F4 stops + nils silentPlayer at the top of startSilentLoop; if startSilentLoop
-            // throws partway, we land here with silentPlayer == nil and isActive still
-            // claiming true. That mismatch poisons future "should I re-arm?" reads — flip
-            // isActive to false so the keepalive's observable state matches reality.
+            // startSilentLoop clears silentPlayer before re-allocating; if it throws partway,
+            // observable state would still claim isActive==true while no player is running.
+            // Flip to false so consumers see reality.
             isActive = false
         }
 
@@ -204,7 +201,8 @@ final class AudioSessionKeepalive {
         }
     }
 
-    // MARK: - Alarm playback
+    // MARK: - Alarm playback (separate player so the silent keepalive loop continues
+    // unmodified while the alarm sound plays at full volume on top).
 
     private var alarmPlayer: AVAudioPlayer?
 
