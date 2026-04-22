@@ -1235,6 +1235,7 @@ The C.3 re-review validated all 16 C.1 fixes as effective and surfaced 5 *new* f
 | N1 | `UNNotificationSound(named:)` silently falls back to default sound when given `.m4a` — Apple only accepts `aiff/caf/wav`. Added `alarm.caf` (Int16 PCM, 10 s) to Resources; scheduler now references the CAF for the notification banner sound while in-app AVAudioPlayer keeps using `.m4a` (which it supports). Without this fix, the I5 backup notification would play the default iOS ping instead of the escalating alarm — load-bearing for the overnight-suspend scenario. |
 | N2 | `fire()` / `cancel()` did not clear a delivered backup notification, so iOS's 30-second notification sound could overlap the in-app alarm ramp when user opened the app mid-ping. Added `removeDeliveredNotifications(withIdentifiers:)` at `fire()` top and in `cancel()`. |
 | N3 | Detached `Task { [weak self] in ... }` for `scheduleBackupNotification` had no handle, so rapid reschedule could leave a stale request (Task's in-flight `add(request)` completes after `cancel()` removed the pending one). Task handle now stored in `backupScheduleTask` and cancelled in `cancel()`. |
+| N3 coda | Round-3 re-review noted `UNUserNotificationCenter.add` is not a cooperative cancellation point — `Task.cancel()` doesn't unwind it mid-flight. Added a post-resolve `Task.isCancelled` self-heal in `scheduleBackupNotification`: if the Task was cancelled while `add` was pending, re-remove the identifier we just registered. Closes the final race. |
 
 ### Won't-fix (this plan)
 

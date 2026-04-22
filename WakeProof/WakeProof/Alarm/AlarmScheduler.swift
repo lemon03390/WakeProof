@@ -153,6 +153,15 @@ final class AlarmScheduler {
         let request = UNNotificationRequest(identifier: backupNotificationIdentifier, content: content, trigger: trigger)
         do {
             try await notificationCenter.add(request)
+            // UNUserNotificationCenter.add is not a cooperative cancellation point — a cancel()
+            // that races with an in-flight add() will see the request land AFTER its
+            // removePendingNotificationRequests ran, leaving a stale pending request. Re-check
+            // Task.isCancelled post-resolve and self-heal.
+            if Task.isCancelled {
+                notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
+                logger.info("Backup notification self-healed after late-resolve cancel")
+                return
+            }
             logger.info("Backup notification scheduled for \(fireAt.ISO8601Format(), privacy: .public)")
         } catch {
             logger.error("Failed to schedule backup notification: \(error.localizedDescription, privacy: .public)")
