@@ -160,6 +160,37 @@ final class AudioSessionKeepalive {
         }
     }
 
+    // MARK: - Alarm playback (alarm-core Phase B)
+
+    private var alarmPlayer: AVAudioPlayer?
+
+    /// Begin looping an alarm sound at moderate initial volume. Caller drives escalation via setAlarmVolume.
+    func playAlarmSound(url: URL) {
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.numberOfLoops = -1
+            player.volume = 0.3
+            guard player.prepareToPlay(), player.play() else {
+                logger.error("Alarm player refused to start for \(url.lastPathComponent, privacy: .public)")
+                return
+            }
+            alarmPlayer = player
+            logger.info("Alarm sound started at \(Date().ISO8601Format(), privacy: .public)")
+        } catch {
+            logger.error("Failed to start alarm sound: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func stopAlarmSound() {
+        alarmPlayer?.stop()
+        alarmPlayer = nil
+        logger.info("Alarm sound stopped at \(Date().ISO8601Format(), privacy: .public)")
+    }
+
+    func setAlarmVolume(_ volume: Float) {
+        alarmPlayer?.volume = max(0.0, min(1.0, volume))
+    }
+
     enum KeepaliveError: Error {
         case missingSilenceAsset
         case playerRefusedToStart
