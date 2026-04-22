@@ -1222,3 +1222,27 @@ Adversarial-review on the full alarm-core diff (A.1–B.2) surfaced 18 findings:
 **Why:** Not actionable per the reviewer; the pattern is correct SwiftUI idiom for `@Observable` class owned by a scene (`@State` preserves the reference across redraws; the init runs exactly once per scene). Added a `///` doc comment at `AlarmScheduler.init()` recording the intent so future readers do not "fix" it.
 **How to apply:** none. Documented only.
 
+---
+
+## Appendix — Phase C.3 re-review disposition (2026-04-22)
+
+The C.3 re-review validated all 16 C.1 fixes as effective and surfaced 5 *new* findings introduced by the fixes themselves: 3 Important, 1 Medium, 1 Low. All 3 Important fixed in commit below; Medium and Low explicitly deferred.
+
+### Fixed
+
+| ID | Summary |
+|---|---|
+| N1 | `UNNotificationSound(named:)` silently falls back to default sound when given `.m4a` — Apple only accepts `aiff/caf/wav`. Added `alarm.caf` (Int16 PCM, 10 s) to Resources; scheduler now references the CAF for the notification banner sound while in-app AVAudioPlayer keeps using `.m4a` (which it supports). Without this fix, the I5 backup notification would play the default iOS ping instead of the escalating alarm — load-bearing for the overnight-suspend scenario. |
+| N2 | `fire()` / `cancel()` did not clear a delivered backup notification, so iOS's 30-second notification sound could overlap the in-app alarm ramp when user opened the app mid-ping. Added `removeDeliveredNotifications(withIdentifiers:)` at `fire()` top and in `cancel()`. |
+| N3 | Detached `Task { [weak self] in ... }` for `scheduleBackupNotification` had no handle, so rapid reschedule could leave a stale request (Task's in-flight `add(request)` completes after `cancel()` removed the pending one). Task handle now stored in `backupScheduleTask` and cancelled in `cancel()`. |
+
+### Won't-fix (this plan)
+
+**M5 — `composeTime(hour:minute:)` duplicated in `AlarmSchedulerView` and `AlarmRingingView`.**
+**Why:** Two sites only. `CLAUDE.md` explicitly says "wait for the third repetition before extracting — three similar lines is better than a premature abstraction." The C.2 simplify pass independently reached the same verdict ("exactly the premature abstraction CLAUDE.md warns against"). Will extract to `WakeWindow.composedFireDate(on:)` or similar if the third call site emerges in Day 3's vision-verification plan.
+**How to apply:** track the third occurrence; extract then.
+
+**L4 — `Documents/WakeAttempts/*.mov` is iCloud-synced by default.**
+**Why:** Deferred to Day 4 polish plan. Setting `.isExcludedFromBackupKey` on the `WakeAttempts` directory is a one-line change but belongs with broader iCloud behavior decisions (do we want *any* iCloud backup for attempts? what about the baseline photo?). Making the decision in isolation for just captured videos would create an inconsistency. Day 2 scope is "save to local storage"; the iCloud-sync side effect is real but not blocking demo functionality.
+**How to apply:** add a task to `docs/plans/polish-and-stretch.md` when that plan is written: "mark `Documents/WakeAttempts` as `isExcludedFromBackupKey` consistent with whatever iCloud policy we settle on for baseline photos."
+
