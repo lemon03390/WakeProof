@@ -16,13 +16,28 @@ import os
 @MainActor
 final class AlarmSoundEngine {
 
+    /// Max wall-clock duration the alarm is allowed to ring before we hard-stop.
+    /// Rationale: if the capture flow silently fails (extraction error, camera crash,
+    /// or the user simply ignores the alarm), the self-commitment promise of "can't be
+    /// bypassed" devolves into "device blares at full volume forever" which is worse.
+    /// The ceiling trades a correctness gap (user can wait out the alarm) for a
+    /// reliability floor (we never deadlock a demo device).
+    static let ringCeiling: Duration = .seconds(10 * 60)
+
     private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "soundEngine")
     private var escalationTask: Task<Void, Never>?
+    private var ceilingTask: Task<Void, Never>?
 
-    /// Begins the escalation loop. Caller is responsible for starting the actual
-    /// audio playback on AudioSessionKeepalive before calling this.
-    /// - Parameter setVolume: callback the engine invokes each ramp step.
-    func start(setVolume: @MainActor @escaping (Float) -> Void) {
+    /// Begins the escalation loop and arms the ring-ceiling safety net.
+    ///
+    /// - Parameters:
+    ///   - setVolume: invoked at each ramp step; caller maps this to the AVAudioPlayer.
+    ///   - onCeilingReached: invoked (on MainActor) if the alarm is still running at
+    ///     the ceiling. Expected to stop audio + clear ringing state + log a WakeAttempt.
+    func start(
+        setVolume: @MainActor @escaping (Float) -> Void,
+        onCeilingReached: @MainActor @escaping () -> Void
+    ) {
         stop()
         logger.info("Escalation started at \(Date().ISO8601Format(), privacy: .public)")
         escalationTask = Task { [weak self] in
@@ -40,11 +55,21 @@ final class AlarmSoundEngine {
                 try? await Task.sleep(for: .seconds(stepInterval))
             }
         }
+        ceilingTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.ringCeiling)
+            guard !Task.isCancelled, let self else { return }
+            await MainActor.run {
+                self.logger.warning("Ring ceiling reached (\(Self.ringCeiling, privacy: .public)) — forcing alarm stop")
+                onCeilingReached()
+            }
+        }
     }
 
     func stop() {
         escalationTask?.cancel()
         escalationTask = nil
+        ceilingTask?.cancel()
+        ceilingTask = nil
         logger.info("Escalation stopped")
     }
 }

@@ -6,30 +6,109 @@
 //  for the Opus 4.7 vision prompt on Day 3. For Day 2 we only persist both
 //  outputs locally; no API call yet.
 //
+//  On simulator: falls through to a stub that injects a dummy result so
+//  home-flow UI iteration doesn't dead-end at an unavailable camera. Device
+//  path is unaffected.
+//
 
 import AVFoundation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import os
 
 struct CameraCaptureResult {
     let stillImage: UIImage
     let videoURL: URL
 }
 
-struct CameraCaptureView: UIViewControllerRepresentable {
+enum CameraCaptureError: Error {
+    case noVideoURLReturned
+    case frameExtractionFailed(underlying: Error)
+}
+
+struct CameraCaptureView: View {
 
     let onCaptured: (CameraCaptureResult) -> Void
     let onCancelled: () -> Void
+    let onFailed: (CameraCaptureError) -> Void
+
+    var body: some View {
+        #if targetEnvironment(simulator)
+        SimulatorCameraStubView(onProceed: { onCaptured(Self.fakeResult()) },
+                                onCancel: onCancelled)
+        #else
+        DeviceCameraPicker(onCaptured: onCaptured,
+                           onCancelled: onCancelled,
+                           onFailed: onFailed)
+        #endif
+    }
+
+    #if targetEnvironment(simulator)
+    /// Synthetic result so simulator demos still exercise the persistence + dismiss path.
+    private static func fakeResult() -> CameraCaptureResult {
+        let size = CGSize(width: 400, height: 400)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor.systemGray.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
+        // Simulator scratch path. Real device uses tmp → AlarmRingingView copies into Documents.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simulator-stub-\(UUID().uuidString).mov")
+        FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
+        return CameraCaptureResult(stillImage: image, videoURL: url)
+    }
+    #endif
+}
+
+// MARK: - Simulator stub
+
+#if targetEnvironment(simulator)
+private struct SimulatorCameraStubView: View {
+    let onProceed: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 24) {
+                Image(systemName: "camera.metering.unknown")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.white.opacity(0.7))
+                Text("Simulator has no camera")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+                Text("Verification is stubbed here. On a real device this is the 2-second video capture screen.")
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+                VStack(spacing: 12) {
+                    Button("Inject stub verification") { onProceed() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Cancel", role: .cancel) { onCancel() }
+                        .foregroundStyle(.white)
+                }
+                .padding(.top, 16)
+            }
+        }
+    }
+}
+#endif
+
+// MARK: - Device camera
+
+#if !targetEnvironment(simulator)
+private struct DeviceCameraPicker: UIViewControllerRepresentable {
+
+    let onCaptured: (CameraCaptureResult) -> Void
+    let onCancelled: () -> Void
+    let onFailed: (CameraCaptureError) -> Void
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
-        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-            picker.sourceType = .camera
-            picker.cameraCaptureMode = .video
-        } else {
-            picker.sourceType = .photoLibrary
-        }
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .video
         picker.mediaTypes = [UTType.movie.identifier]
         picker.videoMaximumDuration = 2.0
         picker.videoQuality = .typeMedium
@@ -42,14 +121,17 @@ struct CameraCaptureView: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: CameraCaptureView
-        init(_ parent: CameraCaptureView) { self.parent = parent }
+        let parent: DeviceCameraPicker
+        private let logger = Logger(subsystem: "com.wakeproof.verification", category: "capture")
+
+        init(_ parent: DeviceCameraPicker) { self.parent = parent }
 
         func imagePickerController(_ picker: UIImagePickerController,
                                    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
             picker.dismiss(animated: true)
             guard let videoURL = info[.mediaURL] as? URL else {
-                parent.onCancelled()
+                logger.error("Picker finished with no mediaURL; cannot proceed")
+                parent.onFailed(.noVideoURLReturned)
                 return
             }
             Task { [weak self] in
@@ -60,7 +142,10 @@ struct CameraCaptureView: UIViewControllerRepresentable {
                         self.parent.onCaptured(CameraCaptureResult(stillImage: still, videoURL: videoURL))
                     }
                 } catch {
-                    await MainActor.run { self.parent.onCancelled() }
+                    self.logger.error("Middle-frame extraction failed: \(error.localizedDescription, privacy: .public)")
+                    await MainActor.run {
+                        self.parent.onFailed(.frameExtractionFailed(underlying: error))
+                    }
                 }
             }
         }
@@ -70,14 +155,19 @@ struct CameraCaptureView: UIViewControllerRepresentable {
             parent.onCancelled()
         }
 
+        /// Extract a frame at ~75% of the clip (never at t=0 for very-short videos — the early
+        /// pre-roll can be black or out-of-focus, which would poison the Day 3 vision call).
         private static func extractMiddleFrame(videoURL: URL) async throws -> UIImage {
             let asset = AVURLAsset(url: videoURL)
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             let duration = try await asset.load(.duration)
-            let midpoint = CMTime(seconds: duration.seconds / 2, preferredTimescale: duration.timescale)
-            let cgImage = try await generator.image(at: midpoint).image
+            let targetSeconds = max(0.3, duration.seconds * 0.75)
+            let timescale = max(duration.timescale, 600)
+            let target = CMTime(seconds: targetSeconds, preferredTimescale: timescale)
+            let cgImage = try await generator.image(at: target).image
             return UIImage(cgImage: cgImage)
         }
     }
 }
+#endif

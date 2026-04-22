@@ -28,6 +28,11 @@ struct AlarmSchedulerView: View {
                 Section {
                     Button("Save & schedule") { save() }
                         .disabled(endTime <= startTime)
+                    if endTime <= startTime {
+                        Text("End time must be later than start time. Cross-midnight windows aren't supported in this build.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 if let next = scheduler.nextFireAt {
