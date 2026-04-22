@@ -21,6 +21,7 @@ import Foundation
 import os
 
 @Observable
+@MainActor
 final class AudioSessionKeepalive {
 
     // MARK: - Public
@@ -54,21 +55,6 @@ final class AudioSessionKeepalive {
         }
 
         observeInterruptions()
-        scheduleUnattendedTestTone()
-    }
-
-    /// Schedule a one-shot audible test tone 30 minutes after launch. This is the
-    /// hands-off validation that the foreground audio session survives lock + background.
-    /// Weak self avoids the singleton retaining the Task across the sleep window.
-    private func scheduleUnattendedTestTone() {
-        Task { [weak self] in
-            let intervalSeconds: Double = 30 * 60
-            let firesAt = Date().addingTimeInterval(intervalSeconds)
-            self?.logger.info("30-min test tone scheduled for \(firesAt.ISO8601Format(), privacy: .public)")
-            try? await Task.sleep(for: .seconds(intervalSeconds))
-            self?.logger.info("30-min mark reached — firing test tone")
-            self?.triggerTestTone()
-        }
     }
 
     /// Stop the keepalive. Use when the user explicitly disables alarms.
@@ -129,25 +115,29 @@ final class AudioSessionKeepalive {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] note in
-            guard let self else { return }
-            guard let info = note.userInfo,
-                  let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
-                return
-            }
-            switch type {
-            case .began:
-                self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
-            case .ended:
-                self.logger.info("Audio session interruption ENDED — reactivating")
-                do {
-                    try AVAudioSession.sharedInstance().setActive(true, options: [])
-                    try self.startSilentLoop()
-                } catch {
-                    self.logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
+            // queue: .main guarantees this runs on the main thread; assumeIsolated bridges
+            // the non-isolated ObjC closure into our @MainActor Swift concurrency domain.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard let info = note.userInfo,
+                      let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+                    return
                 }
-            @unknown default:
-                break
+                switch type {
+                case .began:
+                    self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
+                case .ended:
+                    self.logger.info("Audio session interruption ENDED — reactivating")
+                    do {
+                        try AVAudioSession.sharedInstance().setActive(true, options: [])
+                        try self.startSilentLoop()
+                    } catch {
+                        self.logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
+                    }
+                @unknown default:
+                    break
+                }
             }
         }
 
@@ -156,7 +146,9 @@ final class AudioSessionKeepalive {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] _ in
-            self?.logger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+            MainActor.assumeIsolated {
+                self?.logger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+            }
         }
     }
 
@@ -165,7 +157,10 @@ final class AudioSessionKeepalive {
     private var alarmPlayer: AVAudioPlayer?
 
     /// Begin looping an alarm sound at moderate initial volume. Caller drives escalation via setAlarmVolume.
+    /// Re-entrant safe: stops any prior alarm player so two AVAudioPlayers cannot fight over the session.
     func playAlarmSound(url: URL) {
+        alarmPlayer?.stop()
+        alarmPlayer = nil
         do {
             let player = try AVAudioPlayer(contentsOf: url)
             player.numberOfLoops = -1
