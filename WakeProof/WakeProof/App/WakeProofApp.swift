@@ -131,6 +131,8 @@ struct RootView: View {
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(AlarmSoundEngine.self) private var soundEngine
+    @Environment(VisionVerifier.self) private var visionVerifier
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -159,6 +161,31 @@ struct RootView: View {
                 scheduler.reconcileAfterForeground()
             }
         }
+        .onChange(of: scheduler.phase) { oldPhase, newPhase in
+            switch (oldPhase, newPhase) {
+            case (.verifying, .idle):
+                // VERIFIED path — alarm stops, verifier state resets.
+                soundEngine.stop()
+                audioKeepalive.stopAlarmSound()
+                visionVerifier.resetForNewFire()
+            case (_, .verifying):
+                // Reduce but do not mute during verification; Decision 2 failure-mode table says
+                // a full mute makes the user think they already succeeded. Applies to both the
+                // initial .capturing → .verifying hop AND the anti-spoof re-capture → .verifying hop.
+                audioKeepalive.setAlarmVolume(0.2)
+            case (.verifying, .ringing):
+                // Verification failed (REJECTED or network error). Restore full volume and reset
+                // the verifier so a user-initiated "Prove you're awake" retry starts with a fresh
+                // two-attempt budget rather than carrying over the previous fire's state.
+                audioKeepalive.setAlarmVolume(1.0)
+                visionVerifier.resetForNewFire()
+            // .verifying → .antiSpoofPrompt intentionally has no volume change: the anti-spoof
+            // view keeps the ring volume at 0.2 (already reduced above) because the user is about
+            // to re-capture in seconds. Adding a restore-then-reduce cycle would be a noticeable click.
+            default:
+                break
+            }
+        }
     }
 
     @ViewBuilder
@@ -169,14 +196,27 @@ struct RootView: View {
         case .ringing:
             AlarmRingingView(onRequestCapture: { scheduler.beginCapturing() })
         case .capturing:
-            CameraCaptureFlow(onSuccess: { _ in
-                soundEngine.stop()
-                audioKeepalive.stopAlarmSound()
-                scheduler.stopRinging()
+            CameraCaptureFlow(onSuccess: { attempt in
+                // Hand the WakeAttempt to the verifier. Volume reduction + stop chain are
+                // driven by the .onChange(of: scheduler.phase) handler below (keyed off the
+                // .capturing → .verifying → .idle/.ringing transitions the verifier triggers).
+                Task { @MainActor in
+                    if let baseline = baselines.first {
+                        await visionVerifier.verify(
+                            attempt: attempt,
+                            baseline: baseline,
+                            context: modelContext
+                        )
+                    } else {
+                        // No baseline means onboarding incomplete. RootView gates on
+                        // baselines.isEmpty before showing the scheduler, so hitting this
+                        // branch is a programmer error — surface it rather than hang.
+                        scheduler.returnToRingingWith(error: "No baseline photo — re-run onboarding.")
+                    }
+                }
             })
         case .verifying:
-            // Stub for B.1 compile-unblock; B.3 wires VerifyingView (which needs VisionVerifier from A.4).
-            EmptyView()
+            VerifyingView()
         case .antiSpoofPrompt(let instruction):
             // Wired directly to the A.6 view; B.3 may refine with additional context later.
             AntiSpoofActionPromptView(

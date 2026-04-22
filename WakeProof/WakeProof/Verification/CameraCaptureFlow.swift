@@ -19,7 +19,7 @@ struct CameraCaptureFlow: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(AlarmScheduler.self) private var scheduler
 
-    let onSuccess: (CameraCaptureResult) -> Void
+    let onSuccess: (WakeAttempt) -> Void
 
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "captureFlow")
 
@@ -28,9 +28,9 @@ struct CameraCaptureFlow: View {
             onCaptured: { result in
                 Task { @MainActor in
                     do {
-                        let persisted = try await persist(result)
+                        let persistedAttempt = try await persist(result)
                         scheduler.markCaptureCompleted()
-                        onSuccess(persisted)
+                        onSuccess(persistedAttempt)
                     } catch let error as CaptureRejectionReason {
                         scheduler.returnToRingingWith(error: error.userMessage)
                     } catch {
@@ -72,7 +72,7 @@ struct CameraCaptureFlow: View {
     /// Persist the capture. Returns the result with `videoURL` rewritten to the Documents
     /// copy so downstream handlers use the durable path. Throws `CaptureRejectionReason` on
     /// any rejection so the caller leaves the alarm running for retry.
-    private func persist(_ result: CameraCaptureResult) async throws -> CameraCaptureResult {
+    private func persist(_ result: CameraCaptureResult) async throws -> WakeAttempt {
         try await validate(result.videoURL)
 
         let durableVideoURL: URL
@@ -106,7 +106,7 @@ struct CameraCaptureFlow: View {
             modelContext.rollback()
             throw CaptureRejectionReason.persistFailed(underlying: error)
         }
-        return CameraCaptureResult(stillImage: result.stillImage, videoURL: durableVideoURL)
+        return attempt
     }
 
     /// Reject obvious sham captures (zero-byte stub files, 0.1 s tap-and-cancel videos).
