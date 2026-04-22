@@ -183,9 +183,51 @@ Vincent's own voice. Authentic > polished. Practitioner + dev background gives c
 
 ---
 
+## Decision 8: Four-Layer Opus 4.7 Strategy
+
+### Why this decision exists
+The "Creative use of Opus 4.7" criterion is 25% of the hackathon score. A single `POST /v1/messages` vision call makes that section flatline — nothing a reviewer sees would prefer 4.7 over 4.6. Decision 6 (Managed Agents path) addressed only the $5k special prize; it did not guide the overall Opus 4.7 footprint. Decision 8 fills that gap.
+
+### The four layers (full detail in `docs/opus-4-7-strategy.md`)
+| Layer | Capability exploited | When it runs | Ties into |
+|---|---|---|---|
+| 1 Vision Verification | High-res vision + strict JSON + self-verification chain | Every alarm | Decision 2 |
+| 2 Persistent Memory | Memory Tool (file-system-based) | Read/write every verification | new |
+| 3 Overnight Agent | Managed Agents + Task Budgets + long-horizon agentic | Sleep window | Decision 6 |
+| 4 Weekly Coach | 1M context window for knowledge work | Weekly (mocked for demo) | new |
+
+### What this locks
+- Decision 2 (photo verification prompt) is extended: no downsizing, structured JSON, **self-verification chain of 3 spoofing methods** must be in the prompt.
+- Decision 6 (Managed Agents) becomes the commitment path, not the optional path. The Day 2 research is now about *how* to ship Layer 3, not *whether* to.
+- The previous Day 4 "pick A/B/C" choice is retired. Day 4 runs Layers 2 + 3 + 4 in sequence.
+- Demo video (Decision 7) structure gains a 30-second on-screen four-layer diagram segment with a verbatim key line.
+
+### Rejected alternatives
+| Alternative | Why rejected |
+|---|---|
+| Use only Layer 1 (single vision call) — Tier 1 in the strategy doc | Doesn't justify 4.7 over 4.6; flatlines 25% criterion |
+| Use Layers 1 + 4 only (vision + weekly insight) — Tier 2 | Competent but not creative-use; leaves $5k special prize on the table |
+| Layer every feature (memory in onboarding, agent for realtime, weekly coach for verification) | Over-complex, no clear capability-per-layer story for demo |
+
+### Cost exposure
+Layer 1 ~$0.013/verification (Decision 2). Layers 2–4 are bounded: Memory Tool payload is small; overnight agent is one task budget per night; weekly coach is one 1M-context call. Estimated total $2–5 credit burn per day per user. Non-constraint.
+
+### Fallback paths
+- Layer 3 fails to land by end of Day 4 → degrade to local periodic `BGProcessingTaskRequest` calling Messages API synchronously. Narrative holds; "long-horizon agentic" framing weakens.
+- Layer 4's 1M context is slow/unreliable for our data → chunk summarisation pass.
+- Layer 2 Memory Tool is read-only within a conversation → persist memory file to repo-local JSON and inject as system prompt context. Narrative holds; "agent memory" framing weakens to "prompt memory".
+
+### Demo key line (verbatim)
+> "WakeProof uses Opus 4.7 not as a single API call, but as four layers: real-time high-res vision for verification, persistent memory for personalization, an overnight managed agent for sleep analysis, and a weekly coaching loop. Each layer uses a capability that only 4.7 unlocks."
+
+---
+
 ## Open Questions (resolve during build)
 
 - [ ] Does Vincent have an Apple Watch with recent sleep data to demo HealthKit integration? If no, drop sleep summary from MVP.
 - [ ] Will Discord teammate channel produce a useful iOS-native partner before Day 2 evening cutoff?
 - [ ] Does the foreground audio session approach actually survive overnight on iOS 17/18 in 2026? (Apple may have tightened restrictions.)
 - [ ] Can demo recording capture the alarm sound clearly? Test mic placement.
+- [ ] Memory Tool: does it support write-during-agent-run, or is it read-only within a single conversation? (Decision 8 Layer 2 depends on this.)
+- [ ] Task Budgets: minimum/maximum duration; can we express 8h overnight cleanly, or do we need to chunk? (Decision 8 Layer 3 depends on this.)
+- [ ] Managed Agents pricing model: flat on budget or token-metered? Affects $500 burn estimate.

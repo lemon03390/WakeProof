@@ -54,10 +54,10 @@ Office hours daily 5–6 AM HKT — skip live, watch any recordings posted.
 
 ---
 
-### Day 2 — Apr 23 (Thu HKT) — Alarm Core
+### Day 2 — Apr 23 (Thu HKT) — Alarm Core + Opus 4.7 Strategy Research
 **Effective hours: ~10h**
 
-**Build:**
+**Build (alarm core):**
 - [ ] Alarm scheduling UI (set wake window: e.g., 6:30–7:00 AM)
 - [ ] Foreground audio session loop — silent audio at night, alarm sound when triggered
 - [ ] Alarm escalation logic (volume ramps, sound switches)
@@ -65,28 +65,30 @@ Office hours daily 5–6 AM HKT — skip live, watch any recordings posted.
 - [ ] Live photo / short video capture (2 sec)
 - [ ] Local storage of attempts
 
+**Research (Opus 4.7 feature inventory — see `docs/opus-4-7-strategy.md`):**
+- [ ] Read Anthropic docs on **Memory Tool** — confirm the write-during-agent-run pattern works; confirm file-system semantics; confirm how memory files are injected at call time (required for Layer 2 of the strategy)
+- [ ] Read Anthropic docs on **Task Budgets** — confirm minimum/maximum durations, pricing model, whether 8h overnight budget is expressible cleanly (required for Layer 3)
+- [ ] Read Anthropic docs on **Claude Managed Agents** — understand hosting constraints, invocation model, observability (required for Layer 3)
+
 **Late night (11 PM HKT):**
 - [ ] **MUST WATCH:** Michael Cohen Live Session on Claude Managed Agents
-- [ ] Decide: can WakeProof use a Managed Agent for overnight sleep analysis pipeline? If yes → unlocks $5k special prize path
+- [ ] **Layer 3 commit/back-out decision** (see `docs/opus-4-7-strategy.md` for criteria) — if Managed Agents setup looks achievable in Day 4's window, Day 4 goes all-in on Layer 3. Otherwise Layer 3 degrades to a periodic local task and Layer 4 (weekly coach) takes the demo spotlight.
 
-**End of day deliverable:** Set alarm → it rings on real device → camera opens → photo captured and saved. No verification yet.
+**End of day deliverable:** Set alarm → it rings on real device → camera opens → photo captured and saved. No verification yet. Opus 4.7 Layer 3 decision locked.
 
 **Discord:** Post day-1 progress in `#show-and-tell` or build-log channel. Short, with screenshot.
 
 ---
 
-### Day 3 — Apr 24 (Fri HKT) — Opus 4.7 Vision Verification
+### Day 3 — Apr 24 (Fri HKT) — Layer 1 (High-Res Vision + Self-Verification)
 **Effective hours: ~10h**
 
 **Build:**
-- [ ] Backend setup: Supabase project (or skip Supabase, use direct Claude API from app)
-- [ ] Photo upload pipeline (base64 to Claude API)
-- [ ] **Core verification prompt** for Opus 4.7 vision:
-  - Same location as baseline?
-  - Person standing / upright?
-  - Eyes open?
-  - Lighting suggests room lights are on?
-  - Confidence score
+- [ ] Photo upload pipeline (Claude API, direct from app — no Supabase unless sync becomes demo-relevant)
+- [ ] **Core verification prompt** — per `docs/opus-4-7-strategy.md` Layer 1. Key non-negotiables:
+  - [ ] Ship **full 3.75 MP / 2576px** photo (no downsizing). If this blows the token budget, investigate `image_detail=high` parameter before compressing.
+  - [ ] Structured JSON output with `same_location / person_upright / eyes_open / appears_alert / lighting_suggests_room_lit / confidence / reasoning / verdict`.
+  - [ ] **Self-verification chain** in prompt: instruct the model to list 3 plausible spoofing methods (photo-of-photo, mannequin, deepfake), verify each is ruled out, and only then return verdict. This is the 4.7-specific differentiator, not a nice-to-have.
 - [ ] UI states: "Verifying..." (alarm volume reduces but not muted), Pass (alarm stops), Fail (alarm continues + retry prompt)
 - [ ] Fail-handling: timeout fallback, retry counter
 - [ ] Random action prompt (anti-spoofing): "Blink twice", "Show your right hand" — verify via Opus 4.7
@@ -94,31 +96,41 @@ Office hours daily 5–6 AM HKT — skip live, watch any recordings posted.
 **Test loop:**
 - [ ] Test with 5 baseline scenarios (kitchen morning, kitchen night, bathroom, fake "in bed" attempt to verify rejection)
 - [ ] Tune prompt for accuracy and latency
+- [ ] Confirm self-verification chain catches a printed-photo attack (this is the demo money shot)
 
-**End of day deliverable:** End-to-end flow works on device. Set alarm → rings → photo → Opus 4.7 verifies → alarm stops or continues based on result.
+**End of day deliverable:** End-to-end flow works on device. Set alarm → rings → photo → Opus 4.7 verifies (high-res + self-verification chain) → alarm stops or continues based on result.
 
 **Discord:** Post a short video of the working core loop. This is your most shareable moment so far.
 
 ---
 
-### Day 4 — Apr 25 (Sat HKT) — Polish & Stretch Features
+### Day 4 — Apr 25 (Sat HKT) — Layer 2 + Layer 3 (Memory + Overnight Agent)
 **Effective hours: ~12h**
 
-**Morning — Polish:**
+The previous "pick one of Option A/B/C" branching has been pre-empted. Day 2's research + decision (see `docs/opus-4-7-strategy.md`) determines the split below. This plan assumes the Layer 3 commit went through; the fallback branch is at the end of the section.
+
+**Morning — Polish + Layer 2 (Memory Tool):**
 - [ ] HealthKit integration: read last night's sleep data (use Vincent's own Apple Watch if available)
 - [ ] Show "last night's sleep summary" on dismiss screen
 - [ ] Onboarding polish: clear copy, smooth transitions
 - [ ] Visual design pass (colors, typography, dark mode for nighttime)
 - [ ] Error states: no internet, API timeout, camera failure
+- [ ] **Layer 2 (Memory Tool):** add per-user memory file that Claude reads before verification and writes after. Seed with a few synthetic mornings so demo shows personalization kicking in on the first live run.
 
-**Afternoon — Stretch Picks (do max 1 of these):**
-- [ ] **Option A:** Mocked weekly analytics dashboard with Opus 4.7-generated insight (seed 14 days fake data, generate one good insight) — solid but expected
-- [ ] **Option B:** Claude Managed Agents integration — if Day 2 research confirmed feasibility, build a Managed Agent that processes the night's data + generates morning briefing — targets $5k special prize
-- [ ] **Option C:** Screen Time API "strict mode" — block other apps until verified — most impressive but highest risk
+**Afternoon — Layer 3 (Managed Agent overnight pipeline):**
+- [ ] Provision the Managed Agent (per Day 2 research)
+- [ ] Define the overnight task: ingest HealthKit scratchpad → analyze pattern against Layer 2 memory file → prepare morning briefing text → pre-compute tonight's expected wake-location lighting profile
+- [ ] Wire iOS app to trigger the agent at sleep-start and pull its prepared output at alarm-time
+- [ ] Verify with a simulated overnight run (compressed timeline, 10-min fake "night") that the agent produces useful output end-to-end — this is the live demo path for the video
 
-**Recommended:** Option B if doable, Option A if not.
+**Layer 4 (Weekly Coach) — mocked for demo, not live-scheduled:**
+- [ ] Seed 14 days of synthetic wake-attempt data (varied patterns — one strong pattern to make the insight land)
+- [ ] Single Opus 4.7 call with 1M context: give it all 14 days + memory file, ask for one tasteful coaching insight
+- [ ] Display in UI as "This week's insight" panel
 
-**End of day deliverable:** App feels like a real product. Has a "wow moment" beyond core flow.
+**End of day deliverable:** App feels like a real product. Four-layer Opus 4.7 stack is observable in demo flow.
+
+**Fallback if Layer 3 Managed Agent setup doesn't land:** degrade to a local periodic task (iOS `BGProcessingTaskRequest`) that calls the regular Messages API synchronously with the same overnight prompt. The "four layers" narrative still holds in the demo; only the "long-horizon agentic" framing weakens slightly.
 
 ---
 
@@ -142,8 +154,8 @@ Office hours daily 5–6 AM HKT — skip live, watch any recordings posted.
 **Demo video structure (3 min):**
 - 0:00–0:20 — Hook: "What if your alarm could tell when you're lying about being awake?"
 - 0:20–0:50 — The problem: snooze hell, dismissed alarms, real cost
-- 0:50–2:15 — Live demo on device: set alarm → ring → photo → Opus 4.7 verifies → result
-- 2:15–2:40 — How Opus 4.7 powers it (vision + reasoning + insight generation)
+- 0:50–2:10 — Live demo on device: set alarm → ring → photo → Opus 4.7 verifies → result
+- 2:10–2:40 — **Four-layer Opus 4.7 diagram** (see `docs/opus-4-7-strategy.md`): on-screen rectangles labelled Vision / Memory / Agent / Coach, each with its 4.7-specific capability tag. Narration uses the key line verbatim: *"WakeProof uses Opus 4.7 not as a single API call, but as four layers: real-time high-res vision for verification, persistent memory for personalization, an overnight managed agent for sleep analysis, and a weekly coaching loop. Each layer uses a capability that only 4.7 unlocks."*
 - 2:40–3:00 — Vision: this is a self-commitment device for any high-stakes habit, not just waking up
 
 **Evening — Written summary (100–200 words):**

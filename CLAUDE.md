@@ -173,8 +173,8 @@ This is a 5-day hackathon build — no XCTest suite is mandated, but:
 
 - `docs/build-plan.md` — day-by-day schedule (reference only, not hard rule; we can run ahead)
 - `docs/technical-decisions.md` — locked architectural decisions with rejected alternatives
+- `docs/opus-4-7-strategy.md` — the four-layer Opus 4.7 usage strategy; source of truth for how WakeProof scores the "creative use" 25% criterion
 - `docs/go-no-go-audio-test.md` — the foundation test that determines whether this whole approach works
 - `docs/info-plist-requirements.md` — every permission key + copy
-- `docs/vision-prompt.md` — the Opus 4.7 verification prompt (versioned)
+- `docs/vision-prompt.md` — the Opus 4.7 verification prompt (versioned; Day 3 artefact)
 - `docs/plans/` — implementation plans produced by `writing-plans` skill; phase gates are hard checkpoints
-- `CLAUDE-Reference.md` — universal engineering principles (source of the "Core development principles" section above)
