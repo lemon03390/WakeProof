@@ -6,11 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		D0000000000000F0E89907 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F0E877142F982881000CCE62 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F0E8771B2F982881000CCE62;
+			remoteInfo = WakeProof;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		D0000000000000F0E89901 /* WakeProofTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WakeProofTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F0E8771C2F982881000CCE62 /* WakeProof.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WakeProof.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		D0000000000000F0E89902 /* WakeProofTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WakeProofTests;
+			sourceTree = "<group>";
+		};
 		F0E8771E2F982881000CCE62 /* WakeProof */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = WakeProof;
@@ -19,6 +35,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		D0000000000000F0E89905 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F0E877192F982881000CCE62 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				F0E8771E2F982881000CCE62 /* WakeProof */,
+				D0000000000000F0E89902 /* WakeProofTests */,
 				F0E8771D2F982881000CCE62 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				F0E8771C2F982881000CCE62 /* WakeProof.app */,
+				D0000000000000F0E89901 /* WakeProofTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +73,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		D0000000000000F0E89903 /* WakeProofTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0000000000000F0E8990B /* Build configuration list for PBXNativeTarget "WakeProofTests" */;
+			buildPhases = (
+				D0000000000000F0E89904 /* Sources */,
+				D0000000000000F0E89905 /* Frameworks */,
+				D0000000000000F0E89906 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D0000000000000F0E89908 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D0000000000000F0E89902 /* WakeProofTests */,
+			);
+			name = WakeProofTests;
+			packageProductDependencies = (
+			);
+			productName = WakeProofTests;
+			productReference = D0000000000000F0E89901 /* WakeProofTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		F0E8771B2F982881000CCE62 /* WakeProof */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F0E877292F982883000CCE62 /* Build configuration list for PBXNativeTarget "WakeProof" */;
@@ -80,6 +128,10 @@
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
+					D0000000000000F0E89903 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = F0E8771B2F982881000CCE62;
+					};
 					F0E8771B2F982881000CCE62 = {
 						CreatedOnToolsVersion = 26.4;
 					};
@@ -100,11 +152,19 @@
 			projectRoot = "";
 			targets = (
 				F0E8771B2F982881000CCE62 /* WakeProof */,
+				D0000000000000F0E89903 /* WakeProofTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		D0000000000000F0E89906 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F0E8771A2F982881000CCE62 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -115,6 +175,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		D0000000000000F0E89904 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F0E877182F982881000CCE62 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -124,7 +191,59 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		D0000000000000F0E89908 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F0E8771B2F982881000CCE62 /* WakeProof */;
+			targetProxy = D0000000000000F0E89907 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		D0000000000000F0E89909 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = JD337PDHDV;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vincent.WakeProofTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WakeProof.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WakeProof";
+			};
+			name = Debug;
+		};
+		D0000000000000F0E8990A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = JD337PDHDV;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vincent.WakeProofTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WakeProof.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WakeProof";
+			};
+			name = Release;
+		};
 		F0E877272F982883000CCE62 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -305,6 +424,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		D0000000000000F0E8990B /* Build configuration list for PBXNativeTarget "WakeProofTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0000000000000F0E89909 /* Debug */,
+				D0000000000000F0E8990A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		F0E877172F982881000CCE62 /* Build configuration list for PBXProject "WakeProof" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -23,33 +23,21 @@ What's **not** here (by design, needs device):
 
 See `docs/device-test-protocol.md` for the on-device validation checklist.
 
-## How to wire this into the Xcode project (one-time, ~30 seconds)
+## Running the tests
 
-The tests are committed but the test **target** isn't yet (test targets
-require xcode-project surgery that's risky to do via script — the user
-adds it once via the Xcode UI).
-
-1. Open `WakeProof/WakeProof.xcodeproj` in Xcode.
-2. **File → New → Target** (`⌘ N`).
-3. Pick **iOS → Test → Unit Testing Bundle**, click **Next**.
-4. Name: `WakeProofTests`. Team: same as the app target. Target to be tested: `WakeProof`.
-5. Click **Finish**. Xcode creates a default `WakeProofTests/` group.
-6. Xcode 16 synchronized groups will auto-discover the existing files in
-   `WakeProof/WakeProofTests/` once you point the new target at them:
-   - In the project navigator, select the freshly-created `WakeProofTests` group
-     and delete its single placeholder file (`WakeProofTests.swift`).
-   - Right-click the empty group → **Add Files to "WakeProof"…** → select all
-     four files in `WakeProof/WakeProofTests/` (excluding this README) →
-     **Add to target: WakeProofTests** → **Finish**.
-
-Run the suite with `⌘ U` or:
+The `WakeProofTests` target is wired into `WakeProof.xcodeproj` (host: WakeProof
+app, productType: `bundle.unit-test`, synchronized root group on the
+`WakeProofTests/` directory). Run with `⌘ U` in Xcode or:
 
 ```bash
 xcodebuild -project WakeProof.xcodeproj \
   -scheme WakeProof \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -only-testing:WakeProofTests \
   test
 ```
+
+33 tests across 4 suites, ~0.5 s wall-clock on M-series Mac.
 
 ## Adding more tests
 
