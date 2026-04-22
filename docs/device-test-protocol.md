@@ -198,3 +198,37 @@ audit trail is fiction.
 - Background fetch interaction with Low Power Mode.
 
 These are deferred to extended testing windows past the hackathon scope.
+
+---
+
+## Vision verification scenarios (Day 3 Layer 1)
+
+Exercise all five `docs/test-scenarios.md` fixtures on the primary test device. Each scenario is a
+full alarm fire — schedule for `now + 2 minutes`, follow the capture flow through verification, and
+confirm the expected verdict. Budget: ~$0.013 per scenario.
+
+### Test 9 — Scenario 1 (kitchen/morning/alert → VERIFIED)
+Follow `docs/test-scenarios.md` Scenario 1. Pass: verdict VERIFIED, alarm stops, WakeAttempt row
+committed with `verdict = "VERIFIED"`.
+
+### Test 10 — Scenario 2 (kitchen/night/alert → VERIFIED or RETRY)
+Follow Scenario 2. Pass: verdict is not REJECTED; RETRY resolves after anti-spoof re-capture.
+
+### Test 11 — Scenario 3 (bathroom/groggy → RETRY)
+Follow Scenario 3. Pass: anti-spoof prompt displayed exactly once; second verification resolves
+deterministically.
+
+### Test 12 — Scenario 4 (printed photo → REJECTED) — DEMO MONEY SHOT
+Follow Scenario 4. Pass: verdict REJECTED with spoofing reasoning; alarm keeps ringing; banner
+surfaces the rejection reason.
+
+### Test 13 — Scenario 5 (user in bed → REJECTED)
+Follow Scenario 5. Pass: verdict REJECTED; alarm continues; banner mentions posture or location.
+
+### Pass criteria (aggregate)
+- All five verdicts match expected. Scenarios 2–3 have tolerance for alternate-path routing
+  (RETRY-then-pass is valid for both).
+- No console `fault` entries under `com.wakeproof.verification`.
+- WakeAttempt count increments by exactly one per scenario (RETRY path does NOT create a duplicate;
+  the same row is updated in place).
+- Total API credit burn matches expectation (~$0.065 per full pass) in Anthropic console.
