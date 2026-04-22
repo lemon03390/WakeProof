@@ -48,17 +48,32 @@ struct WakeProofApp: App {
 
 struct RootView: View {
     @Query private var baselines: [BaselinePhoto]
+    @Environment(AudioSessionKeepalive.self) private var audioKeepalive
 
     var body: some View {
         if baselines.isEmpty {
             OnboardingFlowView()
         } else {
-            // HomeView not yet built — placeholder until Day 2.
+            // HomeView not yet built — placeholder for the foundation-hardening plan.
             VStack(spacing: 16) {
                 Text("WakeProof")
                     .font(.largeTitle).bold()
-                Text("Onboarded. Home screen arrives Day 2.")
+                Text("Onboarded. Home screen arrives in a later plan.")
                     .foregroundStyle(.secondary)
+
+                #if DEBUG
+                Button("Fire test tone") {
+                    audioKeepalive.triggerTestTone()
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 24)
+
+                Text("DEBUG only — proves the audio path can sound through silent mode before the 30-min unattended test.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                #endif
             }
             .padding()
         }

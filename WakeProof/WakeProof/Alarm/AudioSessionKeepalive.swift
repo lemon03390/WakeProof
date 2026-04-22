@@ -54,6 +54,21 @@ final class AudioSessionKeepalive {
         }
 
         observeInterruptions()
+        scheduleUnattendedTestTone()
+    }
+
+    /// Schedule a one-shot audible test tone 30 minutes after launch. This is the
+    /// hands-off validation that the foreground audio session survives lock + background.
+    /// Weak self avoids the singleton retaining the Task across the sleep window.
+    private func scheduleUnattendedTestTone() {
+        Task { [weak self] in
+            let intervalSeconds: Double = 30 * 60
+            let firesAt = Date().addingTimeInterval(intervalSeconds)
+            self?.logger.info("30-min test tone scheduled for \(firesAt.ISO8601Format(), privacy: .public)")
+            try? await Task.sleep(for: .seconds(intervalSeconds))
+            self?.logger.info("30-min mark reached — firing test tone")
+            self?.triggerTestTone()
+        }
     }
 
     /// Stop the keepalive. Use when the user explicitly disables alarms.
