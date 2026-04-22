@@ -153,14 +153,8 @@ private struct WelcomeStep: View {
             Text("You'll set a contract with yourself: tomorrow morning, you will be out of bed at your designated wake-location. The only way to silence the alarm is to prove it. Claude Opus 4.7 is the witness.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white.opacity(0.75))
-            Button(action: advance) {
-                Text("Begin")
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.white)
-                    .foregroundStyle(.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
+            Button("Begin", action: advance)
+                .buttonStyle(.primaryWhite)
         }
     }
 }
@@ -203,12 +197,8 @@ private struct PermissionStep: View {
             VStack(spacing: 12) {
                 Button(action: tap) {
                     Text(isWorking ? "Working..." : action)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.white)
-                        .foregroundStyle(.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
+                .buttonStyle(.primaryWhite)
                 .disabled(isWorking)
 
                 if deniedNotice != nil, let url = URL(string: UIApplication.openSettingsURLString) {

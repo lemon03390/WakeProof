@@ -61,22 +61,14 @@ struct BaselinePhotoView: View {
                 showCamera = true
             } label: {
                 Text(capturedImage == nil ? "Capture baseline" : "Retake")
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.white)
-                    .foregroundStyle(.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
             }
+            .buttonStyle(.primaryWhite)
 
             if capturedImage != nil {
                 Button(action: handleSave) {
                     Text("Save & continue")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(locationLabel.isEmpty ? Color.white.opacity(0.4) : Color.green)
-                        .foregroundStyle(.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
+                .buttonStyle(locationLabel.isEmpty ? .primaryMuted : .primaryConfirm)
                 .disabled(locationLabel.isEmpty)
             }
         }

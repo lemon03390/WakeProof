@@ -51,19 +51,10 @@ struct AlarmRingingView: View {
 
                 Spacer()
 
-                Button {
-                    onRequestCapture()
-                } label: {
-                    Text("Prove you're awake")
-                        .font(.title3.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.white)
-                        .foregroundStyle(.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                }
-                .padding(.horizontal)
-                .padding(.bottom, 32)
+                Button("Prove you're awake", action: onRequestCapture)
+                    .buttonStyle(.primaryAlarm)
+                    .padding(.horizontal)
+                    .padding(.bottom, 32)
             }
         }
     }
