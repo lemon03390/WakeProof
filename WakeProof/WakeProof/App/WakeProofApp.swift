@@ -2,8 +2,8 @@
 //  WakeProofApp.swift
 //  WakeProof
 //
-//  App entry point. Wires up the top-level state containers and decides whether to show
-//  onboarding or the main app based on whether a baseline photo exists.
+//  App entry point. Wires up the top-level state containers and decides whether
+//  to show onboarding, the alarm scheduler home, or the ringing alarm modal.
 //
 
 import SwiftData
@@ -12,11 +12,11 @@ import SwiftUI
 @main
 struct WakeProofApp: App {
 
-    // Shared long-lived services
     @State private var permissions = PermissionsManager()
     @State private var audioKeepalive = AudioSessionKeepalive.shared
+    @State private var scheduler = AlarmScheduler()
+    @State private var soundEngine = AlarmSoundEngine()
 
-    // SwiftData container
     let modelContainer: ModelContainer
 
     init() {
@@ -34,10 +34,18 @@ struct WakeProofApp: App {
             RootView()
                 .environment(permissions)
                 .environment(audioKeepalive)
+                .environment(scheduler)
+                .environment(soundEngine)
                 .task {
-                    // Activate audio keepalive on first launch.
-                    // Day 1 GO/NO-GO depends on this surviving background.
                     audioKeepalive.start()
+                    scheduler.onFire = { [audioKeepalive, soundEngine] in
+                        guard let url = Bundle.main.url(forResource: "alarm", withExtension: "m4a") else { return }
+                        audioKeepalive.playAlarmSound(url: url)
+                        soundEngine.start { volume in
+                            audioKeepalive.setAlarmVolume(volume)
+                        }
+                    }
+                    scheduler.scheduleNextFireIfEnabled()
                 }
         }
         .modelContainer(modelContainer)
@@ -48,34 +56,27 @@ struct WakeProofApp: App {
 
 struct RootView: View {
     @Query private var baselines: [BaselinePhoto]
+    @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
+    @Environment(AlarmSoundEngine.self) private var soundEngine
 
     var body: some View {
-        if baselines.isEmpty {
-            OnboardingFlowView()
-        } else {
-            // HomeView not yet built — placeholder for the foundation-hardening plan.
-            VStack(spacing: 16) {
-                Text("WakeProof")
-                    .font(.largeTitle).bold()
-                Text("Onboarded. Home screen arrives in a later plan.")
-                    .foregroundStyle(.secondary)
-
-                #if DEBUG
-                Button("Fire test tone") {
-                    audioKeepalive.triggerTestTone()
-                }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 24)
-
-                Text("DEBUG only — proves the audio path can sound through silent mode before the 30-min unattended test.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                #endif
+        Group {
+            if baselines.isEmpty {
+                OnboardingFlowView()
+            } else {
+                AlarmSchedulerView()
             }
-            .padding()
+        }
+        .fullScreenCover(isPresented: .init(
+            get: { scheduler.isRinging },
+            set: { if !$0 { scheduler.stopRinging() } }
+        )) {
+            AlarmRingingView(onVerificationCaptured: { _ in
+                soundEngine.stop()
+                audioKeepalive.stopAlarmSound()
+                scheduler.stopRinging()
+            })
         }
     }
 }
