@@ -108,8 +108,12 @@ private struct DeviceCameraPicker: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
         picker.sourceType = .camera
-        picker.cameraCaptureMode = .video
+        // mediaTypes MUST be set before cameraCaptureMode. UIImagePickerController validates
+        // cameraCaptureMode against the currently-configured mediaTypes; setting .video while
+        // mediaTypes is still the default [public.image] throws NSInvalidArgumentException
+        // "cameraCaptureMode 1 not available because mediaTypes does contain public.movie".
         picker.mediaTypes = [UTType.movie.identifier]
+        picker.cameraCaptureMode = .video
         picker.videoMaximumDuration = 2.0
         picker.videoQuality = .typeMedium
         picker.delegate = context.coordinator
