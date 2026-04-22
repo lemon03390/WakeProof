@@ -88,19 +88,24 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        Group {
+        ZStack {
             if baselines.isEmpty {
                 OnboardingFlowView()
             } else {
                 AlarmSchedulerView()
             }
+
+            // Alarm overlay sits on top of whatever's below. Using a ZStack instead of a
+            // fullScreenCover because on iOS 26, swapping cover content mid-presentation
+            // (ringing → capturing) triggers SwiftUI's dismiss+re-present cycle, during
+            // which the cover's binding setter fires false and cascades through stopRinging.
+            // ZStack keeps everything in a single stable view tree; content swaps are free.
+            if scheduler.phase != .idle {
+                alarmPhaseContent
+                    .transition(.opacity)
+            }
         }
-        .fullScreenCover(isPresented: .init(
-            get: { scheduler.phase != .idle },
-            set: { if !$0 { scheduler.stopRinging() } }
-        )) {
-            alarmPhaseContent
-        }
+        .animation(.easeInOut(duration: 0.2), value: scheduler.phase)
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 // Catches the case where Task.sleep was suspended past its fire time overnight
@@ -110,9 +115,6 @@ struct RootView: View {
         }
     }
 
-    /// Single cover swaps content by phase. Nested fullScreenCover inside AlarmRingingView
-    /// triggered SwiftUI's outer-cover binding setter during the inner presentation, which
-    /// called `stopRinging()` and dismissed the whole thing.
     @ViewBuilder
     private var alarmPhaseContent: some View {
         switch scheduler.phase {
