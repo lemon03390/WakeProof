@@ -85,6 +85,7 @@ struct RootView: View {
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(AlarmSoundEngine.self) private var soundEngine
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -103,6 +104,13 @@ struct RootView: View {
                 audioKeepalive.stopAlarmSound()
                 scheduler.stopRinging()
             })
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                // Catches the case where Task.sleep was suspended past its fire time overnight
+                // — the backup notification will have beeped; this promotes the in-app ringing UI.
+                scheduler.reconcileAfterForeground()
+            }
         }
     }
 }

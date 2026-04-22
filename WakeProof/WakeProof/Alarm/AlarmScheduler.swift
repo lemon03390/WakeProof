@@ -2,14 +2,19 @@
 //  AlarmScheduler.swift
 //  WakeProof
 //
-//  Owns the user's wake-window configuration and the Task that fires the
-//  alarm at window-start. Does not play audio directly — `playAlarmSound`
-//  is a method on AudioSessionKeepalive added in Phase B. This separation
-//  keeps the audio-critical file append-only during Phase 6.
+//  Owns the user's wake-window configuration and fires the alarm at window-start.
+//  Two-path fire mechanism for overnight reliability:
+//    1. Task.sleep while the process is alive (AudioSessionKeepalive keeps us alive)
+//    2. UNCalendarNotificationTrigger as a belt-and-suspenders backup so a suspended
+//       process still gets the user's attention.
+//  Whichever path wins, fire() converges on a single entry point (guarded against
+//  double-fire). Audio playback is owned by AudioSessionKeepalive via the onFire
+//  closure wired at the app root — this file stays audio-agnostic.
 //
 
 import Foundation
 import Observation
+import UserNotifications
 import os
 
 @Observable
@@ -30,6 +35,8 @@ final class AlarmScheduler {
     // MARK: - Private
 
     private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "scheduler")
+    private let notificationCenter = UNUserNotificationCenter.current()
+    private let backupNotificationIdentifier = "com.wakeproof.alarm.next"
     private var fireTask: Task<Void, Never>?
 
     init() {
@@ -59,12 +66,14 @@ final class AlarmScheduler {
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.fire() }
         }
+        Task { [weak self] in await self?.scheduleBackupNotification(fireAt: fireAt) }
     }
 
     func cancel() {
         fireTask?.cancel()
         fireTask = nil
         nextFireAt = nil
+        notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
     }
 
     /// Demo-friendly manual trigger. Used by DEBUG "Fire now" button and by tests.
@@ -76,6 +85,18 @@ final class AlarmScheduler {
     func stopRinging() {
         isRinging = false
         logger.info("Ringing cleared")
+    }
+
+    /// Call from SwiftUI `.onChange(of: scenePhase)` when the app becomes active.
+    /// Catches the case where Task.sleep was suspended past its fire time (OS froze the
+    /// process overnight) — the backup notification will have beeped, but our in-process
+    /// ringing UI needs a nudge to catch up.
+    func reconcileAfterForeground() {
+        guard !isRinging, let expected = nextFireAt else { return }
+        if Date() >= expected {
+            logger.warning("Foreground reconcile: Task.sleep missed fire by \(Date().timeIntervalSince(expected), privacy: .public)s — firing now")
+            fire()
+        }
     }
 
     // MARK: - Private
@@ -91,7 +112,33 @@ final class AlarmScheduler {
         logger.info("Alarm firing at \(Date().ISO8601Format(), privacy: .public)")
         isRinging = true
         onFire?()
-        // Re-schedule the next day's fire. Cheap: this just sets up another Task.sleep.
+        // Re-schedule the next day's fire. Cheap: this just sets up another Task.sleep
+        // plus a backup notification for tomorrow.
         scheduleNextFireIfEnabled()
+    }
+
+    private func scheduleBackupNotification(fireAt: Date) async {
+        let settings = await notificationCenter.notificationSettings()
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+            logger.warning("Backup notification skipped — notifications not authorized (status=\(settings.authorizationStatus.rawValue, privacy: .public))")
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "WakeProof"
+        content.body = "Time to prove you're awake."
+        content.sound = UNNotificationSound(named: UNNotificationSoundName("alarm.m4a"))
+        content.interruptionLevel = .timeSensitive
+        let triggerComponents = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: fireAt
+        )
+        let trigger = UNCalendarNotificationTrigger(dateMatching: triggerComponents, repeats: false)
+        let request = UNNotificationRequest(identifier: backupNotificationIdentifier, content: content, trigger: trigger)
+        do {
+            try await notificationCenter.add(request)
+            logger.info("Backup notification scheduled for \(fireAt.ISO8601Format(), privacy: .public)")
+        } catch {
+            logger.error("Failed to schedule backup notification: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
