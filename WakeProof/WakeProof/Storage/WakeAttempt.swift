@@ -19,6 +19,12 @@ final class WakeAttempt {
     var retryCount: Int
     var dismissedAt: Date?
 
+    // Additive fields for Day 2 alarm-core. SwiftData treats new optional @Attribute
+    // properties as a lightweight migration — the on-device store is preserved.
+    var videoPath: String?
+    var triggeredWindowStart: Date?
+    var triggeredWindowEnd: Date?
+
     init(scheduledAt: Date) {
         self.scheduledAt = scheduledAt
         self.retryCount = 0
