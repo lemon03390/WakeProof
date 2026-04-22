@@ -17,6 +17,7 @@ struct WakeProofApp: App {
     @State private var audioKeepalive = AudioSessionKeepalive.shared
     @State private var scheduler = AlarmScheduler()
     @State private var soundEngine = AlarmSoundEngine()
+    @State private var visionVerifier = VisionVerifier()
     /// One-shot guard so .task running on every RootView re-mount (multi-scene attach,
     /// SwiftUI identity churn) doesn't repeatedly cancel + reschedule the fire pipeline.
     @State private var didBootstrap = false
@@ -45,6 +46,7 @@ struct WakeProofApp: App {
                 .environment(audioKeepalive)
                 .environment(scheduler)
                 .environment(soundEngine)
+                .environment(visionVerifier)
                 .task { bootstrapIfNeeded() }
         }
         .modelContainer(modelContainer)
@@ -55,6 +57,10 @@ struct WakeProofApp: App {
         didBootstrap = true
         audioKeepalive.start()
         wireSchedulerCallbacks()
+        // Late-bind the scheduler into the verifier so VisionVerifier.verify(...) can drive
+        // phase transitions on VERIFIED / REJECTED / RETRY without the verifier holding a
+        // non-optional scheduler reference (which would couple it at test-time).
+        visionVerifier.scheduler = scheduler
         // Recover any fire that started in a prior session but never resolved (force-quit
         // during ring). Persists an UNRESOLVED WakeAttempt so the audit trail records the
         // missed wake instead of silently forgetting it.
