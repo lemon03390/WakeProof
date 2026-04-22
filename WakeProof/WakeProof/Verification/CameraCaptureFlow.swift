@@ -8,6 +8,7 @@
 //  failure back to AlarmRingingView via scheduler.returnToRingingWith(error:).
 //
 
+import AVFoundation
 import Foundation
 import SwiftData
 import SwiftUI
@@ -25,10 +26,17 @@ struct CameraCaptureFlow: View {
     var body: some View {
         CameraCaptureView(
             onCaptured: { result in
-                if let persisted = persist(result) {
-                    onSuccess(persisted)
-                } else {
-                    scheduler.returnToRingingWith(error: "Save failed — tap \"Prove you're awake\" to retry.")
+                Task { @MainActor in
+                    do {
+                        let persisted = try await persist(result)
+                        scheduler.markCaptureCompleted()
+                        onSuccess(persisted)
+                    } catch let error as CaptureRejectionReason {
+                        scheduler.returnToRingingWith(error: error.userMessage)
+                    } catch {
+                        logger.error("Persist threw unexpected error: \(error.localizedDescription, privacy: .public)")
+                        scheduler.returnToRingingWith(error: "Save failed — tap \"Prove you're awake\" to retry.")
+                    }
                 }
             },
             onCancelled: {
@@ -36,60 +44,112 @@ struct CameraCaptureFlow: View {
             },
             onFailed: { error in
                 logger.error("Capture failed: \(String(describing: error), privacy: .public)")
-                scheduler.returnToRingingWith(error: "Capture failed. Try again — good light, face visible.")
+                scheduler.returnToRingingWith(error: error.errorDescription ?? "Capture failed. Try again.")
             }
         )
     }
 
-    /// Persist the capture. Returns the result with `videoURL` rewritten to the Documents
-    /// copy so downstream handlers use the durable path. Returns nil on save failure so
-    /// the caller leaves the alarm running for retry.
-    private func persist(_ result: CameraCaptureResult) -> CameraCaptureResult? {
-        let durableVideoURL: URL
-        do {
-            durableVideoURL = try copyVideoToDocuments(result.videoURL)
-        } catch {
-            logger.error("Failed to copy captured video to Documents: \(error.localizedDescription, privacy: .public)")
-            return nil
+    /// Reasons we may reject a capture before counting it as a verification attempt. Surfaces
+    /// the user-facing message so the caller can route it to `returnToRingingWith(error:)`.
+    private enum CaptureRejectionReason: LocalizedError {
+        case videoTooShort(seconds: Double)
+        case videoTooSmall(bytes: Int)
+        case copyFailed(underlying: Error)
+        case persistFailed(underlying: Error)
+
+        var userMessage: String {
+            switch self {
+            case .videoTooShort: return "That clip was too short. Hold the record button for at least 1 second."
+            case .videoTooSmall: return "That capture was empty. Make sure the camera saw something — tap \"Prove you're awake\" to retry."
+            case .copyFailed:    return "Couldn't save the clip. Storage may be full — tap \"Prove you're awake\" to retry."
+            case .persistFailed: return "Save failed — tap \"Prove you're awake\" to retry."
+            }
         }
 
-        let attempt = WakeAttempt(scheduledAt: scheduler.nextFireAt ?? .now)
+        var errorDescription: String? { userMessage }
+    }
+
+    /// Persist the capture. Returns the result with `videoURL` rewritten to the Documents
+    /// copy so downstream handlers use the durable path. Throws `CaptureRejectionReason` on
+    /// any rejection so the caller leaves the alarm running for retry.
+    private func persist(_ result: CameraCaptureResult) async throws -> CameraCaptureResult {
+        try await validate(result.videoURL)
+
+        let durableVideoURL: URL
+        do {
+            durableVideoURL = try moveVideoToDocuments(result.videoURL)
+        } catch {
+            logger.error("Failed to move captured video to Documents: \(error.localizedDescription, privacy: .public)")
+            throw CaptureRejectionReason.copyFailed(underlying: error)
+        }
+
+        // lastFireAt is the canonical "when did this alarm actually fire" — using nextFireAt
+        // would record tomorrow's date because fire() pre-schedules the next morning before
+        // the user finishes capturing.
+        let scheduledFor = scheduler.lastFireAt ?? scheduler.nextFireAt ?? .now
+        let attempt = WakeAttempt(scheduledAt: scheduledFor)
         attempt.capturedAt = .now
         attempt.imageData = result.stillImage.jpegData(compressionQuality: 0.9)
         attempt.videoPath = durableVideoURL.lastPathComponent // relative to WakeAttempts/
-        attempt.triggeredWindowStart = composeTime(hour: scheduler.window.startHour,
-                                                   minute: scheduler.window.startMinute)
-        attempt.triggeredWindowEnd = composeTime(hour: scheduler.window.endHour,
-                                                 minute: scheduler.window.endMinute)
+        attempt.triggeredWindowStart = WakeWindow.composeTime(hour: scheduler.window.startHour,
+                                                              minute: scheduler.window.startMinute)
+        attempt.triggeredWindowEnd = WakeWindow.composeTime(hour: scheduler.window.endHour,
+                                                            minute: scheduler.window.endMinute)
+        attempt.verdict = WakeAttempt.Verdict.captured.rawValue
 
         modelContext.insert(attempt)
         do {
             try modelContext.save()
-            logger.info("WakeAttempt persisted at \(attempt.capturedAt?.ISO8601Format() ?? "?", privacy: .public)")
+            logger.info("WakeAttempt persisted at \(attempt.capturedAt?.ISO8601Format() ?? "?", privacy: .public) (scheduledFor=\(scheduledFor.ISO8601Format(), privacy: .public))")
         } catch {
             logger.error("SwiftData save failed for WakeAttempt: \(error.localizedDescription, privacy: .public)")
             modelContext.rollback()
-            return nil
+            throw CaptureRejectionReason.persistFailed(underlying: error)
         }
         return CameraCaptureResult(stillImage: result.stillImage, videoURL: durableVideoURL)
     }
 
+    /// Reject obvious sham captures (zero-byte simulator stubs that escape into prod, accidental
+    /// 0.1 s tap-and-cancel videos). Skipped on simulator so the GO/NO-GO + UI flow stub still
+    /// works end-to-end.
+    private func validate(_ videoURL: URL) async throws {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        let fm = FileManager.default
+        let attrs = try? fm.attributesOfItem(atPath: videoURL.path)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        guard size >= 10_000 else {
+            logger.warning("Validation rejected: file size \(size) < 10000")
+            throw CaptureRejectionReason.videoTooSmall(bytes: size)
+        }
+        let asset = AVURLAsset(url: videoURL)
+        let duration = (try? await asset.load(.duration)) ?? .zero
+        guard duration.seconds >= 1.0 else {
+            logger.warning("Validation rejected: duration \(duration.seconds) < 1.0")
+            throw CaptureRejectionReason.videoTooShort(seconds: duration.seconds)
+        }
+        #endif
+    }
+
     /// Move the picker's tmp video into `Documents/WakeAttempts/` so it survives relaunch.
     /// iOS purges NSTemporaryDirectory aggressively; storing the tmp path in SwiftData
-    /// would mean the video is a dead reference by morning.
-    private func copyVideoToDocuments(_ tmpURL: URL) throws -> URL {
+    /// would mean the video is a dead reference by morning. Move (not copy) avoids leaving
+    /// a duplicate behind that the system would have to clean up.
+    private func moveVideoToDocuments(_ tmpURL: URL) throws -> URL {
         let fm = FileManager.default
         let docsURL = try fm.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let dir = docsURL.appendingPathComponent("WakeAttempts", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let dest = dir.appendingPathComponent("\(UUID().uuidString).mov")
-        try fm.copyItem(at: tmpURL, to: dest)
+        do {
+            try fm.moveItem(at: tmpURL, to: dest)
+        } catch {
+            // Fall back to copy if move fails (e.g., cross-volume): better to preserve the
+            // capture than to drop it because of an unexpected filesystem layout.
+            try fm.copyItem(at: tmpURL, to: dest)
+        }
         return dest
     }
 
-    private func composeTime(hour: Int, minute: Int) -> Date {
-        var c = Calendar.current.dateComponents([.year, .month, .day], from: .now)
-        c.hour = hour; c.minute = minute
-        return Calendar.current.date(from: c) ?? .now
-    }
 }

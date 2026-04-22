@@ -15,13 +15,15 @@ import UserNotifications
 import os
 
 @Observable
+@MainActor
 final class PermissionsManager {
 
     enum Status {
         case notRequested
         case granted
         case denied
-        case undetermined // iOS said "not yet", treat as retry-able
+        case undetermined // iOS said "not yet" or did not disclose; treat as retry-able
+        case failed       // a non-user-driven failure (hardware, transient API error)
     }
 
     // MARK: - Observable state
@@ -37,17 +39,6 @@ final class PermissionsManager {
     private let logger = Logger(subsystem: "com.wakeproof.permissions", category: "manager")
     private let healthStore = HKHealthStore()
     private let motionManager = CMMotionActivityManager()
-
-    // MARK: - Public entry points
-
-    /// Request all permissions in the order onboarding screens call them.
-    /// Stops at the first hard-requirement denial so the UI can handle it.
-    func requestAllSequentially() async {
-        await requestNotifications()
-        await requestCamera()
-        await requestHealthKit()
-        await requestMotion()
-    }
 
     // MARK: - Individual requests
 
@@ -91,21 +82,28 @@ final class PermissionsManager {
             logger.info("HealthKit unavailable on this device")
             return
         }
-        let readTypes: Set<HKObjectType> = [
-            HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!,
-            HKObjectType.quantityType(forIdentifier: .heartRate)!,
-            HKObjectType.quantityType(forIdentifier: .restingHeartRate)!
-        ]
+        // Apple's HKObjectType identifier lookups are documented to never return nil for
+        // these constants, but force-unwrapping violates the project no-! rule and would
+        // crash on any future renamed identifier.
+        guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis),
+              let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate),
+              let restingHRType = HKObjectType.quantityType(forIdentifier: .restingHeartRate) else {
+            logger.error("HealthKit type identifiers not resolvable on this OS — marking failed")
+            healthKit = .failed
+            return
+        }
+        let readTypes: Set<HKObjectType> = [sleepType, heartRateType, restingHRType]
         do {
             try await healthStore.requestAuthorization(toShare: [], read: readTypes)
-            // HealthKit does not tell us whether the user said yes — we can only
-            // detect "did they see the sheet?" via status of a specific type.
-            let sleepStatus = healthStore.authorizationStatus(for: HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!)
-            healthKit = (sleepStatus == .sharingAuthorized) ? .granted : .denied
-            logger.info("HealthKit sleep read authorization: \(String(describing: sleepStatus.rawValue), privacy: .public)")
+            // HealthKit deliberately does not disclose read-only authorization status — for
+            // reads, `authorizationStatus(for:)` always returns `.sharingDenied` regardless of
+            // the user's actual choice. Treating that as `.denied` was a UX lie. Map to
+            // `.undetermined` instead and rely on first-read success/failure to disambiguate.
+            healthKit = .undetermined
+            logger.info("HealthKit auth dialog completed; read status undisclosed by API")
         } catch {
             logger.error("HealthKit request failed: \(error.localizedDescription, privacy: .public)")
-            healthKit = .denied
+            healthKit = .failed
         }
     }
 
@@ -115,20 +113,31 @@ final class PermissionsManager {
             return
         }
         // CMMotionActivityManager has no explicit request API — a first query triggers the prompt.
-        await withCheckedContinuation { continuation in
-            motionManager.queryActivityStarting(from: Date().addingTimeInterval(-60), to: Date(), to: .main) { _, error in
-                if let error = error as NSError? {
-                    if error.domain == CMErrorDomain,
-                       error.code == Int(CMErrorMotionActivityNotAuthorized.rawValue) {
-                        self.motion = .denied
-                    } else {
-                        self.motion = .denied
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            motionManager.queryActivityStarting(from: Date().addingTimeInterval(-60), to: Date(), to: .main) { [weak self] _, error in
+                // queue: .main hands the callback to OperationQueue.main, which executes on
+                // the main thread; bridge into MainActor isolation so observable state mutations
+                // happen on the same actor that PermissionsManager itself is bound to.
+                MainActor.assumeIsolated {
+                    guard let self else {
+                        continuation.resume()
+                        return
                     }
-                } else {
-                    self.motion = .granted
+                    if let error = error as NSError? {
+                        if error.domain == CMErrorDomain,
+                           error.code == Int(CMErrorMotionActivityNotAuthorized.rawValue) {
+                            self.motion = .denied
+                            self.logger.info("Motion: user denied authorization")
+                        } else {
+                            self.motion = .failed
+                            self.logger.error("Motion query failed (non-auth): domain=\(error.domain, privacy: .public) code=\(error.code, privacy: .public) — \(error.localizedDescription, privacy: .public)")
+                        }
+                    } else {
+                        self.motion = .granted
+                        self.logger.info("Motion: granted")
+                    }
+                    continuation.resume()
                 }
-                self.logger.info("Motion: \(String(describing: self.motion), privacy: .public)")
-                continuation.resume()
             }
         }
     }

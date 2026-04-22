@@ -38,12 +38,18 @@ struct WakeWindow: Codable, Equatable {
         }
     }
 
-    func save(to defaults: UserDefaults = .standard) {
+    /// Returns true on success. Callers should surface failure to the user — silently
+    /// failing here means the alarm tomorrow morning fires at the previous window's time
+    /// (or never, if the user just enabled it for the first time).
+    @discardableResult
+    func save(to defaults: UserDefaults = .standard) -> Bool {
         do {
             let data = try JSONEncoder().encode(self)
             defaults.set(data, forKey: Self.key)
+            return true
         } catch {
             Self.logger.error("Failed to encode WakeWindow: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -62,5 +68,15 @@ struct WakeWindow: Codable, Equatable {
             repeatedTimePolicy: .first,
             direction: .forward
         )
+    }
+
+    /// Build a Date for today at the given hour/minute. Falls back to `now` if the
+    /// calendar can't materialize the components — practically unreachable for valid
+    /// hour/minute values, but the optional return is the calendar's contract.
+    static func composeTime(hour: Int, minute: Int, calendar: Calendar = .current, now: Date = .now) -> Date {
+        var c = calendar.dateComponents([.year, .month, .day], from: now)
+        c.hour = hour
+        c.minute = minute
+        return calendar.date(from: c) ?? now
     }
 }

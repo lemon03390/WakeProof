@@ -29,9 +29,20 @@ struct CameraCaptureResult {
     let videoURL: URL
 }
 
-enum CameraCaptureError: Error {
+enum CameraCaptureError: LocalizedError {
+    case cameraUnavailable
     case noVideoURLReturned
     case frameExtractionFailed(underlying: Error)
+    case dismissedWhileBackgrounded
+
+    var errorDescription: String? {
+        switch self {
+        case .cameraUnavailable:         return "Camera unavailable. Try restarting WakeProof."
+        case .dismissedWhileBackgrounded: return "Camera closed while app was backgrounded. Try again."
+        case .frameExtractionFailed:     return "Couldn't read the captured video. Try again — good light, face visible."
+        case .noVideoURLReturned:        return "Capture failed. Try again."
+        }
+    }
 }
 
 struct CameraCaptureView: View {
@@ -129,21 +140,62 @@ private struct DeviceCameraPicker: UIViewControllerRepresentable {
 /// Plain UIViewController that hosts UIImagePickerController as a MODAL presentation.
 /// Required because UIImagePickerController must be presented, not embedded — embedding
 /// initializes the camera framework but never renders the picker UI.
+///
+/// Callbacks are non-optional with logger-fallback defaults. An unwired callback would
+/// silently strand the alarm in `.capturing`; an explicit logger fallback at least leaves
+/// a trail in Console.app.
 @MainActor
 private final class CameraHostController: UIViewController,
                                            UIImagePickerControllerDelegate,
                                            UINavigationControllerDelegate {
 
-    var onCaptured: ((CameraCaptureResult) -> Void)?
-    var onCancelled: (() -> Void)?
-    var onFailed: ((CameraCaptureError) -> Void)?
+    var onCaptured: (CameraCaptureResult) -> Void = { _ in
+        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+            .fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
+    }
+    var onCancelled: () -> Void = {
+        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+            .fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
+    }
+    var onFailed: (CameraCaptureError) -> Void = { _ in
+        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+            .fault("onFailed fired but no handler wired — alarm will hang in .capturing")
+    }
 
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
     private var didPresentPicker = false
+    private var hasReportedTerminalOutcome = false
+    /// Set when the picker handed us a video and we kicked off frame extraction. While true,
+    /// the foreground-return handler must NOT report `.dismissedWhileBackgrounded` — the
+    /// picker is gone because it dismissed itself on success, not because the app died in
+    /// the background. Without this flag, a foreground race could pre-empt the success path.
+    private var processingCaptureResult = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        // Detect the case where iOS dismissed the picker while the app was backgrounded
+        // (rare for full-screen modal but documented). Without this, the host VC remains on
+        // screen with a black void and no callback fires — user must force-quit to escape.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleAppDidBecomeActive() {
+        guard didPresentPicker,
+              presentedViewController == nil,
+              !hasReportedTerminalOutcome,
+              !processingCaptureResult else { return }
+        logger.warning("App returned to foreground but picker is gone — reporting dismissedWhileBackgrounded")
+        reportTerminal { onFailed(.dismissedWhileBackgrounded) }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -156,7 +208,7 @@ private final class CameraHostController: UIViewController,
     private func presentPicker() {
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
             logger.error("Camera source unavailable on this device — reporting failure")
-            onFailed?(.noVideoURLReturned)
+            reportTerminal { onFailed(.cameraUnavailable) }
             return
         }
         let picker = UIImagePickerController()
@@ -168,10 +220,27 @@ private final class CameraHostController: UIViewController,
         picker.cameraCaptureMode = .video
         picker.videoMaximumDuration = 2.0
         picker.videoQuality = .typeMedium
+        // Prefer rear, but fall back to front if the device exposes only one camera (older
+        // iPad models, hardware fault). Setting an unavailable device throws.
+        if UIImagePickerController.isCameraDeviceAvailable(.rear) {
+            picker.cameraDevice = .rear
+        } else if UIImagePickerController.isCameraDeviceAvailable(.front) {
+            picker.cameraDevice = .front
+        } else {
+            logger.error("Neither rear nor front camera available")
+            reportTerminal { onFailed(.cameraUnavailable) }
+            return
+        }
         picker.delegate = self
         picker.modalPresentationStyle = .fullScreen
-        logger.info("Presenting UIImagePickerController modally")
+        logger.info("Presenting UIImagePickerController modally with cameraDevice=\(String(describing: picker.cameraDevice), privacy: .public)")
         present(picker, animated: true)
+    }
+
+    private func reportTerminal(_ block: () -> Void) {
+        guard !hasReportedTerminalOutcome else { return }
+        hasReportedTerminalOutcome = true
+        block()
     }
 
     // MARK: - UIImagePickerControllerDelegate
@@ -181,24 +250,29 @@ private final class CameraHostController: UIViewController,
         picker.dismiss(animated: true)
         guard let videoURL = info[.mediaURL] as? URL else {
             logger.error("Picker finished with no mediaURL; cannot proceed")
-            onFailed?(.noVideoURLReturned)
+            reportTerminal { onFailed(.noVideoURLReturned) }
             return
         }
+        // Mark in-flight BEFORE the await so handleAppDidBecomeActive (which can fire any
+        // time after picker.dismiss) doesn't pre-empt our success path with a false
+        // "dismissedWhileBackgrounded".
+        processingCaptureResult = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.processingCaptureResult = false }
             do {
                 let still = try await Self.extractMiddleFrame(videoURL: videoURL)
-                self.onCaptured?(CameraCaptureResult(stillImage: still, videoURL: videoURL))
+                self.reportTerminal { self.onCaptured(CameraCaptureResult(stillImage: still, videoURL: videoURL)) }
             } catch {
                 self.logger.error("Middle-frame extraction failed: \(error.localizedDescription, privacy: .public)")
-                self.onFailed?(.frameExtractionFailed(underlying: error))
+                self.reportTerminal { self.onFailed(.frameExtractionFailed(underlying: error)) }
             }
         }
     }
 
     func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
         picker.dismiss(animated: true)
-        onCancelled?()
+        reportTerminal { onCancelled() }
     }
 
     /// Extract a frame at ~75% of the clip (never at t=0 for very-short videos — the early

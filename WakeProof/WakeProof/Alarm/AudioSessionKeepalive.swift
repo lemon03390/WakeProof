@@ -6,9 +6,6 @@
 //  audio at alarm time even with the screen locked. This is the Alarmy-style
 //  workaround for iOS's lack of a public Alarm API.
 //
-//  This file exists primarily for the Day 1 GO/NO-GO test. If the test fails,
-//  the whole architecture pivots to a Shortcuts-based hybrid approach.
-//
 //  Requires:
 //  - Background Modes > Audio, AirPlay, and Picture in Picture enabled in target capabilities
 //  - A silent audio loop file (1–30s of silence) in the bundle, named "silence.m4a"
@@ -32,8 +29,13 @@ final class AudioSessionKeepalive {
     private(set) var lastError: String?
 
     /// Activate the audio session with .playback category and start looping silence.
-    /// Call this on app launch, before any alarm schedule is relevant.
+    /// Idempotent — repeated calls (SwiftUI `.task` re-firing on view re-mount) won't
+    /// stack interruption observers or duplicate the silent player.
     func start() {
+        if isActive {
+            logger.debug("start() called while already active — no-op")
+            return
+        }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(
@@ -61,6 +63,7 @@ final class AudioSessionKeepalive {
     func stop() {
         silentPlayer?.stop()
         silentPlayer = nil
+        removeInterruptionObservers()
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         } catch {
@@ -69,33 +72,40 @@ final class AudioSessionKeepalive {
         isActive = false
     }
 
-    /// Play a short audible tone — used for the Day 1 GO/NO-GO test to confirm
-    /// the audio session survived a long background period.
-    func triggerTestTone() {
-        guard let url = Bundle.main.url(forResource: "test-tone", withExtension: "m4a") else {
-            logger.error("test-tone.m4a missing from bundle")
-            return
-        }
-        do {
-            let player = try AVAudioPlayer(contentsOf: url)
-            player.volume = 1.0
-            player.play()
-            testTonePlayer = player // retain
-            logger.info("Test tone triggered at \(Date().ISO8601Format(), privacy: .public)")
-        } catch {
-            logger.error("Failed to play test tone: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
     // MARK: - Private
 
     private let logger = Logger(subsystem: "com.wakeproof.audio", category: "session")
+    /// Nonisolated mirror of `logger` for closures that need to log from non-MainActor
+    /// contexts without forcing a MainActor.assumeIsolated bridge (e.g. the route-change
+    /// observer, which does no state mutation). Logger is thread-safe by Apple's contract.
+    private nonisolated static let nonisolatedLogger = Logger(subsystem: "com.wakeproof.audio", category: "session")
     private var silentPlayer: AVAudioPlayer?
-    private var testTonePlayer: AVAudioPlayer?
+    /// Tokens returned by NotificationCenter.addObserver(forName:...). Stored so
+    /// `removeInterruptionObservers()` can clean them up — without this, every `start()`
+    /// call appended a new closure, and on `interruption.ended` ALL of them would run
+    /// concurrently re-activating the session.
+    private var interruptionObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
 
-    private init() {}
+    /// nonisolated so the static-let lazy initializer (which runs on the first-touch
+    /// thread, not necessarily MainActor) can construct the singleton without a hop.
+    /// The init body must do no MainActor-state mutation — the `precondition` enforces
+    /// the implicit contract that the first access is from the main thread (i.e., from
+    /// `@main` App.init), so any future addition of mutating work here will trap loudly
+    /// rather than data-race silently.
+    nonisolated private init() {
+        precondition(Thread.isMainThread,
+                     "AudioSessionKeepalive.shared first accessed off main thread — "
+                     + "the init contract requires main-thread first-touch.")
+    }
 
     private func startSilentLoop() throws {
+        // Stop and release any prior silent player before allocating a new one. Without this,
+        // interruption.ended → handleInterruptionEnded → startSilentLoop spawns a new player
+        // while the old one is still mid-loop; ARC eventually reclaims the old, but for a
+        // moment two players contend for the audio session and a non-determinism slips in.
+        silentPlayer?.stop()
+        silentPlayer = nil
         guard let url = Bundle.main.url(forResource: "silence", withExtension: "m4a") else {
             throw KeepaliveError.missingSilenceAsset
         }
@@ -110,13 +120,17 @@ final class AudioSessionKeepalive {
     }
 
     private func observeInterruptions() {
-        NotificationCenter.default.addObserver(
+        // Defensive: if observers were somehow already installed, drop them first.
+        removeInterruptionObservers()
+        interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] note in
-            // queue: .main guarantees this runs on the main thread; assumeIsolated bridges
-            // the non-isolated ObjC closure into our @MainActor Swift concurrency domain.
+            // queue: .main delivers on the main thread; MainActor.assumeIsolated bridges
+            // that into the @MainActor concurrency domain. This is correct on iOS 17+ where
+            // OperationQueue.main runs on the MainActor's executor, but the precondition
+            // would trap if Apple ever decoupled them. Acceptable for this scope.
             MainActor.assumeIsolated {
                 guard let self else { return }
                 guard let info = note.userInfo,
@@ -128,31 +142,69 @@ final class AudioSessionKeepalive {
                 case .began:
                     self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
                 case .ended:
-                    self.logger.info("Audio session interruption ENDED — reactivating")
-                    do {
-                        try AVAudioSession.sharedInstance().setActive(true, options: [])
-                        try self.startSilentLoop()
-                    } catch {
-                        self.logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
-                    }
+                    self.handleInterruptionEnded(info: info)
                 @unknown default:
                     break
                 }
             }
         }
 
-        NotificationCenter.default.addObserver(
+        routeChangeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.logger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+        ) { _ in
+            // No state mutation here — just log. Use the nonisolated static logger so we
+            // don't depend on the OperationQueue.main ↔ MainActor executor identity.
+            Self.nonisolatedLogger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+        }
+    }
+
+    private func removeInterruptionObservers() {
+        if let token = interruptionObserver {
+            NotificationCenter.default.removeObserver(token)
+            interruptionObserver = nil
+        }
+        if let token = routeChangeObserver {
+            NotificationCenter.default.removeObserver(token)
+            routeChangeObserver = nil
+        }
+    }
+
+    private func handleInterruptionEnded(info: [AnyHashable: Any]) {
+        logger.info("Audio session interruption ENDED — reactivating")
+        do {
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
+            try startSilentLoop()
+        } catch {
+            logger.error("Failed to reactivate after interruption: \(error.localizedDescription, privacy: .public)")
+            lastError = "Audio session interruption recovery failed: \(error.localizedDescription)"
+            // F4 stops + nils silentPlayer at the top of startSilentLoop; if startSilentLoop
+            // throws partway, we land here with silentPlayer == nil and isActive still
+            // claiming true. That mismatch poisons future "should I re-arm?" reads — flip
+            // isActive to false so the keepalive's observable state matches reality.
+            isActive = false
+        }
+
+        // Alarm-class audio: the alarm player is paused by iOS during interruption.began.
+        // We resume unconditionally (regardless of the system's ShouldResume hint) because
+        // a sleeper letting their alarm get silenced by an incoming nightstand call is the
+        // exact loophole the contract exists to close. We still log the system's hint so we
+        // can tell the difference in Console when debugging.
+        let optionsRaw = (info[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
+        let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+        if let player = alarmPlayer, !player.isPlaying {
+            logger.info("Resuming alarm player (system shouldResume hint=\(options.contains(.shouldResume), privacy: .public))")
+            if player.play() {
+                logger.info("Alarm player resumed after interruption.ended")
+            } else {
+                logger.error("Alarm player refused to resume after interruption.ended")
+                lastError = "Alarm couldn't resume after interruption."
             }
         }
     }
 
-    // MARK: - Alarm playback (alarm-core Phase B)
+    // MARK: - Alarm playback
 
     private var alarmPlayer: AVAudioPlayer?
 
@@ -166,13 +218,18 @@ final class AudioSessionKeepalive {
             player.numberOfLoops = -1
             player.volume = 0.3
             guard player.prepareToPlay(), player.play() else {
-                logger.error("Alarm player refused to start for \(url.lastPathComponent, privacy: .public)")
+                let msg = "Alarm player refused to start for \(url.lastPathComponent)"
+                logger.error("\(msg, privacy: .public)")
+                lastError = msg
                 return
             }
             alarmPlayer = player
+            lastError = nil
             logger.info("Alarm sound started at \(Date().ISO8601Format(), privacy: .public)")
         } catch {
-            logger.error("Failed to start alarm sound: \(error.localizedDescription, privacy: .public)")
+            let msg = "Failed to start alarm sound: \(error.localizedDescription)"
+            logger.error("\(msg, privacy: .public)")
+            lastError = msg
         }
     }
 

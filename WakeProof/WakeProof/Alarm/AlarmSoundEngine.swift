@@ -50,13 +50,30 @@ final class AlarmSoundEngine {
                 guard !Task.isCancelled else { return }
                 let t = Float(i) / Float(steps)
                 let v = startVolume + (endVolume - startVolume) * t
+                // Re-check cancellation right before the actor hop — without this, a stop()
+                // racing the loop can let setVolume run on a player the keepalive already cleared.
+                guard !Task.isCancelled else { return }
                 await MainActor.run { setVolume(v) }
                 self?.logger.debug("Ramp step \(i, privacy: .public) → volume \(v, privacy: .public)")
-                try? await Task.sleep(for: .seconds(stepInterval))
+                do {
+                    try await Task.sleep(for: .seconds(stepInterval))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self?.logger.warning("Ramp sleep threw non-cancellation: \(error.localizedDescription, privacy: .public) — aborting ramp")
+                    return
+                }
             }
         }
         ceilingTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.ringCeiling)
+            do {
+                try await Task.sleep(for: Self.ringCeiling)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.logger.warning("Ceiling sleep threw non-cancellation: \(error.localizedDescription, privacy: .public)")
+                return
+            }
             guard !Task.isCancelled, let self else { return }
             await MainActor.run {
                 self.logger.warning("Ring ceiling reached (\(Self.ringCeiling, privacy: .public)) — forcing alarm stop")

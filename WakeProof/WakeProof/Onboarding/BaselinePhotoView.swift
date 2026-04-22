@@ -9,6 +9,7 @@
 
 import AVFoundation
 import SwiftUI
+import os
 
 struct BaselinePhotoView: View {
 
@@ -17,6 +18,9 @@ struct BaselinePhotoView: View {
     @State private var locationLabel: String = ""
     @State private var capturedImage: UIImage?
     @State private var showCamera: Bool = false
+    @State private var errorMessage: String?
+
+    private let logger = Logger(subsystem: "com.wakeproof.onboarding", category: "baseline")
 
     var body: some View {
         VStack(spacing: 20) {
@@ -39,6 +43,13 @@ struct BaselinePhotoView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
             }
 
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
             TextField("Label this spot", text: $locationLabel)
                 .textFieldStyle(.roundedBorder)
                 .foregroundStyle(.black)
@@ -46,6 +57,7 @@ struct BaselinePhotoView: View {
             Spacer()
 
             Button {
+                errorMessage = nil
                 showCamera = true
             } label: {
                 Text(capturedImage == nil ? "Capture baseline" : "Retake")
@@ -57,15 +69,7 @@ struct BaselinePhotoView: View {
             }
 
             if capturedImage != nil {
-                Button {
-                    guard let image = capturedImage,
-                          let data = image.jpegData(compressionQuality: 0.8) else { return }
-                    let photo = BaselinePhoto(
-                        imageData: data,
-                        locationLabel: locationLabel.isEmpty ? "wake-location" : locationLabel
-                    )
-                    onCaptured(photo)
-                } label: {
+                Button(action: handleSave) {
                     Text("Save & continue")
                         .frame(maxWidth: .infinity)
                         .padding()
@@ -77,8 +81,36 @@ struct BaselinePhotoView: View {
             }
         }
         .sheet(isPresented: $showCamera) {
-            CameraPicker(image: $capturedImage)
+            CameraPicker(
+                image: $capturedImage,
+                onCameraUnavailable: {
+                    showCamera = false
+                    // The trust contract requires a live capture; falling back to the Photo
+                    // Library would let the user pick a pre-existing photo of any location,
+                    // collapsing the verification premise. Hard-fail with explanation.
+                    errorMessage = "WakeProof needs a working camera to capture your wake-location. The trust contract relies on a live photo — Photos library imports aren't accepted."
+                    logger.warning("Baseline capture aborted — camera unavailable on device")
+                }
+            )
         }
+    }
+
+    private func handleSave() {
+        guard let image = capturedImage else {
+            errorMessage = "Capture a baseline photo before continuing."
+            logger.warning("Save tapped with no captured image")
+            return
+        }
+        guard let data = image.jpegData(compressionQuality: 0.8) else {
+            errorMessage = "Couldn't encode the photo. Try retaking."
+            logger.error("JPEG encoding returned nil for baseline image")
+            return
+        }
+        let photo = BaselinePhoto(
+            imageData: data,
+            locationLabel: locationLabel.isEmpty ? "wake-location" : locationLabel
+        )
+        onCaptured(photo)
     }
 }
 
@@ -86,17 +118,31 @@ struct BaselinePhotoView: View {
 
 struct CameraPicker: UIViewControllerRepresentable {
     @Binding var image: UIImage?
+    let onCameraUnavailable: () -> Void
     @Environment(\.dismiss) private var dismiss
 
-    func makeUIViewController(context: Context) -> UIImagePickerController {
+    func makeUIViewController(context: Context) -> UIViewController {
+        // Camera availability must be checked before constructing UIImagePickerController:
+        // setting sourceType=.camera on a device without a camera throws. We return a placeholder
+        // VC and signal the parent so it can dismiss the sheet and show its error banner.
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            DispatchQueue.main.async { onCameraUnavailable() }
+            return UIViewController()
+        }
         let picker = UIImagePickerController()
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
-        picker.cameraDevice = .rear
+        picker.sourceType = .camera
+        // Same rear-then-front fallback as CameraCaptureView.CameraHostController; setting
+        // an unavailable cameraDevice throws.
+        if UIImagePickerController.isCameraDeviceAvailable(.rear) {
+            picker.cameraDevice = .rear
+        } else if UIImagePickerController.isCameraDeviceAvailable(.front) {
+            picker.cameraDevice = .front
+        }
         picker.delegate = context.coordinator
         return picker
     }
 
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)

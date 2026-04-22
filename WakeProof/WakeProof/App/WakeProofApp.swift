@@ -46,6 +46,11 @@ struct WakeProofApp: App {
                 .task {
                     audioKeepalive.start()
                     wireSchedulerOnFireIfNeeded()
+                    wireSchedulerPersistenceIfNeeded()
+                    // Recover any fire that started in a prior session but never resolved
+                    // (force-quit during ring). Persists an UNRESOLVED WakeAttempt so the
+                    // audit trail records the missed wake instead of silently forgetting it.
+                    scheduler.recoverUnresolvedFireIfNeeded()
                     scheduler.scheduleNextFireIfEnabled()
                 }
         }
@@ -57,9 +62,10 @@ struct WakeProofApp: App {
     /// missing-asset conditions instead of silently returning.
     private func wireSchedulerOnFireIfNeeded() {
         guard scheduler.onFire == nil else { return }
-        scheduler.onFire = { [audioKeepalive, soundEngine, logger] in
+        scheduler.onFire = { [audioKeepalive, soundEngine, logger, weak scheduler] firedAt in
+            logger.info("onFire received fire at \(firedAt.ISO8601Format(), privacy: .public)")
             guard let url = Bundle.main.url(forResource: "alarm", withExtension: "m4a") else {
-                logger.error("alarm.m4a missing from bundle — alarm will fire silently")
+                logger.fault("alarm.m4a missing from bundle — alarm will fire silently")
                 return
             }
             audioKeepalive.playAlarmSound(url: url)
@@ -67,13 +73,38 @@ struct WakeProofApp: App {
                 setVolume: { volume in
                     audioKeepalive.setAlarmVolume(volume)
                 },
-                onCeilingReached: { [scheduler] in
+                onCeilingReached: { [weak soundEngine, weak audioKeepalive, weak scheduler, logger] in
+                    // weak everywhere: prior strong-capture of `scheduler` formed a retain
+                    // cycle through scheduler.onFire → closure → scheduler.
                     logger.warning("Hard-stopping alarm at ring ceiling")
-                    soundEngine.stop()
-                    audioKeepalive.stopAlarmSound()
-                    scheduler.stopRinging()
+                    soundEngine?.stop()
+                    audioKeepalive?.stopAlarmSound()
+                    // handleRingCeiling persists a TIMEOUT WakeAttempt then calls stopRinging
+                    // for us — keeps the audit-trail bookkeeping in one place.
+                    scheduler?.handleRingCeiling()
                 }
             )
+        }
+    }
+
+    /// Wire the WakeAttempt persistence closure that the scheduler invokes on TIMEOUT and
+    /// UNRESOLVED paths. The model context is captured here so AlarmScheduler stays free of
+    /// SwiftData coupling.
+    private func wireSchedulerPersistenceIfNeeded() {
+        guard scheduler.persistAttempt == nil else { return }
+        let context = modelContainer.mainContext
+        scheduler.persistAttempt = { [logger] verdict, scheduledFor in
+            let attempt = WakeAttempt(scheduledAt: scheduledFor)
+            attempt.verdict = verdict.rawValue
+            attempt.dismissedAt = .now
+            context.insert(attempt)
+            do {
+                try context.save()
+                logger.info("Persisted WakeAttempt verdict=\(verdict.rawValue, privacy: .public) scheduledFor=\(scheduledFor.ISO8601Format(), privacy: .public)")
+            } catch {
+                logger.error("Failed to persist WakeAttempt verdict=\(verdict.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                context.rollback()
+            }
         }
     }
 }
