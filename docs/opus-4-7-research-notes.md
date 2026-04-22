@@ -33,11 +33,9 @@ Managed Agents has a separate server-side **Memory Stores** system (Research Pre
 
 ### Evidence
 
-- https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool — "Claude can create, read, update, and delete files that persist between sessions" and "Since this is a client-side tool, Claude makes tool calls to perform memory operations, and your application executes those operations locally. This gives you complete control over where and how the memory is stored."
-- Same page lists all six commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`) with JSON schemas and error semantics. Tool type string: `memory_20250818`.
-- Same page, auto-injected system instruction: "MEMORY PROTOCOL: 1. Use the `view` command of your `memory` tool to check for earlier progress. ... ASSUME INTERRUPTION: Your context window might be reset at any moment, so you risk losing any progress that is not recorded in your memory directory."
+- https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool — "Claude can create, read, update, and delete files that persist between sessions"; "client-side tool, Claude makes tool calls to perform memory operations, and your application executes those operations locally"; six commands documented: `view`, `create`, `str_replace`, `insert`, `delete`, `rename`; tool type `memory_20250818`; auto-injected system prompt "MEMORY PROTOCOL: 1. Use the `view` command of your `memory` tool to check for earlier progress ... ASSUME INTERRUPTION".
 - https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7 — "Claude Opus 4.7 is better at writing and using file-system-based memory. ... To give Claude a managed scratchpad without building your own, use the client-side memory tool."
-- https://platform.claude.com/docs/en/managed-agents/memory — "Memory stores let the agent carry learnings across sessions" — server-side variant; research preview, 8 stores max per session, individual memories capped at 100KB (~25K tokens), full version history preserved per mutation.
+- https://platform.claude.com/docs/en/managed-agents/memory — "Memory stores let the agent carry learnings across sessions"; Research Preview; 8 stores/session max; memories capped at 100KB (~25K tokens); full version history per mutation.
 
 ### Implication for WakeProof
 
@@ -64,12 +62,9 @@ Pricing: no extra fee for the feature. Standard Opus 4.7 token rates ($5 / $0.50
 
 ### Evidence
 
-- https://platform.claude.com/docs/en/build-with-claude/task-budgets — "Task budgets let you tell Claude how many tokens it has for a full agentic loop, including thinking, tool calls, tool results, and output."
-- Same page: "The minimum accepted `task_budget.total` is **20,000 tokens**; values below the minimum return a 400 error." Schema shape: `{"type": "tokens", "total": N, "remaining": M?}`.
-- Same page: "Task budgets are a **soft hint, not a hard cap**. Claude may occasionally exceed the budget if it is in the middle of an action that would be more disruptive to interrupt than to finish."
-- Same page, feature support table: Opus 4.7 public beta (`task-budgets-2026-03-13`); Opus 4.6 / Sonnet 4.6 / Haiku 4.5 = Not supported. "Task budgets are not supported on Claude Code or Cowork surfaces at launch."
-- https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7 — task-budgets section confirms 20k minimum and advisory semantics; the `xhigh` effort level is new in 4.7 and pairs naturally with task budgets for long-horizon work.
-- https://platform.claude.com/docs/en/about-claude/pricing — Opus 4.7 token rates confirmed: $5 / $0.50 cache-read / $25 output per MTok.
+- https://platform.claude.com/docs/en/build-with-claude/task-budgets — "Task budgets let you tell Claude how many tokens it has for a full agentic loop, including thinking, tool calls, tool results, and output"; "The minimum accepted `task_budget.total` is **20,000 tokens**; values below the minimum return a 400 error"; schema `{"type": "tokens", "total": N, "remaining": M?}`; "soft hint, not a hard cap"; feature-support table lists Opus 4.7 public beta only (4.6 / Sonnet 4.6 / Haiku 4.5 = Not supported); "Task budgets are not supported on Claude Code or Cowork surfaces at launch."
+- https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7 — confirms 20k minimum, advisory semantics; new `xhigh` effort level pairs with task budgets.
+- https://platform.claude.com/docs/en/about-claude/pricing — Opus 4.7: $5 / $0.50 cache-read / $25 output per MTok.
 
 ### Implication for WakeProof
 
@@ -86,44 +81,35 @@ Pricing: no extra fee for the feature. Standard Opus 4.7 token rates ($5 / $0.50
 
 ### Answer
 
-**Hosting.** Fully Anthropic-hosted. You do not bring your own infra. Each `Session` is "a running agent instance within an environment" where an `Environment` is "a configured container template (packages, network access)" with Python, Node.js, Go, etc. pre-installed. Network access is configurable (`unrestricted` in the quickstart). Only available through the Claude API directly — not on Bedrock/Vertex/Foundry.
+**Hosting.** Fully Anthropic-hosted cloud containers (Python/Node/Go pre-installed, configurable networking). No customer infra. Claude API only — not on Bedrock/Vertex/Foundry.
 
-**Invocation.** SDK / REST API, not webhooks. Three separate resources: `agents` (reusable config), `environments` (container templates), `sessions` (actual runs). Flow: create an agent once, create an environment once, then for each task `POST /v1/sessions` to spin up a session, `POST /v1/sessions/{id}/events` to send `user.message` events, and open a **Server-Sent Events (SSE) stream** on `/v1/sessions/{id}/stream` to receive `agent.message`, `agent.thinking`, `agent.tool_use`, `agent.tool_result`, `session.status_*` events. If the stream disconnects, the API buffers events server-side and you can reconnect. Events are persisted and fully retrievable after the fact. Sessions have four statuses — `idle`, `running`, `rescheduling`, `terminated`.
+**Invocation.** REST + SDK, not webhooks. Three resources: `agents` (reusable config) → `environments` (container templates) → `sessions` (runs). Flow: `POST /v1/agents` + `POST /v1/environments` once, then per task `POST /v1/sessions`, `POST /v1/sessions/{id}/events` for `user.message` events, and SSE on `/v1/sessions/{id}/stream` for `agent.message` / `agent.thinking` / `agent.tool_use` / `agent.tool_result` / `session.status_*` events. Stream is resumable; events are persisted and retrievable later. Statuses: `idle`, `running`, `rescheduling`, `terminated`.
 
-**Observability.** Session tracing and inspection are built into the Claude Console ("inspect every tool call, decision, and failure mode" — launch blog). Events are persisted server-side and listable/fetchable by session ID. Session checkpoints (full container state, files, installed tools) are preserved for **30 days** after the session's last activity; periodic `user.message` events reset the inactivity timer.
+**Observability.** Session tracing is in the Claude Console ("inspect every tool call, decision, and failure mode"). Events are persisted server-side, listable and fetchable by session ID. Checkpoints (full container state) preserved for **30 days** after last activity; periodic `user.message` events reset that inactivity timer.
 
-**Pricing.** Two-part: standard token rates (Opus 4.7 = $5 / $0.50 cache / $25 per MTok) **plus $0.08 per session-hour of `running` runtime**. Runtime accrues only while status is `running`; `idle`, `rescheduling`, and `terminated` are free. Web search inside a session is the normal $10 per 1,000 searches. Session runtime replaces Code Execution container-hour billing (no double charge). Batch, fast-mode, data-residency, and long-context premium modifiers do **not** apply to Managed Agents.
+**Pricing.** Two-part: standard token rates (Opus 4.7 = $5 / $0.50 cache / $25 per MTok) **plus $0.08 per session-hour of `running` runtime**. Idle / rescheduling / terminated time is free. Web search is the usual $10 per 1,000. Session runtime replaces Code Execution container-hour billing. Batch / fast-mode / data-residency / long-context premiums do **not** apply.
 
-**Rate limits.** Per-organization: 60 req/min on create endpoints, 600 req/min on read endpoints. Tier-based token RPM limits layered on top.
+**Rate limits.** Per-org: 60 req/min on create endpoints, 600 req/min on read endpoints. Tier-based token RPM limits layered on top.
 
-**Beta flag.** `managed-agents-2026-04-01` on all requests. Outcomes, multi-agent, and **Agent Memory stores** are Research Preview — request access.
+**Beta.** `managed-agents-2026-04-01` header on every request. Outcomes, multi-agent, and **Agent Memory stores** are Research Preview (access-gated form).
 
 ### Evidence
 
-- https://platform.claude.com/docs/en/managed-agents/overview — "Claude Managed Agents provides the harness and infrastructure for running Claude as an autonomous agent. Instead of building your own agent loop, tool execution, and runtime, you get a fully managed environment where Claude can read files, run commands, browse the web, and execute code securely."
-- Same page, rate-limits table: "Create endpoints: 60 requests per minute / Read endpoints: 600 requests per minute." Beta header: `managed-agents-2026-04-01`.
-- https://platform.claude.com/docs/en/managed-agents/sessions — session statuses, agent/environment/session three-tier resource model, pinning to agent version, archive/delete semantics, "A `running` session cannot be deleted; send an [interrupt event] if you need to delete it immediately."
-- https://platform.claude.com/docs/en/managed-agents/events-and-streaming — SSE event stream, user/agent event types, "While session history is persisted until deleted, checkpoints are only preserved for 30 days after the session's last activity. If your workflow requires the full container state (files, installed tools, and so on) to persist beyond 30 days, send periodic `user.message` events to reset the inactivity timer before the checkpoint expires."
-- https://platform.claude.com/docs/en/managed-agents/quickstart — full invocation flow: `POST /v1/agents`, `POST /v1/environments`, `POST /v1/sessions`, `POST /v1/sessions/{id}/events`, SSE on `/v1/sessions/{id}/stream`.
-- https://platform.claude.com/docs/en/about-claude/pricing — Managed Agents pricing section: "$0.08 per session-hour", "Runtime is measured to the millisecond and accrues only while the session's status is `running`. Time spent `idle` ... `rescheduling`, or `terminated` does not count toward runtime." Worked example shows a 1-hour Opus 4.7 session consuming 50k input + 15k output = $0.705 total.
-- https://claude.com/blog/claude-managed-agents — launch announcement: "Session tracing, integration analytics, and troubleshooting guidance are built directly into the Claude Console."
-- https://platform.claude.com/docs/en/managed-agents/memory — Research Preview. 8 stores per session max; individual memory cap 100KB; versioned with `mem_.../memver_...` IDs; `read_write` or `read_only` access; full audit-log via `memory_versions` endpoints.
+- https://platform.claude.com/docs/en/managed-agents/overview — "fully managed environment where Claude can read files, run commands, browse the web, and execute code securely"; create endpoints 60 rpm / read endpoints 600 rpm per org; beta header `managed-agents-2026-04-01`.
+- https://platform.claude.com/docs/en/managed-agents/sessions — three-tier resource model (agent / environment / session); four statuses (`idle`, `running`, `rescheduling`, `terminated`); "A `running` session cannot be deleted; send an [interrupt event] if you need to delete it immediately."
+- https://platform.claude.com/docs/en/managed-agents/events-and-streaming — SSE event stream with typed events; "session history is persisted until deleted, checkpoints are only preserved for 30 days after the session's last activity. ... send periodic `user.message` events to reset the inactivity timer."
+- https://platform.claude.com/docs/en/managed-agents/quickstart — full flow: `POST /v1/agents`, `POST /v1/environments`, `POST /v1/sessions`, `POST /v1/sessions/{id}/events`, SSE on `/v1/sessions/{id}/stream`.
+- https://platform.claude.com/docs/en/about-claude/pricing — "$0.08 per session-hour"; "Runtime is measured to the millisecond and accrues only while the session's status is `running`. Time spent `idle` ... `rescheduling`, or `terminated` does not count toward runtime"; worked example: 1-hour Opus 4.7 session, 50k input + 15k output = $0.705.
+- https://claude.com/blog/claude-managed-agents — "Session tracing, integration analytics, and troubleshooting guidance are built directly into the Claude Console."
+- https://platform.claude.com/docs/en/managed-agents/memory — Research Preview; 8 stores/session max; 100KB per-memory cap; `mem_.../memver_...` versioned; `read_write` or `read_only`; full audit via `memory_versions`.
 
 ### Implication for WakeProof
 
-Layer 3 is buildable in the hackathon budget. Plan:
+Layer 3 is buildable in budget. Plan: (1) create Agent + Environment once via CLI; (2) at bedtime, `POST /v1/sessions` (attach memory store if research-preview granted, else seed inline); (3) during sleep, periodically `POST .../events` as HealthKit samples arrive — idle time is free, the key cost saver; (4) pre-alarm, pull prepared briefing from session events.
 
-1. One-time setup (Day 2 evening or Day 4 morning): create one Agent + one Environment via CLI.
-2. At bedtime each night: iOS app calls `POST /v1/sessions` with the user's memory-store ID (if research-preview granted) or seeds a fresh session with baseline data inline.
-3. During sleep: app periodically sends `user.message` events as HealthKit samples arrive (idle time between them is free — this is the key cost-saver).
-4. Pre-alarm: iOS app reads session events to pull the prepared briefing.
+7-night demo cost: ~7 × (2 `running` hours × $0.08 + ~$0.50 tokens) = **~$4.50**. Trivial against $500. The 60-req/min write limit is a non-issue at one session-create per night.
 
-Cost budget for a 7-night demo window: ≈ 7 × (2 hours actual running × $0.08 + ~$0.50 tokens) = **~$4.50 credit burn** — trivial against the $500 pool. The 60-req/min org-level write limit is not a concern (one session create per night).
-
-Fallbacks if Layer 3 blocks on Day 4:
-- **Research Preview access denied for Agent Memory** → use Messages API + client-side Memory Tool, same narrative, no demo loss.
-- **Beta onboarding surprises (CLI auth, vault config)** → revert to the `BGProcessingTaskRequest` local-agent-loop fallback per `opus-4-7-strategy.md` line 111. Demo narrative downgrades from "long-horizon agentic" to "scheduled overnight job". Still competent.
-- **Unattended 8-hour session reliability unknown** → mitigate by sending a keepalive `user.message` every ~30 min (still well inside idle-time zero cost).
+Fallbacks: Agent Memory RP denied → client-side Memory Tool, narrative holds. Managed Agents beta onboarding blocks Day 4 → revert to `BGProcessingTaskRequest` local-agent-loop (strategy doc line 111); demo narrative downgrades from "long-horizon agentic" to "scheduled overnight job". 8-hour unattended reliability unknown → send a keepalive `user.message` every ~30 min (idle stays free).
 
 ### Open follow-ups
 
@@ -136,20 +122,13 @@ Fallbacks if Layer 3 blocks on Day 4:
 
 ## Summary table
 
-| # | Question | Status | Source of truth |
+| # | Question | Status | Source |
 |---|---|---|---|
-| 1 | Memory Tool: read + write during a run? | **answered** | docs (memory-tool page, what's-new-4-7) |
-| 1a | File-system semantics (paths, ops, persistence) | **answered** | docs (memory-tool page) |
-| 1b | Auto-injection vs explicit | **answered** | docs (memory-tool auto-inserted MEMORY PROTOCOL) |
-| 2 | Task budget min/max | **answered** (20k min, no documented max, token-denominated only) | docs (task-budgets page) |
-| 2a | Express 8-hour overnight cleanly? | **partial** — not directly; duration lives in Managed Agents session, not task budget | docs + inference |
-| 2b | Task budget pricing | **answered** (no extra fee; tokens at standard rates) | docs (pricing page) |
-| 3 | Managed Agents hosting | **answered** (Anthropic-hosted containers, not customer infra) | docs (overview + quickstart) |
-| 3a | Invocation model | **answered** (REST + SSE stream, not webhooks) | docs (quickstart, events-and-streaming) |
-| 3b | Observability / logs | **answered** (Console + event replay + 30-day checkpoint retention) | docs + launch blog |
-| 3c | Pricing | **answered** ($0.08/session-hour running + token rates) | docs (pricing page) |
-| 3d | Rate limits for $500 hobbyist budget | **answered** (60/600 rpm org-level; not a constraint for 1 user × 7 nights) | docs (overview page) |
-| 3e | 8-hour unattended session reliability | **blocked** — no explicit docs ceiling; awaits live session | unresolved |
-| 3f | Agent Memory research-preview access latency | **blocked** — access-form gate | unresolved |
+| 1 | Memory Tool supports read + write during a run; auto-injected `/memories` file system | answered | docs |
+| 2 | Task budget: 20k-token minimum, token-only unit, advisory not hard cap | answered | docs |
+| 2a | 8-hour wall-clock expressible cleanly? | partial (no duration field; duration lives in Managed Agents session) | docs + inference |
+| 3 | Managed Agents hosting / invocation / observability / pricing / rate limits | answered ($0.08/session-hour running, 60-600 rpm org limit, SSE stream, Console tracing) | docs |
+| 3a | 8-hour unattended session reliability / max session duration | blocked | awaits 04-23 session |
+| 3b | Agent Memory research-preview access latency | blocked | awaits access form |
 
-Net: Layer 2 is green-lit today. Layer 3 is green-lit with two open risks that the 2026-04-23 Michael Cohen live session should close (max session duration, Agent Memory access). Both have documented fallbacks that preserve the four-layer demo narrative.
+Net: Layer 2 is green-lit today. Layer 3 is green-lit with two open risks for the 2026-04-23 Michael Cohen session to close (max session duration, Agent Memory access). Both have documented fallbacks that preserve the four-layer narrative.
