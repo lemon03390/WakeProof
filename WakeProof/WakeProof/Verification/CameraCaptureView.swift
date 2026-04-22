@@ -215,7 +215,14 @@ private final class CameraHostController: UIViewController,
         // setting .video while mediaTypes is still the default [public.image] throws.
         picker.mediaTypes = [UTType.movie.identifier]
         picker.cameraCaptureMode = .video
-        picker.videoMaximumDuration = 2.0
+        // No hard max on iOS 26: the `videoMaximumDuration = 2.0` auto-cap path
+        // triggers AVFoundation error -11810 ("The recording reached the maximum
+        // allowable length") and recovery salvages only ~0.4 s of the intended
+        // clip — the downstream duration-floor validator (≥1 s) then rejects it.
+        // Letting the user manually tap stop avoids the auto-cap code path
+        // entirely. The 2-sec design intent (Decision 2 in docs/technical-decisions.md)
+        // is preserved by the validator's ≥1-s minimum and by user habit —
+        // just not by the broken iOS hard cap.
         picker.videoQuality = .typeMedium
         // Prefer rear, but fall back to front if the device exposes only one camera (older
         // iPad models, hardware fault). Setting an unavailable device throws.

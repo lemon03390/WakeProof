@@ -59,7 +59,7 @@ struct CameraCaptureFlow: View {
 
         var userMessage: String {
             switch self {
-            case .videoTooShort: return "That clip was too short. Hold the record button for at least 1 second."
+            case .videoTooShort: return "That clip was too short. Tap the red button to start, tap it again after 1–2 seconds to stop."
             case .videoTooSmall: return "That capture was empty. Make sure the camera saw something — tap \"Prove you're awake\" to retry."
             case .copyFailed:    return "Couldn't save the clip. Storage may be full — tap \"Prove you're awake\" to retry."
             case .persistFailed: return "Save failed — tap \"Prove you're awake\" to retry."
