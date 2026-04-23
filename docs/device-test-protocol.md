@@ -268,3 +268,33 @@ Pass criteria:
 - `profile.md` and `history.jsonl` both have `isExcludedFromBackupKey=true` (verify via a separate debug Swift snippet reading `resourceValues(forKeys: [.isExcludedFromBackupKey])` from the file URL, or — more pragmatically — confirm absence of those files in an iCloud Backup listing).
 - Token budget: a verify-without-memory call produces a request body within ~5% of the Day 3 baseline size (additional v3 system-prompt text is ~900 chars more than v2); a verify-with-memory call produces ≤ that + ~2000 chars (the memory-block rendered cap).
 - Total API credit burn for Tests 14+15+16 ≤ ~$0.05 in Anthropic console.
+
+### Phase B.5 CLI-equivalent smoke test (2026-04-24, executed from dev laptop)
+
+Purpose: validate v3 prompt + proxy + Anthropic round-trip end-to-end without requiring a paired iPhone. Mirrors what `ClaudeAPIClient.verify()` sends on a first-morning (no memory) call via a direct Python `urllib` POST through the proxy. Script committed at `scripts/layer2-smoke.py` (copy-pasteable from the session log).
+
+**Input:** two 256×256 solid-color JPEGs (green baseline, yellow live). Not real wake-verification imagery — the goal is wire compatibility, not verdict accuracy.
+
+**Result:**
+- HTTP **200** in **5.42s** (under Vercel Hobby 10s cap)
+- `x-wakeproof-worker: vercel-serverless-v1`, `x-wakeproof-upstream-status: 200` — proxy forwarded cleanly
+- Parsed response verdict: **REJECTED** (expected, since Claude can't see any real scene)
+- `confidence: 0.05` with specific `reasoning` ("Both images are solid color fields…verification is impossible")
+- **`memory_update.history_note`** populated with: "Live photo was a blank yellow frame; possible camera obstruction or capture error."
+- `memory_update.profile_delta: null` (correct — Claude had no durable insight to commit)
+- Usage: `input_tokens=1120, output_tokens=204, estimated_cost=$0.0107`
+
+**What this proves:**
+- Vercel wildcard proxy (`/v1/messages` route) accepts and forwards v3-shaped requests
+- Anthropic accepts v3 system prompt without rejection
+- v3 prompt correctly instructs Claude to emit structured JSON (the model produced exactly the documented schema)
+- `memory_update` emission path works (Claude followed "emit sparingly" — no profile delta, but a useful history note because the input was anomalous)
+- Response body parses against `VerificationResult` Codable shape (matches the JSON structure unit-tested in A.5)
+
+**Remaining Phase B.5/B.6 items that need physical iOS** (deferred to when device is available):
+- Test 14: fresh install on device, alarm fires, camera handoff, `Memory loaded: profile=false history=0/0` console log verification
+- Test 15: second-morning memory injection from disk, verify `<memory_context>` appears in request body
+- Test 16: seeded-profile scenario validating dim-light calibration
+- File-protection flag verification (simulator enforces `isExcludedFromBackupKey` inconsistently)
+
+Run those on-device by: (a) install over Xcode, (b) walk through onboarding + baseline, (c) use the debug "Fire now" button to trigger an alarm in 2 min window, (d) capture with real camera, (e) inspect `Documents/memories/<uuid>/` via Xcode Devices container browser.
