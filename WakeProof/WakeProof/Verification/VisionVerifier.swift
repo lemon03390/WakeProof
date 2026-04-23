@@ -146,10 +146,24 @@ final class VisionVerifier {
         // Fire-and-forget memory write. Runs concurrent with the scheduler transition
         // the switch dispatches. Failure is logged but never rewinds the verdict —
         // the alarm UX has already committed to the outcome by this point.
+        //
+        // IMPORTANT: do NOT use MemoryEntry.makeEntry(fromAttempt:) here — at this
+        // call site `attempt.verdict` is still "CAPTURED" (set by CameraCaptureFlow
+        // pre-verify). The final verdict only lands inside updatePersistedAttempt
+        // which runs AFTER the switch below. Same for retryCount — which is also
+        // bumped later. Construct the MemoryEntry with explicit values derived
+        // from the Claude response so the on-disk row reflects what Claude actually
+        // said, not the stale pre-verify state.
         if let memoryStore, let memoryUpdate = result.memoryUpdate {
-            let entry = MemoryEntry.makeEntry(
-                fromAttempt: attempt,
+            let mappedVerdict = result.verdict.mapped
+            // Mirror the retryCount adjustment updatePersistedAttempt applies: only
+            // the .retry branch increments, matching `if verdict == .retry` at L284.
+            let effectiveRetryCount = mappedVerdict == .retry ? attempt.retryCount + 1 : attempt.retryCount
+            let entry = MemoryEntry(
+                timestamp: .now,
+                verdict: mappedVerdict.rawValue,
                 confidence: result.confidence,
+                retryCount: effectiveRetryCount,
                 note: memoryUpdate.historyNote
             )
             Task { [logger] in

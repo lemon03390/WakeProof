@@ -354,6 +354,42 @@ final class VisionVerifierTests: XCTestCase {
         let snapshot = try await store.read()
         XCTAssertEqual(snapshot.profile, "updated profile")
         XCTAssertEqual(snapshot.recentHistory.first?.note, "weekend fast")
+        // Verdict must reflect the Claude response's verdict, NOT the stale
+        // "CAPTURED" value that attempt.verdict holds at memory-write time.
+        XCTAssertEqual(snapshot.recentHistory.first?.verdict, "VERIFIED",
+                       "Layer 2 history row must record the Claude verdict, not the stale pre-verify attempt.verdict")
+        XCTAssertEqual(snapshot.recentHistory.first?.retryCount, 0,
+                       "Verified on first try → retryCount = 0")
+    }
+
+    func testRetryVerdictWritesRetryRowWithBumpedRetryCount() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        let update = VerificationResult.MemoryUpdate(
+            profileDelta: nil,
+            historyNote: "groggy morning"
+        )
+        let fake = RecordingClient(verdict: .retry, memoryUpdate: update)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        // Simulate "this is the first call of this fire" — retryCount starts at 0,
+        // updatePersistedAttempt will bump it to 1 when it runs after the switch.
+        // Memory-write must reflect THAT future-bumped value, not the pre-bump 0.
+        XCTAssertEqual(attempt.retryCount, 0)
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.recentHistory.first?.verdict, "RETRY",
+                       "Layer 2 history row must record RETRY when Claude returned RETRY")
+        XCTAssertEqual(snapshot.recentHistory.first?.retryCount, 1,
+                       "RETRY must increment retryCount in the persisted history row to match updatePersistedAttempt")
+        XCTAssertEqual(snapshot.recentHistory.first?.note, "groggy morning")
     }
 
     func testVerifiedWithoutMemoryUpdateDoesNotWrite() async throws {
