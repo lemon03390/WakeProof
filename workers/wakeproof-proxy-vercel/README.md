@@ -54,3 +54,15 @@ Vercel Hobby tier caps Serverless Function duration at **10 seconds**. Claude Op
 ## Post-hackathon hardening
 
 Same as the Worker README — move `claudeAPIKey` to a Vercel environment variable (`vercel env add ANTHROPIC_API_KEY`) and read `process.env.ANTHROPIC_API_KEY` instead of forwarding `x-api-key`.
+
+## `/v1/*` wildcard route (Layer 3 overnight-agent)
+
+Added 2026-04-24 to support Claude Managed Agents (`/v1/agents`, `/v1/environments`, `/v1/sessions`, `/v1/sessions/:id/events`) plus occasional probes (`/v1/models`) without one explicit route per endpoint.
+
+File: `api/v1/[...path].js`. Matches any `/v1/*` path not served by a more-specific file (so `/v1/messages` stays on `messages.js` with higher routing priority).
+
+Auth model identical to messages.js: `x-wakeproof-token` validated against `WAKEPROOF_CLIENT_TOKEN` env, upstream `x-api-key` injected from `ANTHROPIC_API_KEY` env. Forwards `anthropic-version` and `anthropic-beta` headers. 8s upload cap + 6MB body cap match messages.js.
+
+Response marker: `x-wakeproof-worker: vercel-serverless-wildcard-v1`.
+
+No SSE. iOS polls GET session events at wake time and uses BGProcessingTask-driven event POSTs during the night; each round-trip fits within the Vercel Hobby 10s budget.

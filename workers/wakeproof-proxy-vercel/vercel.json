@@ -1,6 +1,7 @@
 {
   "version": 2,
   "rewrites": [
-    { "source": "/v1/messages", "destination": "/api/v1/messages" }
+    { "source": "/v1/messages", "destination": "/api/v1/messages" },
+    { "source": "/v1/(.+)", "destination": "/api/wildcard?wakePath=$1" }
   ]
 }
