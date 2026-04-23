@@ -169,7 +169,14 @@ final class VisionVerifier {
             userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
         case .httpError(let status, _):
             userMessage = "Claude returned HTTP \(status) — tap \"Prove you're awake\" to retry."
-        case .decodingFailed, .emptyResponse, .invalidURL:
+        case .decodingFailed(let underlying):
+            // R1 fix: persist the underlying parse/shape error into reasoning so the
+            // audit trail captures what went wrong at the protocol boundary. Without
+            // this the user and any future forensic reader both see "Couldn't read
+            // Claude's response" with no signal about whether it was a missing content
+            // block, malformed JSON, or an unexpected error body.
+            userMessage = "Couldn't read Claude's response (\(underlying.localizedDescription)) — tap \"Prove you're awake\" to retry."
+        case .emptyResponse, .invalidURL:
             userMessage = "Couldn't read Claude's response — tap \"Prove you're awake\" to retry."
         }
         await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: userMessage)

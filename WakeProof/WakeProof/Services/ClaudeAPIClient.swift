@@ -127,8 +127,17 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let start = Date()
-        logger.info("Calling Claude \(model, privacy: .public) with \(baselineJPEG.count, privacy: .public)+\(stillJPEG.count, privacy: .public) bytes of image data; antiSpoof=\(antiSpoofInstruction ?? "nil", privacy: .public)")
+        // B5 fix: image byte counts and anti-spoof instruction live inside `.private` —
+        // not secrets per se, but they reveal session-specific details that sysdiagnose
+        // collection would otherwise capture verbatim. Model + retry context stays public
+        // so field debugging still lands useful signal without exposing per-session state.
+        logger.info("Calling Claude \(model, privacy: .public) with \(baselineJPEG.count, privacy: .private)+\(stillJPEG.count, privacy: .private) bytes of image data; antiSpoof=\(antiSpoofInstruction ?? "nil", privacy: .private)")
+        #if DEBUG
+        // B7 fix: diagnostic probes were built for Cloudflare HKG debugging and have
+        // no production purpose. In release they'd add up to 15s of ring-ceiling spend
+        // to the first verify per launch while also exposing the proxy endpoint in Console.
         await Self.dumpNetworkDiagnosticsOnce(session: session, endpoint: endpoint, logger: logger)
+        #endif
 
         let data: Data
         let response: URLResponse
@@ -150,27 +159,40 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         guard (200..<300).contains(http.statusCode) else {
             let snippet = String(data: data.prefix(2000), encoding: .utf8) ?? "<non-utf8>"
             let bodyBytes = request.httpBody?.count ?? -1
-            // Log every response header Anthropic's gateway returned so we can spot
-            // request_id / cf-ray / anti-abuse signals that our narrow header lookup misses.
+            // B5 fix: Anthropic error bodies commonly echo back request fragments including
+            // base64 image bytes; response headers include session identifiers. Both go to
+            // `.private` so a sysdiagnose submission doesn't ship face/location imagery
+            // fragments verbatim to Apple support. Status code stays public for triage.
             let headerDump = http.allHeaderFields
                 .map { "\($0.key)=\($0.value)" }
                 .sorted()
                 .joined(separator: " | ")
-            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_body=\(bodyBytes, privacy: .public) bytes); response headers: \(headerDump, privacy: .public); body: \(snippet, privacy: .public)")
-            // On any non-2xx, dump the exact outbound request body to Documents so we can pull
-            // it via devicectl and replay via curl from the Mac. If curl with these exact bytes
-            // returns 200 we know URLSession is adding something Anthropic rejects; if curl
-            // also 403s we know it's content-based.
+            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_body=\(bodyBytes, privacy: .private) bytes); response headers: \(headerDump, privacy: .private); body: \(snippet, privacy: .private)")
+            #if DEBUG
+            // B4 fix: the debug-only body dump is behind #if DEBUG so release builds never
+            // persist baseline + face photos to Documents (which is iCloud-backup-enabled
+            // and not file-protected by default). Within debug, scrub the base64 image
+            // payloads so a developer sharing the dump for bug triage doesn't also share
+            // the user's bedroom photo. Schema shape stays intact so a curl replay still
+            // exercises the JSON path — just without real image bytes.
             if let bodyData = request.httpBody,
                let docs = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
                 let dumpURL = docs.appendingPathComponent("last_4xx_request.json")
+                let redacted = Self.redactImageBase64(bodyData) ?? bodyData
                 do {
-                    try bodyData.write(to: dumpURL, options: [.atomic])
-                    logger.error("Dumped failed request body to \(dumpURL.path, privacy: .public)")
+                    try redacted.write(to: dumpURL, options: [.atomic])
+                    // Mark excluded from iCloud backup even in DEBUG — developers shouldn't
+                    // restore their bedroom photos from an old backup by accident.
+                    var mutableDump = dumpURL
+                    var rv = URLResourceValues()
+                    rv.isExcludedFromBackup = true
+                    try? mutableDump.setResourceValues(rv)
+                    logger.error("Dumped failed request body (redacted) to \(dumpURL.path, privacy: .private)")
                 } catch {
                     logger.error("Failed to dump request body: \(error.localizedDescription, privacy: .public)")
                 }
             }
+            #endif
             throw ClaudeAPIError.httpError(status: http.statusCode, snippet: snippet)
         }
 
@@ -239,10 +261,14 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         ]
     }
 
+    #if DEBUG
     /// One-shot network diagnostic: runs on the first verification call of each app
     /// launch, logs system proxy settings plus three HTTPS probe requests so we can tell
     /// which layer is broken when the Claude call fails with -1004 / 127.0.0.1 routing.
     /// Subsequent calls skip the dump to avoid log spam and probe cost.
+    /// B7 fix: entire function is gated `#if DEBUG` — in release builds it does not exist
+    /// and the call site at `verify()` is also gated, so first-fire verify never pays the
+    /// up-to-15s probe budget or exposes endpoint/PoP info in production logs.
     private static let diagnosticsLock = OSAllocatedUnfairLock(initialState: false)
     private static func dumpNetworkDiagnosticsOnce(session: URLSession, endpoint: URL, logger: Logger) async {
         let alreadyRan = diagnosticsLock.withLock { ran -> Bool in
@@ -256,12 +282,12 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         // managed configuration profile). Empty dictionary means no proxy.
         if let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] {
             let filtered = settings.filter { !($0.key as String).hasPrefix("__SCOPED__") }
-            logger.info("[diag] System proxy settings: \(filtered, privacy: .public)")
+            logger.info("[diag] System proxy settings: \(filtered, privacy: .private)")
         } else {
             logger.info("[diag] System proxy settings: unavailable")
         }
-        logger.info("[diag] Session proxy dict: \(session.configuration.connectionProxyDictionary ?? [:], privacy: .public)")
-        logger.info("[diag] Target endpoint: \(endpoint.absoluteString, privacy: .public) host=\(endpoint.host ?? "?", privacy: .public)")
+        logger.info("[diag] Session proxy dict: \(session.configuration.connectionProxyDictionary ?? [:], privacy: .private)")
+        logger.info("[diag] Target endpoint: \(endpoint.absoluteString, privacy: .private) host=\(endpoint.host ?? "?", privacy: .private)")
 
         await probe(url: "https://1.1.1.1/cdn-cgi/trace", label: "cloudflare-1.1.1.1", session: session, logger: logger)
         await probe(url: "https://api.anthropic.com/", label: "anthropic-root", session: session, logger: logger)
@@ -270,7 +296,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
     private static func probe(url: String, label: String, session: URLSession, logger: Logger, method: String = "GET") async {
         guard let u = URL(string: url) else {
-            logger.error("[diag] \(label, privacy: .public): URL didn't parse — \(url, privacy: .public)")
+            logger.error("[diag] \(label, privacy: .public): URL didn't parse — \(url, privacy: .private)")
             return
         }
         var req = URLRequest(url: u)
@@ -281,11 +307,36 @@ struct ClaudeAPIClient: ClaudeVisionClient {
             let (data, response) = try await session.data(for: req)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             let snippet = String(data: data.prefix(120), encoding: .utf8) ?? "<non-utf8>"
-            logger.info("[diag] \(label, privacy: .public): HTTP \(code, privacy: .public) in \(Date().timeIntervalSince(t0), privacy: .public)s; body: \(snippet, privacy: .public)")
+            logger.info("[diag] \(label, privacy: .public): HTTP \(code, privacy: .public) in \(Date().timeIntervalSince(t0), privacy: .public)s; body: \(snippet, privacy: .private)")
         } catch {
             logger.error("[diag] \(label, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
+
+    /// B4 fix helper: redact base64 image payloads from a serialized request body before
+    /// dumping it to disk so the diagnostic artifact never contains the user's actual
+    /// bedroom/face imagery. Schema shape is preserved so a `curl` replay still exercises
+    /// the JSON parse path — the image fields are just null-weighted.
+    fileprivate static func redactImageBase64(_ bodyData: Data) -> Data? {
+        guard var obj = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+              var messages = obj["messages"] as? [[String: Any]] else {
+            return nil
+        }
+        for i in messages.indices {
+            guard var content = messages[i]["content"] as? [[String: Any]] else { continue }
+            for j in content.indices {
+                guard content[j]["type"] as? String == "image",
+                      var source = content[j]["source"] as? [String: Any],
+                      let data = source["data"] as? String else { continue }
+                source["data"] = "<REDACTED \(data.count)b>"
+                content[j]["source"] = source
+            }
+            messages[i]["content"] = content
+        }
+        obj["messages"] = messages
+        return try? JSONSerialization.data(withJSONObject: obj)
+    }
+    #endif
 
     /// Extract `response["content"][0]["text"]` — the only shape we act on today.
     private func extractTextBlock(from data: Data) throws -> String {

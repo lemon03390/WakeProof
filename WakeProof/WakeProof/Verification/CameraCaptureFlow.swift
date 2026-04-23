@@ -135,11 +135,27 @@ struct CameraCaptureFlow: View {
     /// iOS purges NSTemporaryDirectory aggressively; storing the tmp path in SwiftData
     /// would mean the video is a dead reference by morning. Move (not copy) avoids leaving
     /// a duplicate behind that the system would have to clean up.
+    ///
+    /// B13 fix: each .mov contains the user's bedroom audio + video. Without explicit
+    /// file protection it's readable post-first-unlock; without excludeFromBackup it
+    /// syncs to iCloud Backup. A heavy user accumulates months of private footage in
+    /// iCloud over time — multi-week forensic retention if the iCloud account is ever
+    /// compromised. Apply `.complete` protection (needs unlock for every access) and
+    /// mark excluded from backup.
     private func moveVideoToDocuments(_ tmpURL: URL) throws -> URL {
         let fm = FileManager.default
         let docsURL = try fm.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let dir = docsURL.appendingPathComponent("WakeAttempts", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Exclude the containing directory from iCloud backup once on creation so we
+        // only pay the setResourceValues cost per-capture, not per-folder.
+        var dirURL = dir
+        if let isExcluded = try? dirURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup,
+           isExcluded != true {
+            var rv = URLResourceValues()
+            rv.isExcludedFromBackup = true
+            try? dirURL.setResourceValues(rv)
+        }
         let dest = dir.appendingPathComponent("\(UUID().uuidString).mov")
         do {
             try fm.moveItem(at: tmpURL, to: dest)
@@ -147,6 +163,17 @@ struct CameraCaptureFlow: View {
             // Fall back to copy if move fails (e.g., cross-volume): better to preserve the
             // capture than to drop it because of an unexpected filesystem layout.
             try fm.copyItem(at: tmpURL, to: dest)
+        }
+        // Best-effort protection: if this fails (ephemeral filesystem state, iOS bug),
+        // log but don't block the capture flow — the scheduled alarm takes priority
+        // over a defence-in-depth privacy hardening that has already excluded backup.
+        do {
+            try fm.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: dest.path
+            )
+        } catch {
+            logger.warning("Failed to set .complete file protection on \(dest.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         return dest
     }
