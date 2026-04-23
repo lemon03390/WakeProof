@@ -19,8 +19,33 @@ protocol ClaudeVisionClient {
         baselineJPEG: Data,
         stillJPEG: Data,
         baselineLocation: String,
-        antiSpoofInstruction: String?
+        antiSpoofInstruction: String?,
+        memoryContext: String?
     ) async throws -> VerificationResult
+}
+
+extension ClaudeVisionClient {
+    /// Day 3 compatibility shim at the CALL SITE ONLY — existing production callers (which
+    /// only exist inside the test fakes updated below) can pass 4 args and get nil
+    /// memoryContext automatically. Note: this extension does NOT add a second protocol
+    /// requirement — an extension on a protocol only provides default implementations of
+    /// the protocol's existing requirements, not new requirements. Types conforming to
+    /// `ClaudeVisionClient` MUST implement the 5-arg method, which is why the Day 3 fakes
+    /// need migration (next paragraph).
+    func verify(
+        baselineJPEG: Data,
+        stillJPEG: Data,
+        baselineLocation: String,
+        antiSpoofInstruction: String?
+    ) async throws -> VerificationResult {
+        try await verify(
+            baselineJPEG: baselineJPEG,
+            stillJPEG: stillJPEG,
+            baselineLocation: baselineLocation,
+            antiSpoofInstruction: antiSpoofInstruction,
+            memoryContext: nil
+        )
+    }
 }
 
 enum ClaudeAPIError: LocalizedError {
@@ -80,7 +105,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         proxyToken: String = Secrets.wakeproofToken,
         model: String = Secrets.visionModel,
         endpoint: URL = Self.defaultEndpoint,
-        promptTemplate: VisionPromptTemplate = .v2
+        promptTemplate: VisionPromptTemplate = .v3
     ) {
         self.session = session
         self.proxyToken = proxyToken
@@ -132,7 +157,8 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         baselineJPEG: Data,
         stillJPEG: Data,
         baselineLocation: String,
-        antiSpoofInstruction: String?
+        antiSpoofInstruction: String?,
+        memoryContext: String?
     ) async throws -> VerificationResult {
         // Sentinel matches the exact placeholder shipped in Secrets.swift.example.
         // The proxy token authenticates this client to our Vercel proxy; the Anthropic
@@ -156,7 +182,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 stillJPEG: stillJPEG,
                 baselineLocation: baselineLocation,
                 antiSpoofInstruction: antiSpoofInstruction,
-                memoryContext: nil,
+                memoryContext: memoryContext,
                 promptTemplate: frozenPromptTemplate,
                 model: frozenModel
             )
@@ -259,7 +285,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                         "content": [
                             ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": "<REDACTED \(baselineJPEG.count)b>"]],
                             ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": "<REDACTED \(stillJPEG.count)b>"]],
-                            ["type": "text", "text": promptTemplate.userPrompt(baselineLocation: baselineLocation, antiSpoofInstruction: antiSpoofInstruction, memoryContext: nil)]
+                            ["type": "text", "text": promptTemplate.userPrompt(baselineLocation: baselineLocation, antiSpoofInstruction: antiSpoofInstruction, memoryContext: memoryContext)]
                         ]
                     ]],
                     "debug_request_body_bytes": bodyBytes,

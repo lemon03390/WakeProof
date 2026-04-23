@@ -342,4 +342,93 @@ final class ClaudeAPIClientTests: XCTestCase {
         )
         XCTAssertEqual(noMem, withMem, "v1 must ignore the memoryContext parameter")
     }
+
+    // MARK: - Layer 2 ClaudeAPIClient wiring
+
+    func testDefaultTemplateIsV3() {
+        let client = ClaudeAPIClient()
+        XCTAssertEqual(client.promptTemplate, .v3)
+    }
+
+    func testFiveArgVerifyForwardsMemoryContextToSystemPrompt() async throws {
+        let memoryBlock = "<memory_context>MEMORY_MARKER</memory_context>"
+        let bodyCapture = try await performStubbedVerify(memoryContext: memoryBlock)
+        XCTAssertTrue(bodyCapture.contains("MEMORY_MARKER"),
+                      "memoryContext must be injected into the user message on the 5-arg verify path")
+    }
+
+    func testFourArgVerifyProducesNoMemoryBlock() async throws {
+        let bodyCapture = try await performStubbedVerifyLegacy()
+        // The v3 system prompt mentions `<memory_context>` in prose (describing what MAY
+        // appear), so we can't assert on the opening tag alone. The closing tag
+        // `</memory_context>` only appears when the caller actually injected a block —
+        // that's the true signal we want to assert is absent on the 4-arg legacy path.
+        XCTAssertFalse(bodyCapture.contains("</memory_context>"),
+                       "4-arg (legacy) verify path must produce a user prompt with no memory block")
+    }
+
+    // MARK: helpers
+    private func performStubbedVerify(memoryContext: String?) async throws -> String {
+        let captureBox = CaptureBox()
+        let client = makeClientCapturing(box: captureBox, responseJSON: happyBodyJSON)
+        _ = try await client.verify(
+            baselineJPEG: Data(repeating: 0xAA, count: 16),
+            stillJPEG: Data(repeating: 0xBB, count: 16),
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil,
+            memoryContext: memoryContext
+        )
+        return captureBox.capturedBodyString ?? ""
+    }
+
+    private func performStubbedVerifyLegacy() async throws -> String {
+        let captureBox = CaptureBox()
+        let client = makeClientCapturing(box: captureBox, responseJSON: happyBodyJSON)
+        _ = try await client.verify(
+            baselineJPEG: Data(repeating: 0xAA, count: 16),
+            stillJPEG: Data(repeating: 0xBB, count: 16),
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil
+        )
+        return captureBox.capturedBodyString ?? ""
+    }
+
+    private final class CaptureBox { var capturedBodyString: String? }
+
+    private func makeClientCapturing(box: CaptureBox, responseJSON: [String: Any]) -> ClaudeAPIClient {
+        StubProtocol.handler = { request in
+            if let body = request.httpBody ?? request.bodyStreamAsData() {
+                box.capturedBodyString = String(data: body, encoding: .utf8)
+            }
+            let http = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            let data = try! JSONSerialization.data(withJSONObject: responseJSON)
+            return (http, data)
+        }
+        StubProtocol.throwing = nil
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubProtocol.self]
+        let session = URLSession(configuration: config)
+        return ClaudeAPIClient(session: session, proxyToken: "test-token", model: "claude-opus-4-7")
+    }
+}
+
+/// URLRequest helper: URLSession sometimes passes the body via bodyStream instead of
+/// httpBody depending on how URLRequest was built. This extension normalises both paths
+/// so the capture box reliably sees the bytes.
+extension URLRequest {
+    func bodyStreamAsData() -> Data? {
+        guard let stream = httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
 }

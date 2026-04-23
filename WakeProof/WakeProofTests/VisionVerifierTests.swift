@@ -287,7 +287,7 @@ final class VisionVerifierTests: XCTestCase {
     private final class FakeClient: ClaudeVisionClient {
         let result: Result<VerificationResult, Error>
         init(result: Result<VerificationResult, Error>) { self.result = result }
-        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?) async throws -> VerificationResult {
+        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?, memoryContext: String?) async throws -> VerificationResult {
             switch result {
             case .success(let r): return r
             case .failure(let e): throw e
@@ -296,10 +296,14 @@ final class VisionVerifierTests: XCTestCase {
     }
 
     /// Records every verify() invocation so tests can assert call-count invariants.
+    /// `lastMemoryContext` is read by Layer 2 B.3 tests to assert the memory block
+    /// threads through VisionVerifier.
     private final class RecordingClient: ClaudeVisionClient {
         var callCount = 0
-        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?) async throws -> VerificationResult {
+        var lastMemoryContext: String?
+        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?, memoryContext: String?) async throws -> VerificationResult {
             callCount += 1
+            lastMemoryContext = memoryContext
             return VerificationResult(sameLocation: false, personUpright: false, eyesOpen: false,
                                      appearsAlert: false, lightingSuggestsRoomLit: false,
                                      confidence: 0.0, reasoning: "recorder-stub",
@@ -315,7 +319,7 @@ final class VisionVerifierTests: XCTestCase {
         var results: [VerificationResult]
         var capturedInstructions: [String?] = []
         init(results: [VerificationResult]) { self.results = results }
-        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?) async throws -> VerificationResult {
+        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?, memoryContext: String?) async throws -> VerificationResult {
             capturedInstructions.append(antiSpoofInstruction)
             guard !results.isEmpty else {
                 throw ClaudeAPIError.emptyResponse
