@@ -29,7 +29,7 @@ struct WakeProofApp: App {
     init() {
         do {
             modelContainer = try ModelContainer(
-                for: BaselinePhoto.self, WakeAttempt.self
+                for: BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self
             )
         } catch {
             // Log before the fatal so crash reports carry the decoded reason rather than
