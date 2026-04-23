@@ -16,13 +16,21 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Dual-mode: prefer the Anthropic SDK if ANTHROPIC_API_KEY is set; fall back to
+# POSTing through the Vercel proxy with WAKEPROOF_TOKEN (stdlib only, no SDK
+# dep). Seed is ~2.5k input tokens + ~300 output = well under the Vercel Hobby
+# 10s cap. Proxy path is what CI / non-dev-laptop runs use.
+_HAS_SDK = False
 try:
-    import anthropic
+    import anthropic  # type: ignore
+    _HAS_SDK = True
 except ImportError:
-    sys.exit("Install the Anthropic Python SDK first: pip install --break-system-packages anthropic")
+    pass
 
 
 SYSTEM_PROMPT = """You are the weekly coach of WakeProof, a wake-up accountability app. The user will give you:
@@ -83,8 +91,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY not set in env. Refusing to run without it.")
+    # Choose transport: direct Anthropic SDK if available + key set,
+    # otherwise proxy-mode via WAKEPROOF_TOKEN + urllib.
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    proxy_token = os.environ.get("WAKEPROOF_TOKEN")
+    use_sdk = bool(anthropic_key and _HAS_SDK)
+    use_proxy = not use_sdk and bool(proxy_token)
+    if not (use_sdk or use_proxy):
+        sys.exit(
+            "No credentials found. Set either ANTHROPIC_API_KEY (with "
+            "`pip install --break-system-packages anthropic`) or WAKEPROOF_TOKEN "
+            "(uses the Vercel proxy at wakeproof-proxy-vercel.vercel.app)."
+        )
 
     history_path = Path(args.history)
     if not history_path.exists():
@@ -99,6 +117,7 @@ def main() -> int:
 
     user_prompt = build_user_prompt(history, profile_text)
 
+    print(f"Transport:           {'anthropic-sdk' if use_sdk else 'vercel-proxy'}")
     print(f"System prompt bytes: {len(SYSTEM_PROMPT.encode('utf-8'))}")
     print(f"User prompt bytes:   {len(user_prompt.encode('utf-8'))}")
 
@@ -107,19 +126,57 @@ def main() -> int:
         print(user_prompt)
         return 0
 
-    client = anthropic.Anthropic()
     t0 = time.time()
-    response = client.messages.create(
-        model=args.model,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    elapsed = time.time() - t0
-
-    content_text = "".join(
-        block.text for block in response.content if getattr(block, "type", None) == "text"
-    )
+    if use_sdk:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=args.model,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        elapsed = time.time() - t0
+        content_text = "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
+        )
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+    else:
+        proxy_url = os.environ.get(
+            "WAKEPROOF_PROXY_URL", "https://wakeproof-proxy-vercel.vercel.app/v1/messages"
+        )
+        body = json.dumps({
+            "model": args.model,
+            "max_tokens": 1024,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            proxy_url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-wakeproof-token": proxy_token,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload_bytes = resp.read()
+        except urllib.error.HTTPError as e:
+            sys.exit(f"Proxy HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:500]}")
+        except urllib.error.URLError as e:
+            sys.exit(f"Proxy URL error: {e}")
+        elapsed = time.time() - t0
+        parsed = json.loads(payload_bytes)
+        content_blocks = parsed.get("content", [])
+        content_text = "".join(
+            b.get("text", "") for b in content_blocks if b.get("type") == "text"
+        )
+        usage = parsed.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
     # Claude is instructed to emit a single JSON object; parse it defensively.
     try:
         payload = json.loads(content_text)
@@ -132,8 +189,8 @@ def main() -> int:
         "generatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "model": args.model,
         "elapsedSeconds": round(elapsed, 2),
-        "inputTokens": response.usage.input_tokens,
-        "outputTokens": response.usage.output_tokens,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
         "seedChecksum": seed_checksum,
         "insight": payload,
     }
@@ -145,7 +202,7 @@ def main() -> int:
     print(f"\nWrote {out_path} ({insight_len} chars of insight)")
     print(
         f"Elapsed: {elapsed:.2f}s, tokens in/out: "
-        f"{response.usage.input_tokens}/{response.usage.output_tokens}"
+        f"{input_tokens}/{output_tokens}"
     )
     return 0
 

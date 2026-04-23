@@ -1,0 +1,13 @@
+{
+  "generatedAt": "2026-04-23T22:40:08+00:00",
+  "model": "claude-opus-4-7",
+  "elapsedSeconds": 6.41,
+  "inputTokens": 1813,
+  "outputTokens": 209,
+  "seedChecksum": "5d613aed922fad31",
+  "insight": {
+    "insightText": "Your wake-ups are remarkably consistent — 12 of 14 verified on the first try, almost always within a three-minute window. The clear outliers are both Mondays: April 13 needed a retry, and April 20 required two and still ended in a coerced reject. Something about the Sunday-to-Monday transition is making verification harder, even though your Sunday wake-ups themselves look clean.",
+    "patternNoticed": "Monday grogginess despite strong Sundays",
+    "suggestedAction": "Try shifting Sunday night bedtime 20–30 minutes earlier and check your Monday morning lighting setup."
+  }
+}
