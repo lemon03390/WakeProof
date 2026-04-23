@@ -82,4 +82,92 @@ final class VerificationResultTests: XCTestCase {
         let result = try XCTUnwrap(VerificationResult.fromClaudeMessageBody(tricky))
         XCTAssertEqual(result.verdict, .verified)
     }
+
+    // MARK: - Layer 2 memory_update parsing
+
+    func testMemoryUpdatePresentDecodesBothFields() throws {
+        let json = #"""
+        {
+          "same_location": true,
+          "person_upright": true,
+          "eyes_open": true,
+          "appears_alert": true,
+          "lighting_suggests_room_lit": true,
+          "confidence": 0.9,
+          "reasoning": "clear morning",
+          "verdict": "VERIFIED",
+          "memory_update": {
+            "profile_delta": "User tends to wake alert on weekends.",
+            "history_note": "weekend morning, fast verify"
+          }
+        }
+        """#
+        let result = try decode(json)
+        XCTAssertNotNil(result.memoryUpdate)
+        XCTAssertEqual(result.memoryUpdate?.profileDelta, "User tends to wake alert on weekends.")
+        XCTAssertEqual(result.memoryUpdate?.historyNote, "weekend morning, fast verify")
+    }
+
+    func testMemoryUpdateAbsentIsNil() throws {
+        // v1/v2 response shape — no memory_update field at all.
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED"}
+        """#
+        let result = try decode(json)
+        XCTAssertNil(result.memoryUpdate)
+    }
+
+    func testMemoryUpdateEmptyObjectDecodesToBothNilInner() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED","memory_update":{}}
+        """#
+        let result = try decode(json)
+        XCTAssertNotNil(result.memoryUpdate)
+        XCTAssertNil(result.memoryUpdate?.profileDelta)
+        XCTAssertNil(result.memoryUpdate?.historyNote)
+    }
+
+    func testMemoryUpdateNullDecodesToNilStruct() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED","memory_update":null}
+        """#
+        let result = try decode(json)
+        XCTAssertNil(result.memoryUpdate)
+    }
+
+    func testMemoryUpdateUnknownInnerFieldsAreIgnored() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED","memory_update":{"profile_delta":"x","future_field":"ignored"}}
+        """#
+        let result = try decode(json)
+        XCTAssertEqual(result.memoryUpdate?.profileDelta, "x")
+    }
+
+    func testMemoryUpdateOnlyProfileDeltaDecodes() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED","memory_update":{"profile_delta":"just profile"}}
+        """#
+        let result = try decode(json)
+        XCTAssertEqual(result.memoryUpdate?.profileDelta, "just profile")
+        XCTAssertNil(result.memoryUpdate?.historyNote)
+    }
+
+    func testMemoryUpdateOnlyHistoryNoteDecodes() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED","memory_update":{"history_note":"just note"}}
+        """#
+        let result = try decode(json)
+        XCTAssertNil(result.memoryUpdate?.profileDelta)
+        XCTAssertEqual(result.memoryUpdate?.historyNote, "just note")
+    }
+
+    // Helper used by the Layer 2 section above.
+    private func decode(_ json: String) throws -> VerificationResult {
+        guard let result = VerificationResult.fromClaudeMessageBody(json) else {
+            throw TestDecodeError.returnedNil
+        }
+        return result
+    }
+
+    private enum TestDecodeError: Error { case returnedNil }
 }

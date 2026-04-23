@@ -33,6 +33,22 @@ struct VerificationResult: Codable, Equatable {
         }
     }
 
+    /// Optional memory update authored by Claude alongside the verdict. Added in
+    /// Layer 2; absent on v1/v2 responses. Both inner fields are independently
+    /// optional — Claude may decide to append a history note without a profile
+    /// update, or (rarely) rewrite the profile without a specific row note.
+    struct MemoryUpdate: Codable, Equatable {
+        /// If non-nil, replace profile.md with this markdown. Nil means leave it alone.
+        let profileDelta: String?
+        /// If non-nil, add this as the `note` on the history row for this verification.
+        let historyNote: String?
+
+        enum CodingKeys: String, CodingKey {
+            case profileDelta = "profile_delta"
+            case historyNote = "history_note"
+        }
+    }
+
     let sameLocation: Bool
     let personUpright: Bool
     let eyesOpen: Bool
@@ -48,6 +64,12 @@ struct VerificationResult: Codable, Equatable {
     /// decoder remains compatible with v1 responses that still include the array.
     let spoofingRuledOut: [String]?
     let verdict: Verdict
+    /// Layer 2 memory-tool field. Declared without a `= nil` default so the
+    /// synthesized `Decodable` conformance actually decodes it from JSON —
+    /// `let = nil` would make Swift skip it entirely. The explicit `init`
+    /// below gives it a default of `nil` at construction sites so existing
+    /// Day 3 call sites (e.g. VisionVerifier tests) keep compiling.
+    let memoryUpdate: MemoryUpdate?
 
     /// Convenience forwarder so callers can write `result.mapped` without drilling
     /// through `verdict.mapped`. The mapping itself lives on the enum above.
@@ -63,6 +85,34 @@ struct VerificationResult: Codable, Equatable {
         case reasoning
         case spoofingRuledOut = "spoofing_ruled_out"
         case verdict
+        case memoryUpdate = "memory_update"
+    }
+
+    /// Explicit memberwise init so `memoryUpdate` can default to `nil` without
+    /// breaking the synthesized `Decodable` conformance (which `let = nil`
+    /// silently does — see comment on the property).
+    init(
+        sameLocation: Bool,
+        personUpright: Bool,
+        eyesOpen: Bool,
+        appearsAlert: Bool,
+        lightingSuggestsRoomLit: Bool,
+        confidence: Double,
+        reasoning: String,
+        spoofingRuledOut: [String]?,
+        verdict: Verdict,
+        memoryUpdate: MemoryUpdate? = nil
+    ) {
+        self.sameLocation = sameLocation
+        self.personUpright = personUpright
+        self.eyesOpen = eyesOpen
+        self.appearsAlert = appearsAlert
+        self.lightingSuggestsRoomLit = lightingSuggestsRoomLit
+        self.confidence = confidence
+        self.reasoning = reasoning
+        self.spoofingRuledOut = spoofingRuledOut
+        self.verdict = verdict
+        self.memoryUpdate = memoryUpdate
     }
 
     /// Extract the first JSON object from the Messages-API `content[0].text`
