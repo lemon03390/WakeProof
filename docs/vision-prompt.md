@@ -6,7 +6,7 @@
 >
 > **Current default:** `v2`.
 
-## v3 — 2026-04-24 (current default for Layer 2)
+## v3 — 2026-04-24 (shipped, not yet default — becomes default in Memory Phase B.2)
 
 v3 introduces memory-aware prompting (Layer 2). See `docs/memory-prompt.md` for the full v3 template and schema. v3 adds:
 - `<memory_context>` slot in the user-message for persistent user-profile + recent-history context
