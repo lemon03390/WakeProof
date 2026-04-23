@@ -79,4 +79,38 @@ final class WeeklyCoachTests: XCTestCase {
         let iso = ISO8601DateFormatter()
         XCTAssertEqual(iso.string(from: generatedAt), "2026-04-24T10:00:00Z")
     }
+
+    /// Verifies that optional fields (`patternNoticed`, `suggestedAction`) decode
+    /// to nil when Claude's response has them as JSON null — a realistic case
+    /// because the system prompt explicitly permits `null` for those fields.
+    /// This sits alongside `testLoadsFromFixture` (where both are populated) to
+    /// lock both shapes into the contract.
+    @MainActor
+    func testWrapperWithNullOptionalFields() throws {
+        let nullableJSON = """
+        {
+          "generatedAt": "2026-04-24T10:00:00Z",
+          "model": "claude-opus-4-7",
+          "elapsedSeconds": 3.15,
+          "inputTokens": 2800,
+          "outputTokens": 140,
+          "seedChecksum": "deadbeefcafef00d",
+          "insight": {
+            "insightText": "No strong pattern this week — verification stayed consistent across all 14 days.",
+            "patternNoticed": null,
+            "suggestedAction": null
+          }
+        }
+        """
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nullable-\(UUID().uuidString).json")
+        try nullableJSON.data(using: .utf8)!.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let coach = WeeklyCoach(resourceURL: tmp)
+        let insight = try XCTUnwrap(coach.currentInsight)
+        XCTAssertTrue(insight.insightText.contains("No strong pattern"))
+        XCTAssertNil(insight.patternNoticed)
+        XCTAssertNil(insight.suggestedAction)
+    }
 }

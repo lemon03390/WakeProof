@@ -177,6 +177,17 @@ def main() -> int:
         usage = parsed.get("usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+
+    # Guard against zero-text-block responses (max_tokens too low, weird
+    # stop_reason) so the user sees a specific error instead of the generic
+    # "output did not parse as JSON" message below.
+    if not content_text.strip():
+        sys.exit(
+            f"Claude returned no text content blocks (empty response). "
+            f"This usually means max_tokens was too low for the response "
+            f"or an unexpected stop_reason. Tokens used: {input_tokens} in / {output_tokens} out."
+        )
+
     # Claude is instructed to emit a single JSON object; parse it defensively.
     try:
         payload = json.loads(content_text)

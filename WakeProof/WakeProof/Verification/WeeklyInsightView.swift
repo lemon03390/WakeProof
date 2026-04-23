@@ -14,6 +14,15 @@ struct WeeklyInsightView: View {
 
     @State private var expanded: Bool = false
 
+    /// Treats a present-but-empty `insightText` as "no insight" so we don't render
+    /// a blank expanded panel when Claude's JSON had a whitespace-only string.
+    private var displayableInsight: WeeklyCoach.Insight? {
+        guard let insight,
+              !insight.insightText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return insight
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -21,7 +30,7 @@ struct WeeklyInsightView: View {
                 Text("This week's insight")
                     .font(.headline)
                 Spacer()
-                if insight != nil {
+                if displayableInsight != nil {
                     Button(action: { expanded.toggle() }) {
                         Image(systemName: expanded ? "chevron.up" : "chevron.down")
                     }
@@ -29,7 +38,7 @@ struct WeeklyInsightView: View {
                 }
             }
 
-            if let insight {
+            if let insight = displayableInsight {
                 if expanded {
                     Text(insight.insightText)
                         .font(.body)
