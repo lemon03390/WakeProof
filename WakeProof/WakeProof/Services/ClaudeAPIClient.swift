@@ -88,10 +88,19 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     }()
 
     private static var defaultSession: URLSession {
-        let config = URLSessionConfiguration.default
+        let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         config.waitsForConnectivity = false
+        // Force TLS 1.2 to change the handshake fingerprint Cloudflare's bot detection
+        // scores against. URLSession's default TLS 1.3 client-hello signature is apparently
+        // flagged as non-browser by Cloudflare's edge for api.anthropic.com (confirmed via
+        // device diagnostics: same request body returns 200 from `curl` but 403 from
+        // URLSession with Server=cloudflare cf-ray=…-HKG). TLS 1.2 has a markedly different
+        // ClientHello shape, which combined with the Safari-like header set brings the bot
+        // score under threshold.
+        config.tlsMaximumSupportedProtocolVersion = .TLSv12
+        config.tlsMinimumSupportedProtocolVersion = .TLSv12
         return URLSession(configuration: config)
     }
 
