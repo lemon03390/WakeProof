@@ -1,3 +1,12 @@
 name = "wakeproof-proxy"
 main = "worker.js"
 compatibility_date = "2026-04-23"
+
+# Custom domain bypass for iOS DNS sinkholing of `*.workers.dev` (commonly blocked
+# by consumer DNS filters as phishing-adjacent). `custom_domain = true` makes
+# Cloudflare auto-create a proxied DNS record for `wakeproof.aspiratcm.com`
+# pointing at this worker. Requires the aspiratcm.com zone to live on the same
+# Cloudflare account (confirmed present).
+routes = [
+  { pattern = "wakeproof.aspiratcm.com", custom_domain = true }
+]
