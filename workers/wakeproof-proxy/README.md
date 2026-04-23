@@ -1,4 +1,9 @@
-# WakeProof Claude Proxy (Cloudflare Worker)
+# WakeProof Claude Proxy (Cloudflare Worker) — **ARCHIVED**
+
+> **This Worker is no longer the primary proxy.** Use `workers/wakeproof-proxy-vercel/` instead. Kept in the repo as a reference implementation and because the debugging journey it captures is load-bearing context for the architectural decision. Cloudflare Workers from HK egress through HKG to Anthropic's HKG edge, which applies stricter bot rules against Worker-originated traffic and returns HTTP 403 (confirmed on device). Vercel Serverless (AWS Lambda US-East) bypasses the problem entirely.
+
+---
+
 
 Cloudflare Worker that forwards `POST /v1/messages` to `https://api.anthropic.com/v1/messages`.
 

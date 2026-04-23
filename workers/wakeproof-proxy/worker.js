@@ -40,17 +40,13 @@ export default {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
           'anthropic-version': anthropicVersion,
-          // Cloudflare Workers auto-forward `CF-Connecting-IP` (and several other
-          // client-tracking headers) when fetching a Cloudflare-protected origin
-          // like api.anthropic.com. Anthropic's edge then applies its bot rules
-          // against the iPhone's mobile IP (confirmed: x-wakeproof-upstream-status=403
-          // for iOS, 200 for the same body replayed via curl from a different IP).
-          // Override them with deliberately anonymous values so the upstream call
-          // looks like a clean server-to-server fetch from our Worker.
           'User-Agent': 'wakeproof-proxy/1.0',
-          'CF-Connecting-IP': '127.0.0.1',
-          'X-Forwarded-For': '127.0.0.1',
-          'X-Real-IP': '127.0.0.1',
+          // B11 fix: CF-Connecting-IP / X-Forwarded-For / X-Real-IP forgery removed.
+          // Setting these to 127.0.0.1 obscures the audit trail Anthropic sees for
+          // abuse investigation, violates Cloudflare TOS when the upstream origin is
+          // itself a Cloudflare customer (api.anthropic.com is), and was a no-op
+          // against the HKG-edge bot rules anyway — the real fix was moving to the
+          // Vercel proxy. This Worker path is now ARCHIVED; see README.md.
         },
         body,
       });

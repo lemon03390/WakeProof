@@ -159,6 +159,34 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         guard (200..<300).contains(http.statusCode) else {
             let snippet = String(data: data.prefix(2000), encoding: .utf8) ?? "<non-utf8>"
             let bodyBytes = request.httpBody?.count ?? -1
+            // R2 fix: the Vercel / Cloudflare proxies emit JSON with
+            // `{"error":{"type":"upstream_fetch_failed"|"upload_timeout"|"body_too_large"}}`
+            // for proxy-side failures. Special-case those so the user sees a
+            // diagnosis targeted at the actual failure layer (Anthropic unreachable
+            // vs. proxy upload timing) rather than a generic HTTP 4xx/5xx message.
+            // Status codes: 408/413/502 are the proxy's conventions; any status can
+            // carry this shape, so we key off the JSON body's error.type.
+            struct ProxyError: Decodable {
+                struct Inner: Decodable { let type: String?; let message: String? }
+                let error: Inner?
+            }
+            if let body = try? JSONDecoder().decode(ProxyError.self, from: data),
+               let type = body.error?.type,
+               ["upstream_fetch_failed", "upload_timeout", "body_too_large"].contains(type) {
+                logger.error("Proxy-layer failure type=\(type, privacy: .public) status=\(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s")
+                // Surface as transportFailed so the verifier's error handler uses the
+                // "Couldn't reach Claude" user message (which is accurate — this is a
+                // proxy-or-anthropic connectivity failure, not an HTTP status Claude returned).
+                let proxyError = NSError(
+                    domain: "WakeProofProxy",
+                    code: http.statusCode,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: body.error?.message ?? type,
+                        "proxyErrorType": type,
+                    ]
+                )
+                throw ClaudeAPIError.transportFailed(underlying: proxyError)
+            }
             // B5 fix: Anthropic error bodies commonly echo back request fragments including
             // base64 image bytes; response headers include session identifiers. Both go to
             // `.private` so a sysdiagnose submission doesn't ship face/location imagery

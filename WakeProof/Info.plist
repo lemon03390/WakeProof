@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>WakeProof needs the camera to verify you're actually out of bed when your alarm rings. We take one photo per wake attempt, stored locally on your device.</string>
+	<string>WakeProof needs the camera to verify you're actually out of bed when your alarm rings. Each wake attempt records a brief clip; a single still frame is sent to Anthropic's Claude AI for verification, and the clip is stored locally on your device.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>WakeProof records a brief (≤2s) clip alongside your wake-up photo. The microphone is only accessed during the wake-up verification; audio is kept local and never uploaded.</string>
 	<key>NSHealthShareUsageDescription</key>
