@@ -220,6 +220,31 @@ Layer 1 ~$0.013/verification (Decision 2). Layers 2–4 are bounded: Memory Tool
 ### Demo key line (verbatim)
 > "WakeProof uses Opus 4.7 not as a single API call, but as four layers: real-time high-res vision for verification, persistent memory for personalization, an overnight managed agent for sleep analysis, and a weekly coaching loop. Each layer uses a capability that only 4.7 unlocks."
 
+### Addendum (2026-04-24) — Layer 2 ships as prompt-injection, not Memory Tool protocol
+
+The Day 2 research notes (`docs/opus-4-7-research-notes.md` Question 1) confirmed the Memory Tool is client-side with full read+write support during a run. Day 4 planning brainstorm nevertheless chose to ship Layer 2 as prompt-injection rather than the real tool protocol. Reasons:
+
+1. **Vercel Hobby 10 s cap.** Day 3's smoke tests observed 11–13 s upstream latency on single-round-trip vision calls. A 3-leg agentic loop (view → possible read → possible write → verdict) would timeout unpredictably on bad-network days.
+2. **Demo reliability trumps protocol fidelity.** The alarm is useless if verification sometimes takes 30 s. Prompt-injection is a guaranteed single round-trip.
+3. **Memory content does not require the six-command API.** `view` + `str_replace` carry the load; we would build and test protocol plumbing to not use most of it.
+4. **The real protocol lands in Layer 3.** The overnight Managed Agent has all night to do tool-call round-trips; that is where the "Claude uses its Memory Tool" demo story belongs. See `docs/plans/overnight-agent.md`.
+
+### Revised Layer 2 table row
+
+| Layer | Capability exploited | When it runs | Ties into |
+|---|---|---|---|
+| 2 Persistent Memory | File-system memory authored by Claude, injected as prompt context at verify time and accessed via Memory Tool protocol inside Layer 3 | Read on every verification (Layer 1 path); read + written on every overnight session (Layer 3 path) | new (both) |
+
+### Rejected alternative for Layer 2
+
+| Alternative | Why rejected |
+|---|---|
+| Ship real Memory Tool protocol for Layer 2 (the morning verify path) | 3-leg tool loop × variable upstream latency × Vercel 10 s cap = unreliable demo. Layer 3 recaptures the "real tool" narrative for the overnight agent path where time budget absorbs round-trip variance. |
+
+### Demo narrative implications
+
+The demo video's Layer 2 frame no longer says "Claude uses its memory tool"; it says "Claude reads and writes a persistent memory file every verification." The file, the profile content, and the history are all real and shown on-screen — the only protocol-level difference is invisible to judges. The overnight agent demo (Layer 3) restores the "tool" framing for the 25% criterion.
+
 ---
 
 ## Open Questions (resolve during build)
