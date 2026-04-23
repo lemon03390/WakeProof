@@ -6,6 +6,16 @@
 >
 > **Current default:** `v2`.
 
+## v3 — 2026-04-24 (current default for Layer 2)
+
+v3 introduces memory-aware prompting (Layer 2). See `docs/memory-prompt.md` for the full v3 template and schema. v3 adds:
+- `<memory_context>` slot in the user-message for persistent user-profile + recent-history context
+- Optional `memory_update` output field so Claude can propose durable insights back to the store
+
+v2 remains the rollback default in `ClaudeAPIClient.init`; v3 becomes default in Memory Phase B.2 once wiring lands.
+
+---
+
 ## v2 — 2026-04-23 (current default)
 
 ### System prompt

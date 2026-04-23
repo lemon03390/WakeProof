@@ -290,4 +290,56 @@ final class ClaudeAPIClientTests: XCTestCase {
             XCTFail("wrong error: \(error)")
         }
     }
+
+    // MARK: - Layer 2 v3 prompt template
+
+    func testV3SystemPromptMentionsMemoryContext() {
+        let system = VisionPromptTemplate.v3.systemPrompt()
+        XCTAssertTrue(system.contains("<memory_context>"), "v3 system prompt must tell the model memory_context may appear")
+    }
+
+    func testV3SystemPromptMentionsMemoryUpdate() {
+        let system = VisionPromptTemplate.v3.systemPrompt()
+        XCTAssertTrue(system.contains("memory_update"), "v3 system prompt must mention the optional memory_update output")
+    }
+
+    func testV3UserPromptIncludesMemoryBlockWhenProvided() {
+        let text = VisionPromptTemplate.v3.userPrompt(
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil,
+            memoryContext: "<memory_context>fake block</memory_context>"
+        )
+        XCTAssertTrue(text.contains("<memory_context>fake block</memory_context>"))
+    }
+
+    func testV3UserPromptOmitsMemoryWhenNil() {
+        let withNil = VisionPromptTemplate.v3.userPrompt(
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil,
+            memoryContext: nil
+        )
+        XCTAssertFalse(withNil.contains("<memory_context>"), "nil memoryContext must produce no memory block in v3 user prompt")
+    }
+
+    func testV2IgnoresMemoryContextParameter() {
+        // Ensures passing memoryContext to v2 does not silently mutate the output —
+        // the v2 branch must be byte-identical whether memoryContext is nil or set.
+        let noMem = VisionPromptTemplate.v2.userPrompt(
+            baselineLocation: "kitchen", antiSpoofInstruction: nil, memoryContext: nil
+        )
+        let withMem = VisionPromptTemplate.v2.userPrompt(
+            baselineLocation: "kitchen", antiSpoofInstruction: nil, memoryContext: "<memory_context>IGNORED</memory_context>"
+        )
+        XCTAssertEqual(noMem, withMem, "v2 must ignore the memoryContext parameter")
+    }
+
+    func testV1IgnoresMemoryContextParameter() {
+        let noMem = VisionPromptTemplate.v1.userPrompt(
+            baselineLocation: "kitchen", antiSpoofInstruction: nil, memoryContext: nil
+        )
+        let withMem = VisionPromptTemplate.v1.userPrompt(
+            baselineLocation: "kitchen", antiSpoofInstruction: nil, memoryContext: "<memory_context>IGNORED</memory_context>"
+        )
+        XCTAssertEqual(noMem, withMem, "v1 must ignore the memoryContext parameter")
+    }
 }
