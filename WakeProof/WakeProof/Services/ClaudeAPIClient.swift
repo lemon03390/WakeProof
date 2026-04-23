@@ -170,11 +170,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         request.httpBody = bodyData
 
         let start = Date()
-        // B5 fix: image byte counts and anti-spoof instruction live inside `.private` —
+        // Image byte counts and anti-spoof instruction text live behind `.private` —
         // not secrets per se, but they reveal session-specific details that sysdiagnose
-        // collection would otherwise capture verbatim. Model + retry context stays public
-        // so field debugging still lands useful signal without exposing per-session state.
-        logger.info("Calling Claude \(model, privacy: .public) with \(baselineJPEG.count, privacy: .private)+\(stillJPEG.count, privacy: .private) bytes of image data; antiSpoof=\(antiSpoofInstruction ?? "nil", privacy: .private)")
+        // would otherwise capture verbatim. Model + boolean "has retry instruction" stay
+        // public so field triage can tell at a glance whether this call is the initial
+        // verify or an anti-spoof retry.
+        let hasAntiSpoof = antiSpoofInstruction != nil
+        logger.info("Calling Claude \(model, privacy: .public) hasAntiSpoof=\(hasAntiSpoof, privacy: .public) imageBytes=\(baselineJPEG.count, privacy: .private)+\(stillJPEG.count, privacy: .private) instruction=\(antiSpoofInstruction ?? "nil", privacy: .private)")
         #if DEBUG
         // B7 fix: diagnostic probes were built for Cloudflare HKG debugging and have
         // no production purpose. In release they'd add up to 15s of ring-ceiling spend

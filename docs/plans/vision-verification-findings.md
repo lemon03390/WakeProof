@@ -292,3 +292,18 @@ try? FileManager.default.setAttributes(
 
 ### PR Quality Score (post-C.2, pre-C.3 re-review)
 100 − (0 Blocking × 15) − (0 Required × 5) − (3 Deferred-Suggestion × 1) = **97 → Grade A**. All blockers resolved or mitigated; all required resolved; remaining deferrals carry technical rationale.
+
+---
+
+## Phase C.3 Re-Review (2026-04-23)
+
+Ran adversarial-review on post-simplify HEAD. Status: **Approved**, 113/120 → Grade A (94%). Three fresh Suggestion findings surfaced + fixed:
+
+| ID | Issue | Fix |
+|---|---|---|
+| N1 | `workers/wakeproof-proxy/wrangler.toml` still had live `wakeproof.aspiratcm.com` route — `wrangler deploy` from the archived directory could accept production traffic. | Renamed `name = "wakeproof-proxy-archived"`, commented out `routes` + `[placement]`, and added an in-file warning pointing to the dashboard-side deletion step. |
+| N2 | `logger.info("Calling Claude…")` logged instruction text at `.private` only; field triage couldn't tell at a glance whether a call was the initial verify or an anti-spoof retry. | Added `hasAntiSpoof: Bool` at `.public` alongside the private instruction string. |
+| N3 | `moveVideoToDocuments` calls `setResourceValues` per capture; directory lifecycle is app-lifetime so could be hoisted to `bootstrapIfNeeded`. Reviewer: "Not required for this PR." | **Won't-fix for Day 3.** Negligible severity; directory-creation path is rare and the `try? set` is microsecond-fast. Consider for Day 5 polish. |
+
+### Final PR Quality Score
+**94% → Grade A.** No Blocking or Required findings remain. The 3 deferred Suggestions (S3 cold-start UI, S7 Documents retention, N3 setResourceValues hoist) carry explicit technical rationale.

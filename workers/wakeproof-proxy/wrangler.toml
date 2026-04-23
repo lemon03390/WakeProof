@@ -1,22 +1,17 @@
-name = "wakeproof-proxy"
+# ARCHIVED — DO NOT DEPLOY. See ./README.md.
+#
+# The worker name is deliberately renamed and the custom-domain route is commented
+# out so `wrangler deploy` from this directory cannot accept production traffic.
+# The live `wakeproof.aspiratcm.com` deployment from an earlier build still exists;
+# delete it from the Cloudflare dashboard (Workers & Pages → wakeproof-proxy → Delete)
+# to fully retire the archived code path. Production traffic now flows through
+# ../wakeproof-proxy-vercel/.
+name = "wakeproof-proxy-archived"
 main = "worker.js"
 compatibility_date = "2026-04-23"
 
-# Custom domain bypass for iOS DNS sinkholing of `*.workers.dev` (commonly blocked
-# by consumer DNS filters as phishing-adjacent). `custom_domain = true` makes
-# Cloudflare auto-create a proxied DNS record for `wakeproof.aspiratcm.com`
-# pointing at this worker. Requires the aspiratcm.com zone to live on the same
-# Cloudflare account (confirmed present).
-routes = [
-  { pattern = "wakeproof.aspiratcm.com", custom_domain = true }
-]
-
-# Smart Placement: run this Worker near the UPSTREAM origin (api.anthropic.com,
-# US-East area) rather than the request's source region. Without it, a Hong-Kong
-# iPhone pulls the Worker to Cloudflare's HKG edge, which egresses to Anthropic's
-# HKG edge where bot rules are significantly stricter and the upstream fetch
-# returned HTTP 403 (confirmed via x-wakeproof-upstream-status=403). Smart
-# Placement re-homes the Worker to Anthropic's side of the network.
-# https://developers.cloudflare.com/workers/configuration/smart-placement/
-[placement]
-mode = "smart"
+# routes = [
+#   { pattern = "wakeproof.aspiratcm.com", custom_domain = true }
+# ]
+# [placement]
+# mode = "smart"
