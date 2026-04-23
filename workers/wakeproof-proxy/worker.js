@@ -56,6 +56,12 @@ export default {
       'Content-Type',
       upstream.headers.get('Content-Type') || 'application/json'
     );
+    // Marker header so iOS diagnostics can confirm the Worker ran at all. If this
+    // header is missing from the response the iOS app sees, the request was blocked
+    // pre-Worker (most likely at Cloudflare's L7 DDoS / Super Bot Fight Mode phase,
+    // which runs before the custom WAF skip rule gets a chance to fire).
+    responseHeaders.set('x-wakeproof-worker', 'v2');
+    responseHeaders.set('x-wakeproof-upstream-status', String(upstream.status));
     // Forward a few useful debug/metadata headers so the iOS logger can still
     // capture request_id and rate-limit state if Anthropic returns them.
     for (const key of [
