@@ -58,11 +58,12 @@ fastlane/test_output
 *.swo
 *~
 
-# Claude Code session artefacts (project-local, not for the repo)
-.claude/session-state.md
-.claude/error-tracker.json
-.claude/plpgsql-graph.json
-.claude/plpgsql-graph-report.md
+# Claude Code session artefacts, skills, and any other state the IDE drops
+# into this directory — all sourced from the user's global ~/.claude install,
+# not meaningful per-project history. Covers session-state.md, error-tracker.json,
+# plpgsql-graph.json, plpgsql-graph-report.md, skills/, and anything else the
+# harness may add in future.
+.claude/
 
 # Environment
 .env
