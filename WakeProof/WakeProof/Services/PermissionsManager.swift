@@ -8,7 +8,6 @@
 //
 
 import AVFoundation
-import CoreMotion
 import Foundation
 import HealthKit
 import UserNotifications
@@ -29,32 +28,27 @@ final class PermissionsManager {
     // MARK: - Observable state
 
     var notifications: Status = .notRequested
-    var criticalAlerts: Status = .notRequested
     var camera: Status = .notRequested
     var healthKit: Status = .notRequested
-    var motion: Status = .notRequested
 
     // MARK: - Private
 
     private let logger = Logger(subsystem: "com.wakeproof.permissions", category: "manager")
     private let healthStore = HKHealthStore()
-    private let motionManager = CMMotionActivityManager()
 
     // MARK: - Individual requests
 
     func requestNotifications() async {
+        // Note: `.criticalAlert` was previously included here, but the entitlement
+        // `com.apple.developer.usernotifications.critical-alerts` has been requested from Apple
+        // and not yet granted. Without the entitlement iOS silently strips the option, so the
+        // code path was misleading. Add `.criticalAlert` back once Apple approves and the
+        // provisioning profile includes the entitlement.
         let center = UNUserNotificationCenter.current()
         do {
-            let granted = try await center.requestAuthorization(
-                options: [.alert, .sound, .badge, .criticalAlert]
-            )
+            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
             notifications = granted ? .granted : .denied
-
-            // Critical alert entitlement is almost certainly not granted — document the status.
-            let settings = await center.notificationSettings()
-            criticalAlerts = (settings.criticalAlertSetting == .enabled) ? .granted : .denied
-
-            logger.info("Notifications: \(String(describing: self.notifications), privacy: .public); criticalAlerts: \(String(describing: self.criticalAlerts), privacy: .public)")
+            logger.info("Notifications: \(String(describing: self.notifications), privacy: .public)")
         } catch {
             logger.error("Notifications request failed: \(error.localizedDescription, privacy: .public)")
             notifications = .denied
@@ -107,38 +101,4 @@ final class PermissionsManager {
         }
     }
 
-    func requestMotion() async {
-        guard CMMotionActivityManager.isActivityAvailable() else {
-            motion = .denied
-            return
-        }
-        // CMMotionActivityManager has no explicit request API — a first query triggers the prompt.
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            motionManager.queryActivityStarting(from: Date().addingTimeInterval(-60), to: Date(), to: .main) { [weak self] _, error in
-                // queue: .main hands the callback to OperationQueue.main, which executes on
-                // the main thread; bridge into MainActor isolation so observable state mutations
-                // happen on the same actor that PermissionsManager itself is bound to.
-                MainActor.assumeIsolated {
-                    guard let self else {
-                        continuation.resume()
-                        return
-                    }
-                    if let error = error as NSError? {
-                        if error.domain == CMErrorDomain,
-                           error.code == Int(CMErrorMotionActivityNotAuthorized.rawValue) {
-                            self.motion = .denied
-                            self.logger.info("Motion: user denied authorization")
-                        } else {
-                            self.motion = .failed
-                            self.logger.error("Motion query failed (non-auth): domain=\(error.domain, privacy: .public) code=\(error.code, privacy: .public) — \(error.localizedDescription, privacy: .public)")
-                        }
-                    } else {
-                        self.motion = .granted
-                        self.logger.info("Motion: granted")
-                    }
-                    continuation.resume()
-                }
-            }
-        }
-    }
 }

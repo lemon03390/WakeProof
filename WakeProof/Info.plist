@@ -32,10 +32,6 @@
 	<string>WakeProof records a brief (≤2s) clip alongside your wake-up photo. The microphone is only accessed during the wake-up verification; audio is kept local and never uploaded.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>WakeProof reads your sleep data from Apple Health to show you a summary of last night's rest when you successfully wake up.</string>
-	<key>NSMotionUsageDescription</key>
-	<string>WakeProof uses motion data to detect your natural awakening window and time your alarm to a lighter sleep phase. Motion stays on your device.</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>WakeProof optionally saves your baseline reference photo to your Photos library as a backup.</string>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>WakeProof sends alarm notifications so you wake up on time, even if the app is backgrounded.</string>
 	<key>UIApplicationSceneManifest</key>

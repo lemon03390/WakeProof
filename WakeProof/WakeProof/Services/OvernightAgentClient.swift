@@ -85,27 +85,25 @@ actor OvernightAgentClient {
     }
 
     private static var defaultBaseURL: URL {
-        // Strip the messages suffix if the Day 3 Secrets value points at it.
-        let raw = Secrets.claudeEndpoint.isEmpty
-            ? "https://api.anthropic.com"
-            : Secrets.claudeEndpoint
         // Secrets.claudeEndpoint ends in ".../v1/messages" on Day 3; the base URL for
         // the agent client is the same host without the messages segment. Our proxy's
         // wildcard route resolves everything from /v1/* onwards.
-        if let url = URL(string: raw),
+        //
+        // Empty endpoint must crash loudly — a silent fallback to api.anthropic.com would
+        // route around the proxy and either 401 (no x-api-key) or leak the Anthropic key
+        // from the client if someone ever hardcoded one. Copy Secrets.swift.example →
+        // Secrets.swift and fill in your Vercel proxy URL.
+        precondition(
+            !Secrets.claudeEndpoint.isEmpty,
+            "OvernightAgentClient: Secrets.claudeEndpoint is empty — set it to your Vercel proxy URL in Secrets.swift"
+        )
+        if let url = URL(string: Secrets.claudeEndpoint),
            let host = url.host,
            let scheme = url.scheme,
            let derived = URL(string: "\(scheme)://\(host)") {
             return derived
         }
-        // If both the configured endpoint and the fallback fail to parse, we have
-        // nothing we can usefully do at runtime — crash loudly so the issue is
-        // surfaced in CI / on first launch rather than later with confusing
-        // .invalidURL errors from every call.
-        guard let fallback = URL(string: "https://api.anthropic.com") else {
-            preconditionFailure("OvernightAgentClient: hardcoded fallback URL failed to parse")
-        }
-        return fallback
+        preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
     }
 
     private static var defaultSession: URLSession {

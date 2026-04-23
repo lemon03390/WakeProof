@@ -2,7 +2,7 @@
 //  BedtimeStep.swift
 //  WakeProof
 //
-//  New onboarding step (between .motion and .baseline) that asks the user
+//  New onboarding step (between .health and .baseline) that asks the user
 //  when they plan to sleep. Skippable; the overnight-agent feature works
 //  with the default 23:00 bedtime and can be revisited in Settings later.
 //

@@ -94,12 +94,9 @@ struct AlarmSchedulerView: View {
         if let audioError = audioKeepalive.lastError {
             return "Audio session problem: \(audioError) The alarm may not survive lock screen."
         }
-        // Motion / HealthKit failures don't break the alarm but disable optional features
-        // (natural-wake window, last-night summary). Surface so the user knows why those
-        // features are silent. `.failed` (transient/hardware) is more actionable than `.denied`.
-        if permissions.motion == .failed {
-            return "Motion data unavailable — natural-wake timing is off."
-        }
+        // HealthKit failure doesn't break the alarm but disables the last-night summary.
+        // Surface so the user knows why the feature is silent. `.failed` (transient/hardware)
+        // is more actionable than `.denied` (user chose no).
         if permissions.healthKit == .failed {
             return "Apple Health unavailable — last-night summary won't appear."
         }

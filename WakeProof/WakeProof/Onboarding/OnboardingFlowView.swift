@@ -10,10 +10,9 @@
 //    1. Notifications permission
 //    2. Camera permission
 //    3. HealthKit permission
-//    4. Motion permission
-//    5. Bedtime (Layer 3 briefing enablement — skippable, default 23:00)
-//    6. Baseline photo capture
-//    7. Done — hand off to home
+//    4. Bedtime (Layer 3 briefing enablement — skippable, default 23:00)
+//    5. Baseline photo capture
+//    6. Done — hand off to home
 //
 
 import SwiftData
@@ -30,7 +29,7 @@ struct OnboardingFlowView: View {
     private let logger = Logger(subsystem: "com.wakeproof.onboarding", category: "flow")
 
     enum Step: CaseIterable {
-        case welcome, notifications, camera, health, motion, bedtime, baseline, done
+        case welcome, notifications, camera, health, bedtime, baseline, done
     }
 
     var body: some View {
@@ -45,7 +44,7 @@ struct OnboardingFlowView: View {
                     // can't fire and the alarm silently no-ops if the OS has suspended the process.
                     PermissionStep(
                         title: "Let us wake you",
-                        message: "WakeProof needs notification permission to ring your alarm. Critical Alert permission is requested too — that's the one that bypasses silent mode when your morning self has muted your phone.",
+                        message: "WakeProof needs notification permission to ring your alarm even when the app is backgrounded. Keep your phone on ringer mode — silent mode bypass requires a Critical Alerts entitlement Apple is still reviewing.",
                         action: "Enable notifications",
                         deniedMessage: "Without notifications WakeProof can't reliably wake you. Open Settings → WakeProof → Notifications to enable, then return.",
                         handler: {
@@ -76,19 +75,6 @@ struct OnboardingFlowView: View {
                             await permissions.requestHealthKit()
                         },
                         // Optional permission — never block advance.
-                        verifyGranted: { true },
-                        onAdvance: advance,
-                        secondaryHandler: advance
-                    )
-                case .motion:
-                    PermissionStep(
-                        title: "Catch the natural wake",
-                        message: "WakeProof watches for the micro-movements that mean you're already drifting toward consciousness, and times your alarm to that moment instead of jolting you out of deep sleep.",
-                        action: "Enable motion",
-                        secondary: "Skip",
-                        handler: {
-                            await permissions.requestMotion()
-                        },
                         verifyGranted: { true },
                         onAdvance: advance,
                         secondaryHandler: advance
