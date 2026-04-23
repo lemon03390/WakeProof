@@ -2,14 +2,15 @@
 //  NoopBriefingSource.swift
 //  WakeProof
 //
-//  Placeholder OvernightBriefingSource. Phase A ships this so the scheduler
-//  can be instantiated without picking a concrete source; Phase B.5 swaps it
-//  for either `ManagedAgentBriefingSource` (primary) or `SynthesisBriefingSource`
-//  (fallback) based on the B.3 decision-gate outcome.
+//  Retained post-B.5 for (1) SwiftUI previews that need a scheduler without
+//  hitting the network, and (2) rollback / B.4b if we ever need to swap the
+//  primary `ManagedAgentBriefingSource` back out. Phase B.5 wired
+//  ManagedAgentBriefingSource as the live source in WakeProofApp; this type
+//  is no longer on the production hot path.
 //
 //  `planOvernight` and `pokeIfNeeded` succeed trivially so the scheduler's
 //  happy path is exercised end-to-end in tests. `fetchBriefing` throws —
-//  a wake-time call reaching the noop means B.5 failed to wire a real
+//  a wake-time call reaching the noop means something failed to wire a real
 //  source, which should be loud (error in logs) rather than silent.
 //
 

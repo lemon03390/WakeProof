@@ -27,7 +27,9 @@ struct WakeProofApp: App {
     // they provide no SwiftUI-observable surface. A @State wrapper around a value-type
     // actor-reference adds binding machinery we never use.
     private let memoryStore = MemoryStore()
-    private let noopSource = NoopBriefingSource()
+    // Primary path (B.5): Managed Agents. `NoopBriefingSource` is retained in the
+    // codebase for previews and rollback — see NoopBriefingSource.swift header.
+    private let briefingSource = ManagedAgentBriefingSource()
     private let sleepReader = HealthKitSleepReader()
     private let overnightScheduler: OvernightScheduler
 
@@ -55,18 +57,18 @@ struct WakeProofApp: App {
         }
 
         // Build scheduler synchronously so it's ready for RootView at first render.
-        // Phase B.5 will swap `NoopBriefingSource` for the concrete source chosen by
-        // the B.3 decision gate — until then, `fetchBriefing` throws loudly so a
-        // wake-time finalize logs an error rather than silently succeeding.
+        // Phase B.5 wired `ManagedAgentBriefingSource` (primary path, chosen by the
+        // B.3 decision gate) as the live source — each bedtime starts a real Managed
+        // Agents session; each wake fetches the final agent.message.
         let scheduler = OvernightScheduler(
-            source: noopSource,
+            source: briefingSource,
             sleepReader: sleepReader,
             memoryStore: memoryStore,
             modelContainer: modelContainer
         )
         self.overnightScheduler = scheduler
         Self.schedulerBox.value = scheduler
-        Self.logger.info("OvernightScheduler instantiated with NoopBriefingSource (B.5 swaps)")
+        Self.logger.info("OvernightScheduler wired with ManagedAgentBriefingSource (primary path)")
 
         // BGTaskScheduler requires identifier registration before
         // `application(_:didFinishLaunchingWithOptions:)` returns. `.task { bootstrapIfNeeded }`
