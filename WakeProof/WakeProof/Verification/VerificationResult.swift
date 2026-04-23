@@ -40,7 +40,13 @@ struct VerificationResult: Codable, Equatable {
     let lightingSuggestsRoomLit: Bool
     let confidence: Double
     let reasoning: String
-    let spoofingRuledOut: [String]
+    /// Optional — v1 prompt required the model to enumerate three ruled-out spoofing
+    /// methods (photo-of-photo, mannequin, deepfake). Per user product insight
+    /// (2026-04-23), WakeProof is a self-commitment tool where the user is both
+    /// attacker and victim — adversarial threats are theoretical. The v2 prompt
+    /// drops the field to reduce token cost and false-positive RETRY rate. The
+    /// decoder remains compatible with v1 responses that still include the array.
+    let spoofingRuledOut: [String]?
     let verdict: Verdict
 
     /// Convenience forwarder so callers can write `result.mapped` without drilling

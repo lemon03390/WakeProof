@@ -72,7 +72,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         proxyToken: String = Secrets.wakeproofToken,
         model: String = Secrets.visionModel,
         endpoint: URL = Self.defaultEndpoint,
-        promptTemplate: VisionPromptTemplate = .v1
+        promptTemplate: VisionPromptTemplate = .v2
     ) {
         self.session = session
         self.proxyToken = proxyToken
@@ -82,16 +82,32 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     }
 
     /// Where verification POSTs go. Reads from `Secrets.claudeEndpoint` first so a
-    /// deployed Cloudflare Worker proxy (see `workers/wakeproof-proxy/`) can bypass
-    /// Cloudflare Bot Management's iOS-URLSession block. Falls back to Anthropic direct
-    /// when the Secrets value is empty — useful for simulator paths where the bot-scoring
-    /// isn't triggered and for any future server-to-server call site.
+    /// deployed Vercel proxy (see `workers/wakeproof-proxy-vercel/`) can bypass the
+    /// direct-to-Anthropic Cloudflare HKG bot rules. Falls back to Anthropic direct
+    /// when the Secrets value is empty — useful for simulator paths where the
+    /// bot-scoring isn't triggered.
+    ///
+    /// S9 fix: hostname allowlisted at launch so a Secrets.swift tamper or copy-paste
+    /// mistake can't silently route verification traffic to an attacker-controlled
+    /// host. If the allowlist ever grows (e.g. a staging Vercel deployment), append
+    /// to `allowedEndpointSuffixes`.
+    private static let allowedEndpointSuffixes: [String] = [
+        ".vercel.app",
+        ".aspiratcm.com",
+        "api.anthropic.com",
+    ]
     private static let defaultEndpoint: URL = {
         let endpointString = Secrets.claudeEndpoint.isEmpty
             ? "https://api.anthropic.com/v1/messages"
             : Secrets.claudeEndpoint
-        guard let url = URL(string: endpointString) else {
+        guard let url = URL(string: endpointString), let host = url.host else {
             preconditionFailure("Claude endpoint URL failed to parse: \(endpointString)")
+        }
+        let hostAllowed = allowedEndpointSuffixes.contains { suffix in
+            host == suffix || host.hasSuffix(suffix)
+        }
+        guard hostAllowed else {
+            preconditionFailure("Claude endpoint host \(host) not in allowlist \(allowedEndpointSuffixes)")
         }
         return url
     }()
@@ -302,7 +318,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         return [
             "model": model,
-            "max_tokens": 600,
+            // S8 fix: bumped 600 → 800. Measured reasoning fields hit ~400 chars;
+            // JSON overhead (field names, booleans, confidence, verdict) adds ~150
+            // tokens. 600 was cutting it close enough that a detailed RETRY reasoning
+            // risked truncation. 800 gives ~30% headroom. Trimming the prompt itself
+            // (v1 → v2) also cuts upstream latency which amortizes the small output-
+            // token increase against the Vercel 10s cap.
+            "max_tokens": 800,
             "system": systemPrompt,
             "messages": [
                 [
@@ -405,10 +427,15 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     }
 }
 
-/// Versioned prompt template. `v1` is the Day 3 baseline; any prompt change
-/// bumps the version and must update `docs/vision-prompt.md` in the same commit.
+/// Versioned prompt template. Bumping the version requires updating
+/// `docs/vision-prompt.md` in the same commit. `v2` is the current default — it
+/// drops the three-method spoofing chain from v1 because WakeProof is a
+/// self-commitment tool where the user is both attacker and victim, making the
+/// adversarial-threat enumeration a token cost and false-positive-RETRY risk
+/// without real threat-model benefit. `v1` is retained for rollback.
 enum VisionPromptTemplate {
     case v1
+    case v2
 
     func systemPrompt() -> String {
         switch self {
@@ -431,6 +458,23 @@ enum VisionPromptTemplate {
             Your entire response MUST be a single JSON object matching the schema the user provides. No prose \
             outside the JSON. No apologies. No hedging. If you cannot decide, return verdict "RETRY" with your \
             reasoning — do not refuse to respond.
+            """
+        case .v2:
+            return """
+            You are the verification layer of a wake-up accountability app. The user set a self-commitment \
+            contract with themselves: to dismiss the alarm, they must prove they're out of bed and at a \
+            designated location. Compare BASELINE PHOTO (their awake-location at onboarding) to LIVE PHOTO \
+            (just captured when the alarm fired) and return a single JSON object with your verdict.
+
+            This is NOT an adversarial setting. The user isn't trying to defeat you — they set this alarm \
+            themselves because they want to wake up. Your job is to be a reliable liveness check, not a \
+            security-theatre spoof detector. Be strict on location + posture + alertness; be generous on \
+            minor variance (grogginess, messy hair, different clothes). A genuinely awake user should get \
+            VERIFIED. A genuinely-at-location-but-groggy user should get RETRY. A user who is in bed or at \
+            the wrong location should get REJECTED.
+
+            Your entire response MUST be a single JSON object matching the schema below. No prose outside \
+            the JSON. Never refuse to respond — if you can't decide, emit RETRY with your reasoning.
             """
         }
     }
@@ -473,6 +517,40 @@ enum VisionPromptTemplate {
                 open, or confidence is between 0.55 and 0.75.
               - REJECTED: location is wrong, person appears to be in bed or lying down, a spoofing method is \
                 plausible, or confidence < 0.55.
+            """
+        case .v2:
+            let livenessBlock = antiSpoofInstruction.map { instruction in
+                """
+
+
+                LIVENESS CHECK: the user was asked to "\(instruction)". The LIVE photo is their re-capture. \
+                Verify they visibly performed that action. If they didn't (same still posture, no gesture \
+                visible), downgrade toward REJECTED — they're likely re-presenting an earlier capture.
+                """
+            } ?? ""
+
+            return """
+            BASELINE PHOTO: captured at the user's designated awake-location ("\(baselineLocation)").
+            LIVE PHOTO: just captured at alarm time. Verify the user is at the same location, upright (NOT \
+            lying in bed), eyes open, and appears alert.\(livenessBlock)
+
+            Return a single JSON object with exactly these fields:
+
+            {
+              "same_location": true | false,
+              "person_upright": true | false,
+              "eyes_open": true | false,
+              "appears_alert": true | false,
+              "lighting_suggests_room_lit": true | false,
+              "confidence": <float 0.0 to 1.0>,
+              "reasoning": "<one sentence, under 300 chars, explain the verdict>",
+              "verdict": "VERIFIED" | "REJECTED" | "RETRY"
+            }
+
+            Verdict rules:
+              - VERIFIED: same location AND upright AND eyes open AND appears alert AND confidence ≥ 0.75.
+              - RETRY: same location but posture or alertness is ambiguous, OR confidence 0.55–0.75.
+              - REJECTED: different location, lying down / in bed, user not visible, OR confidence < 0.55.
             """
         }
     }

@@ -27,7 +27,7 @@ final class VerificationResultTests: XCTestCase {
         XCTAssertEqual(result.verdict, .verified)
         XCTAssertEqual(result.mapped, .verified)
         XCTAssertEqual(result.confidence, 0.92, accuracy: 0.001)
-        XCTAssertEqual(result.spoofingRuledOut.count, 3)
+        XCTAssertEqual(result.spoofingRuledOut?.count ?? 0, 3)
     }
 
     func testFencedJSONBlockDecodes() throws {

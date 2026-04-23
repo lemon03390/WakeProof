@@ -68,3 +68,7 @@ fastlane/test_output
 .env
 .env.local
 *.local
+
+# Proxy scratch / local state (each subproject's tools create these)
+workers/wakeproof-proxy-vercel/.vercel/
+workers/wakeproof-proxy/.wrangler/
