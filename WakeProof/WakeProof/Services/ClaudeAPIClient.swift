@@ -128,6 +128,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         let start = Date()
         logger.info("Calling Claude \(model, privacy: .public) with \(baselineJPEG.count, privacy: .public)+\(stillJPEG.count, privacy: .public) bytes of image data; antiSpoof=\(antiSpoofInstruction ?? "nil", privacy: .public)")
+        await Self.dumpNetworkDiagnosticsOnce(session: session, endpoint: endpoint, logger: logger)
 
         let data: Data
         let response: URLResponse
@@ -236,6 +237,54 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 ]
             ]
         ]
+    }
+
+    /// One-shot network diagnostic: runs on the first verification call of each app
+    /// launch, logs system proxy settings plus three HTTPS probe requests so we can tell
+    /// which layer is broken when the Claude call fails with -1004 / 127.0.0.1 routing.
+    /// Subsequent calls skip the dump to avoid log spam and probe cost.
+    private static let diagnosticsLock = OSAllocatedUnfairLock(initialState: false)
+    private static func dumpNetworkDiagnosticsOnce(session: URLSession, endpoint: URL, logger: Logger) async {
+        let alreadyRan = diagnosticsLock.withLock { ran -> Bool in
+            if ran { return true }
+            ran = true
+            return false
+        }
+        if alreadyRan { return }
+
+        // System proxy settings (set via Settings > Wi-Fi > Configure Proxy OR via a
+        // managed configuration profile). Empty dictionary means no proxy.
+        if let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] {
+            let filtered = settings.filter { !($0.key as String).hasPrefix("__SCOPED__") }
+            logger.info("[diag] System proxy settings: \(filtered, privacy: .public)")
+        } else {
+            logger.info("[diag] System proxy settings: unavailable")
+        }
+        logger.info("[diag] Session proxy dict: \(session.configuration.connectionProxyDictionary ?? [:], privacy: .public)")
+        logger.info("[diag] Target endpoint: \(endpoint.absoluteString, privacy: .public) host=\(endpoint.host ?? "?", privacy: .public)")
+
+        await probe(url: "https://1.1.1.1/cdn-cgi/trace", label: "cloudflare-1.1.1.1", session: session, logger: logger)
+        await probe(url: "https://api.anthropic.com/", label: "anthropic-root", session: session, logger: logger)
+        await probe(url: endpoint.absoluteString, label: "worker-endpoint", session: session, logger: logger, method: "HEAD")
+    }
+
+    private static func probe(url: String, label: String, session: URLSession, logger: Logger, method: String = "GET") async {
+        guard let u = URL(string: url) else {
+            logger.error("[diag] \(label, privacy: .public): URL didn't parse — \(url, privacy: .public)")
+            return
+        }
+        var req = URLRequest(url: u)
+        req.httpMethod = method
+        req.timeoutInterval = 5
+        let t0 = Date()
+        do {
+            let (data, response) = try await session.data(for: req)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let snippet = String(data: data.prefix(120), encoding: .utf8) ?? "<non-utf8>"
+            logger.info("[diag] \(label, privacy: .public): HTTP \(code, privacy: .public) in \(Date().timeIntervalSince(t0), privacy: .public)s; body: \(snippet, privacy: .public)")
+        } catch {
+            logger.error("[diag] \(label, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Extract `response["content"][0]["text"]` — the only shape we act on today.
