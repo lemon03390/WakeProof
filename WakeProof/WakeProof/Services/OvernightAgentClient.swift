@@ -97,13 +97,23 @@ actor OvernightAgentClient {
             !Secrets.claudeEndpoint.isEmpty,
             "OvernightAgentClient: Secrets.claudeEndpoint is empty — set it to your Vercel proxy URL in Secrets.swift"
         )
-        if let url = URL(string: Secrets.claudeEndpoint),
-           let host = url.host,
-           let scheme = url.scheme,
-           let derived = URL(string: "\(scheme)://\(host)") {
-            return derived
+        // Wave 2.1 / R4 fix: validate host against the shared `EndpointGuard` allowlist
+        // before deriving the base URL. Previously this code happily accepted any
+        // parse-able URL, so a tampered Secrets value would silently route overnight
+        // agent traffic to an attacker-controlled host (vision verification crashed
+        // loudly on the same allowlist; overnight agent did not).
+        guard let url = URL(string: Secrets.claudeEndpoint),
+              let host = url.host,
+              let scheme = url.scheme,
+              let derived = URL(string: "\(scheme)://\(host)") else {
+            preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
         }
-        preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
+        do {
+            _ = try EndpointGuard.validate(derived)
+        } catch {
+            preconditionFailure("OvernightAgentClient endpoint rejected by EndpointGuard: \(error.localizedDescription)")
+        }
+        return derived
     }
 
     private static var defaultSession: URLSession {

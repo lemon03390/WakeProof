@@ -56,13 +56,18 @@ struct NightlySynthesisClient {
     private static var defaultMessagesEndpoint: URL {
         // Reuse the Day 3 messages.js endpoint. `Secrets.claudeEndpoint` is the
         // full messages URL (the proxy already publishes `.../v1/messages`).
+        //
+        // Wave 2.1 / R4 fix: validate via the shared `EndpointGuard` allowlist.
+        // Previously this code silently accepted any parse-able URL, so a tampered
+        // Secrets value would route nightly-synthesis traffic to an attacker host.
         let base = Secrets.claudeEndpoint.isEmpty
             ? "https://api.anthropic.com/v1/messages"
             : Secrets.claudeEndpoint
-        guard let url = URL(string: base) else {
-            preconditionFailure("Nightly synthesis endpoint URL failed to parse: \(base)")
+        do {
+            return try EndpointGuard.validate(urlString: base)
+        } catch {
+            preconditionFailure("Nightly synthesis endpoint rejected by EndpointGuard: \(error.localizedDescription)")
         }
-        return url
     }
 
     private static var defaultSession: URLSession {

@@ -120,29 +120,21 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// when the Secrets value is empty — useful for simulator paths where the
     /// bot-scoring isn't triggered.
     ///
-    /// S9 fix: hostname allowlisted at launch so a Secrets.swift tamper or copy-paste
-    /// mistake can't silently route verification traffic to an attacker-controlled
-    /// host. If the allowlist ever grows (e.g. a staging Vercel deployment), append
-    /// to `allowedEndpointSuffixes`.
-    private static let allowedEndpointSuffixes: [String] = [
-        ".vercel.app",
-        ".aspiratcm.com",
-        "api.anthropic.com",
-    ]
+    /// Wave 2.1 / R4 fix: the hostname allowlist previously defined inline here now
+    /// lives in `EndpointGuard.allowedHostSuffixes`, shared with
+    /// `OvernightAgentClient` and `NightlySynthesisClient` (which previously skipped
+    /// the check entirely). Fail-closed behaviour preserved via `preconditionFailure`;
+    /// unit tests can still exercise `EndpointGuard.validate` directly on its
+    /// throwing surface.
     private static let defaultEndpoint: URL = {
         let endpointString = Secrets.claudeEndpoint.isEmpty
             ? "https://api.anthropic.com/v1/messages"
             : Secrets.claudeEndpoint
-        guard let url = URL(string: endpointString), let host = url.host else {
-            preconditionFailure("Claude endpoint URL failed to parse: \(endpointString)")
+        do {
+            return try EndpointGuard.validate(urlString: endpointString)
+        } catch {
+            preconditionFailure("Claude endpoint rejected by EndpointGuard: \(error.localizedDescription)")
         }
-        let hostAllowed = allowedEndpointSuffixes.contains { suffix in
-            host == suffix || host.hasSuffix(suffix)
-        }
-        guard hostAllowed else {
-            preconditionFailure("Claude endpoint host \(host) not in allowlist \(allowedEndpointSuffixes)")
-        }
-        return url
     }()
 
     private static var defaultSession: URLSession {

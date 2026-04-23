@@ -55,6 +55,16 @@ export default async function handler(req, res) {
     return;
   }
 
+  // Wave 2.1 / B1: detective metrics log. We cannot rate-limit in Vercel
+  // Serverless (each invocation cold-starts; shared state does not persist),
+  // so instead we log a masked token + timestamp on every validated call so
+  // post-facto abuse can be spotted from Vercel logs. See README.md
+  // "Cost safety posture" for the full threat model.
+  const tokenSuffix = clientToken.slice(-6);
+  console.info(
+    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=POST path=/v1/messages`
+  );
+
   const anthropicVersion = req.headers['anthropic-version'] || '2023-06-01';
 
   // Bound the upload phase so a stalled cellular connection doesn't consume the
