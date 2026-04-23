@@ -77,12 +77,17 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         self.promptTemplate = promptTemplate
     }
 
-    /// Literal URL that must always parse. Using `preconditionFailure` instead of `!`
-    /// so we satisfy the project-wide "no force unwraps in committed code" rule while
-    /// still trapping loudly at launch if a programmer somehow breaks the constant.
+    /// Where verification POSTs go. Reads from `Secrets.claudeEndpoint` first so a
+    /// deployed Cloudflare Worker proxy (see `workers/wakeproof-proxy/`) can bypass
+    /// Cloudflare Bot Management's iOS-URLSession block. Falls back to Anthropic direct
+    /// when the Secrets value is empty — useful for simulator paths where the bot-scoring
+    /// isn't triggered and for any future server-to-server call site.
     private static let defaultEndpoint: URL = {
-        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
-            preconditionFailure("Hardcoded Claude endpoint URL failed to parse — programmer error.")
+        let endpointString = Secrets.claudeEndpoint.isEmpty
+            ? "https://api.anthropic.com/v1/messages"
+            : Secrets.claudeEndpoint
+        guard let url = URL(string: endpointString) else {
+            preconditionFailure("Claude endpoint URL failed to parse: \(endpointString)")
         }
         return url
     }()
