@@ -79,8 +79,30 @@ struct WakeProofApp: App {
         guard scheduler.onFire == nil else { return }
         scheduler.onFire = { [audioKeepalive, soundEngine, weak scheduler] firedAt in
             Self.logger.info("onFire received fire at \(firedAt.ISO8601Format(), privacy: .public)")
+            // onCeilingReached is the same closure regardless of whether audio starts —
+            // hoisted so both the happy path and the R7 missing-asset fallback share it.
+            let ceilingHandler: @MainActor () -> Void = { [weak soundEngine, weak audioKeepalive, weak scheduler] in
+                // weak everywhere: a strong capture of `scheduler` would form a retain
+                // cycle through scheduler.onFire → this closure → scheduler.
+                Self.logger.warning("Hard-stopping alarm at ring ceiling")
+                soundEngine?.stop()
+                audioKeepalive?.stopAlarmSound()
+                // handleRingCeiling persists a TIMEOUT WakeAttempt then calls stopRinging,
+                // keeping the audit-trail bookkeeping in one place.
+                scheduler?.handleRingCeiling()
+            }
+
             guard let url = Bundle.main.url(forResource: "alarm", withExtension: "m4a") else {
-                Self.logger.fault("alarm.m4a missing from bundle — alarm will fire silently")
+                // R7 fix: on a build-config regression that drops alarm.m4a we previously
+                // early-returned, which meant soundEngine was never started → ceiling never
+                // fired → the unresolved-fire marker dangled forever and the WakeAttempt
+                // row stayed UNRESOLVED even after the user interacted. Start the ceiling
+                // timer anyway so the state machine reaches a terminal audit row.
+                Self.logger.fault("alarm.m4a missing from bundle — silent alarm, but ceiling armed so audit row lands")
+                soundEngine.start(
+                    setVolume: { _ in /* no audio player to mutate */ },
+                    onCeilingReached: ceilingHandler
+                )
                 return
             }
             audioKeepalive.playAlarmSound(url: url)
@@ -88,16 +110,7 @@ struct WakeProofApp: App {
                 setVolume: { volume in
                     audioKeepalive.setAlarmVolume(volume)
                 },
-                onCeilingReached: { [weak soundEngine, weak audioKeepalive, weak scheduler] in
-                    // weak everywhere: a strong capture of `scheduler` would form a retain
-                    // cycle through scheduler.onFire → this closure → scheduler.
-                    Self.logger.warning("Hard-stopping alarm at ring ceiling")
-                    soundEngine?.stop()
-                    audioKeepalive?.stopAlarmSound()
-                    // handleRingCeiling persists a TIMEOUT WakeAttempt then calls stopRinging,
-                    // keeping the audit-trail bookkeeping in one place.
-                    scheduler?.handleRingCeiling()
-                }
+                onCeilingReached: ceilingHandler
             )
         }
     }
@@ -172,11 +185,18 @@ struct RootView: View {
                 // Reduce but do not mute during verification; Decision 2 failure-mode table says
                 // a full mute makes the user think they already succeeded. Applies to both the
                 // initial .capturing → .verifying hop AND the anti-spoof re-capture → .verifying hop.
+                //
+                // B6 fix: pauseRamp() BEFORE setAlarmVolume(0.2) so the ramp's next 5s tick
+                // doesn't overwrite our externally-set volume back to the escalation curve
+                // (which previously caused an audible sawtooth pattern during verification).
+                soundEngine.pauseRamp()
                 audioKeepalive.setAlarmVolume(0.2)
             case (.verifying, .ringing):
                 // Verification failed (REJECTED or network error). Restore full volume and reset
                 // the verifier so a user-initiated "Prove you're awake" retry starts with a fresh
                 // two-attempt budget rather than carrying over the previous fire's state.
+                // Ramp stays paused — user has engaged at least once, full-volume attention is
+                // warranted on the retry path (no benefit to re-escalating from 0.3).
                 audioKeepalive.setAlarmVolume(1.0)
                 visionVerifier.resetForNewFire()
             // .verifying → .antiSpoofPrompt intentionally has no volume change: the anti-spoof

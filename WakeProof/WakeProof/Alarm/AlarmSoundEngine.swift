@@ -89,4 +89,18 @@ final class AlarmSoundEngine {
         ceilingTask = nil
         logger.info("Escalation stopped")
     }
+
+    /// B6 fix: cancels ONLY the escalation ramp task, leaving the ring-ceiling safety net
+    /// armed. Called when UI wants to externally override volume (e.g. dip to 0.2 during
+    /// verification) without the ramp's next tick overwriting our externally-set value.
+    ///
+    /// Intentionally one-way: once paused for a fire, we don't resume. A failed
+    /// verification transitions the alarm back to `.ringing` with volume restored to 1.0
+    /// and we want to stay at 1.0 rather than re-ramping from 0.3 — the user has
+    /// already engaged at least once, full-attention is warranted for the retry.
+    func pauseRamp() {
+        escalationTask?.cancel()
+        escalationTask = nil
+        logger.info("Ramp paused (ceiling still armed)")
+    }
 }
