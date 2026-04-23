@@ -232,3 +232,39 @@ Follow Scenario 5. Pass: verdict REJECTED; alarm continues; banner mentions post
 - WakeAttempt count increments by exactly one per scenario (RETRY path does NOT create a duplicate;
   the same row is updated in place).
 - Total API credit burn matches expectation (~$0.065 per full pass) in Anthropic console.
+
+---
+
+## Day 4 Layer 2 — Memory-aware verification (Tests 14–16)
+
+### Test 14 — First-morning memory bootstrap (Layer 2)
+Fresh install (delete + reinstall to ensure `Documents/memories/` is empty). Fire alarm → capture → VERIFIED.
+Pass criteria:
+- (a) Console log (subsystem `com.wakeproof.memory` category `verifier`) shows `Memory loaded: profile=false history=0/0` on this verify.
+- (b) After verdict, `Documents/memories/<UserIdentity.shared.uuid>/` exists on the device container.
+- (c) If Claude emitted a `memory_update` field, `profile.md` and/or `history.jsonl` are present with the expected content (`profile_delta` in profile.md, single JSONL line with verdict + note in history.jsonl).
+- (d) No fault entries under `com.wakeproof.memory`.
+
+### Test 15 — Second-morning memory injected (Layer 2)
+Same install as Test 14. Fire a second alarm (2 min schedule) → capture → VERIFIED.
+Pass criteria:
+- Console log on this verify shows `Memory loaded: profile=<bool> history=1/1` (the single history line from Test 14 is now fed back).
+- The Claude request body includes `<memory_context>` somewhere in the user-message content. Easiest way to see it: force a non-2xx response (e.g., temporarily break `Secrets.claudeEndpoint` to a 404 URL) so the debug-only 4xx dump at `ClaudeAPIClient.swift` fires and writes `Documents/last_4xx_request.json`; inspect that file for the memory block. Restore the endpoint for the next run.
+- If Claude emits a second `memory_update`, history.jsonl now has 2 lines and profile.md may have been replaced.
+
+### Test 16 — Seeded profile influences verdict (Layer 2, demo-friendly, optional)
+Manually author `Documents/memories/<uuid>/profile.md` on the device (easiest: pull the simulator container, edit, push back — or on hardware use Xcode Devices container browser). Content example:
+```
+User's kitchen is dimly lit before 7 AM in winter. Do not reject on `lighting_suggests_room_lit=false` alone; cross-check with alertness + posture instead.
+```
+Fire alarm in genuinely dim-light conditions (curtains closed, room lamp off) → capture → expect VERIFIED or RETRY (NOT REJECTED on lighting alone).
+Pass criteria:
+- Verdict is VERIFIED or RETRY, not REJECTED. If REJECTED, Claude's `reasoning` field should NOT cite "room too dark" exclusively — that would indicate the memory calibration wasn't respected.
+- Same "no fault entries" invariant as Tests 14–15.
+
+### Pass criteria (aggregate, Layer 2)
+- Memory directory is created exactly once on first run and persists across alarm fires.
+- No `fault` entries under `com.wakeproof.memory`.
+- `profile.md` and `history.jsonl` both have `isExcludedFromBackupKey=true` (verify via a separate debug Swift snippet reading `resourceValues(forKeys: [.isExcludedFromBackupKey])` from the file URL, or — more pragmatically — confirm absence of those files in an iCloud Backup listing).
+- Token budget: a verify-without-memory call produces a request body within ~5% of the Day 3 baseline size (additional v3 system-prompt text is ~900 chars more than v2); a verify-with-memory call produces ≤ that + ~2000 chars (the memory-block rendered cap).
+- Total API credit burn for Tests 14+15+16 ≤ ~$0.05 in Anthropic console.
