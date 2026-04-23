@@ -44,6 +44,10 @@ final class VisionVerifier {
     /// stays free of `AlarmScheduler` import at type-level for tests.
     var scheduler: AlarmScheduler?
 
+    /// Late-bound memory store — wired by WakeProofApp.bootstrapIfNeeded. Nil in tests
+    /// unless explicitly set; nil-safe: a nil store means memory is never read or written.
+    var memoryStore: MemoryStore?
+
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "verifier")
 
     private static let antiSpoofBank = [
