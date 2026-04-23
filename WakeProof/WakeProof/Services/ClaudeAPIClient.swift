@@ -57,13 +57,21 @@ enum ClaudeAPIError: LocalizedError {
 
 struct ClaudeAPIClient: ClaudeVisionClient {
 
+    /// HTTP header names the client uses. One place to rename / add.
+    enum Header {
+        static let contentType = "Content-Type"
+        static let clientToken = "x-wakeproof-token"
+        static let anthropicVersion = "anthropic-version"
+    }
+
     /// Injectable for tests — production uses `.shared`.
     let session: URLSession
-    /// Per-install shared token (not the Anthropic API key — that's in the proxy env).
-    let proxyToken: String
     let model: String
     let endpoint: URL
     let promptTemplate: VisionPromptTemplate
+    /// Per-install shared token (not the Anthropic API key — that's in the proxy env).
+    /// Private so logging / debug dumps elsewhere can't accidentally surface it.
+    private let proxyToken: String
 
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "claude")
 
@@ -156,9 +164,9 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(proxyToken, forHTTPHeaderField: "x-wakeproof-token")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: Header.contentType)
+        request.setValue(proxyToken, forHTTPHeaderField: Header.clientToken)
+        request.setValue("2023-06-01", forHTTPHeaderField: Header.anthropicVersion)
         request.httpBody = bodyData
 
         let start = Date()
@@ -232,27 +240,37 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 .joined(separator: " | ")
             logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_body=\(bodyBytes, privacy: .private) bytes); response headers: \(headerDump, privacy: .private); body: \(snippet, privacy: .private)")
             #if DEBUG
-            // B4 fix: the debug-only body dump is behind #if DEBUG so release builds never
-            // persist baseline + face photos to Documents (which is iCloud-backup-enabled
-            // and not file-protected by default). Within debug, scrub the base64 image
-            // payloads so a developer sharing the dump for bug triage doesn't also share
-            // the user's bedroom photo. Schema shape stays intact so a curl replay still
-            // exercises the JSON path — just without real image bytes.
-            if let bodyData = request.httpBody,
-               let docs = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
+            // Debug-only diagnostic dump. Release builds never persist baseline +
+            // face photos to Documents (iCloud-backup-enabled + not file-protected
+            // by default). In debug we build a shape-preserving redacted dict from
+            // the known input sizes rather than re-parsing and mutating the real
+            // 3.7 MB bodyData — cheap enough to run on every 4xx without bloat.
+            if let docs = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
                 let dumpURL = docs.appendingPathComponent("last_4xx_request.json")
-                let redacted = Self.redactImageBase64(bodyData) ?? bodyData
+                let redactedDict: [String: Any] = [
+                    "model": model,
+                    "max_tokens": 800,
+                    "system": promptTemplate.systemPrompt(),
+                    "messages": [[
+                        "role": "user",
+                        "content": [
+                            ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": "<REDACTED \(baselineJPEG.count)b>"]],
+                            ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": "<REDACTED \(stillJPEG.count)b>"]],
+                            ["type": "text", "text": promptTemplate.userPrompt(baselineLocation: baselineLocation, antiSpoofInstruction: antiSpoofInstruction)]
+                        ]
+                    ]],
+                    "debug_request_body_bytes": bodyBytes,
+                ]
                 do {
+                    let redacted = try JSONSerialization.data(withJSONObject: redactedDict)
                     try redacted.write(to: dumpURL, options: [.atomic])
-                    // Mark excluded from iCloud backup even in DEBUG — developers shouldn't
-                    // restore their bedroom photos from an old backup by accident.
                     var mutableDump = dumpURL
                     var rv = URLResourceValues()
                     rv.isExcludedFromBackup = true
                     try? mutableDump.setResourceValues(rv)
-                    logger.error("Dumped failed request body (redacted) to \(dumpURL.path, privacy: .private)")
+                    logger.error("Dumped redacted request shape to \(dumpURL.path, privacy: .private)")
                 } catch {
-                    logger.error("Failed to dump request body: \(error.localizedDescription, privacy: .public)")
+                    logger.error("Failed to dump redacted request: \(error.localizedDescription, privacy: .public)")
                 }
             }
             #endif
@@ -363,9 +381,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         logger.info("[diag] Session proxy dict: \(session.configuration.connectionProxyDictionary ?? [:], privacy: .private)")
         logger.info("[diag] Target endpoint: \(endpoint.absoluteString, privacy: .private) host=\(endpoint.host ?? "?", privacy: .private)")
 
-        await probe(url: "https://1.1.1.1/cdn-cgi/trace", label: "cloudflare-1.1.1.1", session: session, logger: logger)
-        await probe(url: "https://api.anthropic.com/", label: "anthropic-root", session: session, logger: logger)
-        await probe(url: endpoint.absoluteString, label: "worker-endpoint", session: session, logger: logger, method: "HEAD")
+        // Parallel fan-out: three independent 5-s-timeout probes used to sum up to
+        // 15 s on a bad network (wasting dev-time latency every fresh launch). With
+        // `async let` the whole diagnostic dump caps at the slowest probe.
+        async let cloudflare: Void = probe(url: "https://1.1.1.1/cdn-cgi/trace", label: "cloudflare-1.1.1.1", session: session, logger: logger)
+        async let anthropic: Void = probe(url: "https://api.anthropic.com/", label: "anthropic-root", session: session, logger: logger)
+        async let worker: Void = probe(url: endpoint.absoluteString, label: "worker-endpoint", session: session, logger: logger, method: "HEAD")
+        _ = await (cloudflare, anthropic, worker)
     }
 
     private static func probe(url: String, label: String, session: URLSession, logger: Logger, method: String = "GET") async {
@@ -387,29 +409,6 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         }
     }
 
-    /// B4 fix helper: redact base64 image payloads from a serialized request body before
-    /// dumping it to disk so the diagnostic artifact never contains the user's actual
-    /// bedroom/face imagery. Schema shape is preserved so a `curl` replay still exercises
-    /// the JSON parse path — the image fields are just null-weighted.
-    fileprivate static func redactImageBase64(_ bodyData: Data) -> Data? {
-        guard var obj = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
-              var messages = obj["messages"] as? [[String: Any]] else {
-            return nil
-        }
-        for i in messages.indices {
-            guard var content = messages[i]["content"] as? [[String: Any]] else { continue }
-            for j in content.indices {
-                guard content[j]["type"] as? String == "image",
-                      var source = content[j]["source"] as? [String: Any],
-                      let data = source["data"] as? String else { continue }
-                source["data"] = "<REDACTED \(data.count)b>"
-                content[j]["source"] = source
-            }
-            messages[i]["content"] = content
-        }
-        obj["messages"] = messages
-        return try? JSONSerialization.data(withJSONObject: obj)
-    }
     #endif
 
     /// Extract `response["content"][0]["text"]` — the only shape we act on today.

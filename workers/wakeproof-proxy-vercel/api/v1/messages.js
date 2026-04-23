@@ -57,40 +57,24 @@ export default async function handler(req, res) {
 
   const anthropicVersion = req.headers['anthropic-version'] || '2023-06-01';
 
-  // R3 fix: bound the upload phase so a stalled cellular connection doesn't consume
-  // the full Vercel Hobby 10s function budget before we ever reach Anthropic, and
-  // cap the body size so a stray large payload can't DoS our proxy.
-  // 8s covers the typical iOS 3.8MB upload at 3G speeds; 6MB ceiling covers the
-  // expected 3.8MB + base64 slack + prompt JSON without truncating normal traffic.
+  // Bound the upload phase so a stalled cellular connection doesn't consume the
+  // full Vercel Hobby 10s function budget before we ever reach Anthropic, and
+  // cap the body size so a stray large payload can't DoS the proxy. 8s covers
+  // the typical iOS 3.8MB upload at 3G speeds; 6MB ceiling covers expected
+  // payload + base64 slack without truncating normal traffic.
   const UPLOAD_TIMEOUT_MS = 8000;
   const MAX_BODY_BYTES = 6 * 1024 * 1024;
+  const chunks = [];
+  let total = 0;
+  const timer = setTimeout(() => req.destroy(new Error('upload_timeout')), UPLOAD_TIMEOUT_MS);
   let bodyBuffer;
   try {
-    bodyBuffer = await new Promise((resolve, reject) => {
-      const chunks = [];
-      let total = 0;
-      const timer = setTimeout(
-        () => reject(new Error('upload_timeout')),
-        UPLOAD_TIMEOUT_MS
-      );
-      req.on('data', (chunk) => {
-        total += chunk.length;
-        if (total > MAX_BODY_BYTES) {
-          clearTimeout(timer);
-          reject(new Error('body_too_large'));
-          return;
-        }
-        chunks.push(chunk);
-      });
-      req.on('end', () => {
-        clearTimeout(timer);
-        resolve(Buffer.concat(chunks));
-      });
-      req.on('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) throw new Error('body_too_large');
+      chunks.push(chunk);
+    }
+    bodyBuffer = Buffer.concat(chunks);
   } catch (err) {
     const msg = String(err.message || err);
     const status = msg === 'body_too_large' ? 413 : 408;
@@ -101,6 +85,8 @@ export default async function handler(req, res) {
       },
     });
     return;
+  } finally {
+    clearTimeout(timer);
   }
 
   let upstream;

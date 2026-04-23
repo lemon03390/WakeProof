@@ -147,15 +147,13 @@ struct CameraCaptureFlow: View {
         let docsURL = try fm.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let dir = docsURL.appendingPathComponent("WakeAttempts", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Exclude the containing directory from iCloud backup once on creation so we
-        // only pay the setResourceValues cost per-capture, not per-folder.
+        // Mark the directory as excluded from iCloud backup. Unconditional set is
+        // idempotent (microsecond write); the previous pre-check read was doing the
+        // same kind of stat syscall and saving nothing on the happy path.
         var dirURL = dir
-        if let isExcluded = try? dirURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup,
-           isExcluded != true {
-            var rv = URLResourceValues()
-            rv.isExcludedFromBackup = true
-            try? dirURL.setResourceValues(rv)
-        }
+        var rv = URLResourceValues()
+        rv.isExcludedFromBackup = true
+        try? dirURL.setResourceValues(rv)
         let dest = dir.appendingPathComponent("\(UUID().uuidString).mov")
         do {
             try fm.moveItem(at: tmpURL, to: dest)

@@ -26,10 +26,16 @@ final class VisionVerifier {
 
     // MARK: - Observable state
 
-    private(set) var isInFlight: Bool = false
     private(set) var lastError: String?
     private(set) var currentAttemptIndex: Int = 0        // 0 before first call, 1 after first, 2 after retry
     private(set) var currentAntiSpoofInstruction: String?
+
+    /// Derived from the scheduler's phase — `.verifying` is the only state in which a
+    /// Claude call is pending. Eliminates the drift risk of maintaining a separate
+    /// `isInFlight` flag alongside `scheduler.phase`: any future branch that forgot to
+    /// flip the flag would pin it while the scheduler had already moved on. Computed
+    /// from the single source of truth.
+    var isInFlight: Bool { scheduler?.phase == .verifying }
 
     // MARK: - Dependencies
 
@@ -54,7 +60,6 @@ final class VisionVerifier {
     /// observable chain — here it's an explicit method so callers (and tests) can make the
     /// reset obvious in trace.
     func resetForNewFire() {
-        isInFlight = false
         lastError = nil
         currentAttemptIndex = 0
         currentAntiSpoofInstruction = nil
@@ -71,20 +76,16 @@ final class VisionVerifier {
             logger.fault("verify() called but scheduler not wired — alarm will hang in .verifying")
             return
         }
-        guard !isInFlight else {
-            logger.warning("verify() ignored — already in flight")
-            return
-        }
-        // B9 fix: bail BEFORE burning a Claude call if the scheduler isn't in the
-        // state it needs to be in. Without this guard, verify() would call Claude
-        // (spending credits + latency), then every later scheduler transition would
-        // silently refuse because phase != .verifying — user would see no verdict
-        // reflected in UI despite the API spend.
+        // Bail BEFORE burning a Claude call if the scheduler isn't in the state it needs
+        // to be in. Without this guard, verify() would call Claude (spending credits +
+        // latency), then every later scheduler transition would silently refuse because
+        // phase != .verifying — user would see no verdict reflected in UI despite the
+        // API spend. This guard also dedupes re-entry: if a prior call is still awaiting
+        // Claude, phase is `.verifying`, not `.capturing`, and we fail the guard cleanly.
         guard scheduler.phase == .capturing else {
             logger.fault("verify() called with scheduler.phase=\(String(describing: scheduler.phase), privacy: .public) (expected .capturing) — aborting before Claude spend")
             return
         }
-        isInFlight = true
         lastError = nil
         // Note: `currentAttemptIndex` is bumped only after Claude actually returns a verdict
         // (see `handleResult`). Network errors and internal guard failures must NOT consume
@@ -139,18 +140,10 @@ final class VisionVerifier {
             }
             let instruction = Self.antiSpoofBank.randomElement() ?? "Blink twice"
             currentAntiSpoofInstruction = instruction
-            do {
-                try updatePersistedAttempt(attempt, context: context, verdict: .retry, reasoning: result.reasoning)
-            } catch {
-                // B10 fix: audit-row integrity matters even on RETRY. If we can't save
-                // the RETRY marker, don't hand the user an anti-spoof prompt that
-                // would race a stale audit row. Drop back to ringing instead.
-                logger.fault("Persistence failed on RETRY — keeping alarm in .ringing to protect audit trail")
-                isInFlight = false
-                scheduler?.returnToRingingAfterVerifying(error: "Retry save failed — tap \"Prove you're awake\" to retry.")
-                return
-            }
-            isInFlight = false
+            guard persistOrFallbackToRinging(
+                attempt, context: context, verdict: .retry, reasoning: result.reasoning,
+                fallbackMessage: "Retry save failed — tap \"Prove you're awake\" to retry."
+            ) else { return }
             scheduler?.beginAntiSpoofPrompt(instruction: instruction)
         }
     }
@@ -170,11 +163,9 @@ final class VisionVerifier {
         case .httpError(let status, _):
             userMessage = "Claude returned HTTP \(status) — tap \"Prove you're awake\" to retry."
         case .decodingFailed(let underlying):
-            // R1 fix: persist the underlying parse/shape error into reasoning so the
-            // audit trail captures what went wrong at the protocol boundary. Without
-            // this the user and any future forensic reader both see "Couldn't read
-            // Claude's response" with no signal about whether it was a missing content
-            // block, malformed JSON, or an unexpected error body.
+            // Persist the underlying parse/shape error into reasoning so the audit trail
+            // captures what went wrong at the protocol boundary (missing content block,
+            // malformed JSON, unexpected error body) rather than just a generic message.
             userMessage = "Couldn't read Claude's response (\(underlying.localizedDescription)) — tap \"Prove you're awake\" to retry."
         case .emptyResponse, .invalidURL:
             userMessage = "Couldn't read Claude's response — tap \"Prove you're awake\" to retry."
@@ -183,21 +174,10 @@ final class VisionVerifier {
     }
 
     private func finish(attempt: WakeAttempt, context: ModelContext, verdict: WakeAttempt.Verdict, reasoning: String) async {
-        do {
-            try updatePersistedAttempt(attempt, context: context, verdict: verdict, reasoning: reasoning)
-        } catch {
-            // B10 fix: the self-commitment contract depends on audit integrity. If we
-            // can't save the verdict row, DO NOT transition the scheduler to `.idle` on
-            // VERIFIED — that would stop the alarm with no record, letting a user "pass"
-            // verification without a persistent trace. Keep the alarm ringing and
-            // surface the save failure so the user retries (which creates a fresh attempt
-            // row on the next capture).
-            logger.fault("Persistence failed for verdict \(verdict.rawValue, privacy: .public) — keeping alarm in .ringing to protect audit trail")
-            isInFlight = false
-            scheduler?.returnToRingingAfterVerifying(error: "Verified but couldn't save — tap \"Prove you're awake\" to retry.")
-            return
-        }
-        isInFlight = false
+        guard persistOrFallbackToRinging(
+            attempt, context: context, verdict: verdict, reasoning: reasoning,
+            fallbackMessage: "Verified but couldn't save — tap \"Prove you're awake\" to retry."
+        ) else { return }
         switch verdict {
         case .verified:
             scheduler?.finishVerifyingVerified()
@@ -205,20 +185,41 @@ final class VisionVerifier {
         case .rejected:
             scheduler?.returnToRingingAfterVerifying(error: "Verification failed: \(reasoning)")
         case .retry, .captured, .timeout, .unresolved:
-            // B8 fix: these verdicts aren't emitted by the current caller paths, but
-            // if a future refactor introduces one, the `logger.fault`-only path left
-            // the alarm pinned in `.verifying` with no UI and no recovery affordance.
-            // Explicit fallback to ringing keeps the state machine closed.
+            // Unreachable from current caller paths — `.retry` takes the handleResult
+            // branch before finish; `.captured/.timeout/.unresolved` never flow here.
+            // Kept as a defensive fallback so a future refactor that introduces such a
+            // path can't silently pin the alarm in `.verifying` with no UI recovery.
             logger.fault("finish() invoked with unexpected verdict \(verdict.rawValue, privacy: .public) — falling back to ringing")
             scheduler?.returnToRingingAfterVerifying(error: "Verification hit an unexpected state. Tap \"Prove you're awake\" to retry.")
             resetForNewFire()
         }
     }
 
-    /// Persists verdict + reasoning and saves the context. Throws on save failure so the
-    /// caller (`finish` / `handleResult`) can decide the recovery UX — the self-commitment
-    /// contract requires that we never transition to `.idle` silently when the audit row
-    /// didn't land, so callers keep the alarm ringing rather than swallowing.
+    /// Save the verdict row; on failure, drop back to ringing with a verbose banner so
+    /// the user retries (fresh capture → fresh row). Returns true on success, false when
+    /// the fallback fired — callers early-return on false so they don't race a stale row
+    /// with a downstream scheduler transition. The self-commitment contract depends on
+    /// this invariant: never transition to `.idle` (or `.antiSpoofPrompt`) silently when
+    /// the audit row didn't land.
+    private func persistOrFallbackToRinging(
+        _ attempt: WakeAttempt,
+        context: ModelContext,
+        verdict: WakeAttempt.Verdict,
+        reasoning: String,
+        fallbackMessage: String
+    ) -> Bool {
+        do {
+            try updatePersistedAttempt(attempt, context: context, verdict: verdict, reasoning: reasoning)
+            return true
+        } catch {
+            logger.fault("Persistence failed for verdict \(verdict.rawValue, privacy: .public) — keeping alarm in .ringing to protect audit trail")
+            scheduler?.returnToRingingAfterVerifying(error: fallbackMessage)
+            return false
+        }
+    }
+
+    /// Persists verdict + reasoning and saves the context. Throws on save failure so
+    /// the caller (`persistOrFallbackToRinging`) can own the recovery decision.
     private func updatePersistedAttempt(_ attempt: WakeAttempt, context: ModelContext, verdict: WakeAttempt.Verdict, reasoning: String) throws {
         attempt.verdict = verdict.rawValue
         attempt.verdictReasoning = reasoning
