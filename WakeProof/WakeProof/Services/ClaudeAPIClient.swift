@@ -149,15 +149,29 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         }
 
         guard (200..<300).contains(http.statusCode) else {
-            let snippet = String(data: data.prefix(300), encoding: .utf8) ?? "<non-utf8>"
-            // Capture Anthropic's request_id so we can cross-reference in their logs if we
-            // need to file support. The header name can arrive in different cases, so try a few.
-            let requestID = http.value(forHTTPHeaderField: "request-id")
-                ?? http.value(forHTTPHeaderField: "Request-Id")
-                ?? http.value(forHTTPHeaderField: "x-request-id")
-                ?? "unknown"
+            let snippet = String(data: data.prefix(2000), encoding: .utf8) ?? "<non-utf8>"
             let bodyBytes = request.httpBody?.count ?? -1
-            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_id=\(requestID, privacy: .public), request_body=\(bodyBytes, privacy: .public) bytes); body snippet: \(snippet, privacy: .public)")
+            // Log every response header Anthropic's gateway returned so we can spot
+            // request_id / cf-ray / anti-abuse signals that our narrow header lookup misses.
+            let headerDump = http.allHeaderFields
+                .map { "\($0.key)=\($0.value)" }
+                .sorted()
+                .joined(separator: " | ")
+            logger.error("Claude HTTP \(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s (request_body=\(bodyBytes, privacy: .public) bytes); response headers: \(headerDump, privacy: .public); body: \(snippet, privacy: .public)")
+            // On any non-2xx, dump the exact outbound request body to Documents so we can pull
+            // it via devicectl and replay via curl from the Mac. If curl with these exact bytes
+            // returns 200 we know URLSession is adding something Anthropic rejects; if curl
+            // also 403s we know it's content-based.
+            if let bodyData = request.httpBody,
+               let docs = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
+                let dumpURL = docs.appendingPathComponent("last_4xx_request.json")
+                do {
+                    try bodyData.write(to: dumpURL, options: [.atomic])
+                    logger.error("Dumped failed request body to \(dumpURL.path, privacy: .public)")
+                } catch {
+                    logger.error("Failed to dump request body: \(error.localizedDescription, privacy: .public)")
+                }
+            }
             throw ClaudeAPIError.httpError(status: http.statusCode, snippet: snippet)
         }
 
