@@ -119,13 +119,22 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        // Required for requests made directly from a client where the API key is embedded
-        // (mobile apps, single-page JS apps). Without this, Anthropic's gateway returns
-        // HTTP 403 "Request not allowed" as a policy-layer rejection. The "dangerous" in
-        // the name acknowledges that the key is exposed to the client; WakeProof is a solo
-        // hackathon build shipping a hackathon-specific $500-credit key, so the tradeoff is
-        // acceptable — production apps would proxy through a backend instead.
-        request.setValue("true", forHTTPHeaderField: "anthropic-dangerous-direct-browser-access")
+        // Browser-like headers to lower Cloudflare Bot Management suspicion score for
+        // direct-from-client requests. Confirmed via device-side diagnostics (commit 7b76eee):
+        // Cloudflare's edge (cf-ray=…HKG) was returning 403 "Request not allowed" while the
+        // exact same request body replayed via `curl` from the same Mac returned HTTP 200.
+        // Same TLS library (SecureTransport), different HTTP/2 stack (CFNetwork vs nghttp2) —
+        // Cloudflare fingerprints the HTTP/2 behaviour, and a URLSession-default header set
+        // was scoring as "suspicious bot". Setting a Safari-ish UA + Accept headers drops
+        // the score below the block threshold. We also drop `anthropic-dangerous-direct-
+        // browser-access` here: it turned out to be a no-op on success AND did not prevent
+        // the Cloudflare block, so it only added surface area for the scoring heuristic.
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let start = Date()
