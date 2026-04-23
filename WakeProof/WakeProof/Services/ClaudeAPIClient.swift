@@ -627,7 +627,9 @@ enum VisionPromptTemplate {
                 """
             } ?? ""
 
-            let memoryBlock = memoryContext.map { "\n\n\($0)" } ?? ""
+            // Guard against empty-string memoryContext so a stale read that returned ""
+            // (vs. the idiomatic nil) doesn't produce a dangling double-newline with no block.
+            let memoryBlock = memoryContext.flatMap { $0.isEmpty ? nil : "\n\n\($0)" } ?? ""
 
             return """
             BASELINE PHOTO: captured at the user's designated awake-location ("\(baselineLocation)").

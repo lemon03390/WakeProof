@@ -350,7 +350,7 @@ final class ClaudeAPIClientTests: XCTestCase {
         XCTAssertEqual(client.promptTemplate, .v3)
     }
 
-    func testFiveArgVerifyForwardsMemoryContextToSystemPrompt() async throws {
+    func testFiveArgVerifyForwardsMemoryContextToUserMessage() async throws {
         let memoryBlock = "<memory_context>MEMORY_MARKER</memory_context>"
         let bodyCapture = try await performStubbedVerify(memoryContext: memoryBlock)
         XCTAssertTrue(bodyCapture.contains("MEMORY_MARKER"),
