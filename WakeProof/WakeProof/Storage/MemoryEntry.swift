@@ -30,6 +30,7 @@ struct MemoryEntry: Codable, Equatable {
         case note      = "n"
     }
 
+    @available(*, deprecated, message: "Do not use in production. Reads attempt.verdict which is still 'CAPTURED' at memory-write time. Construct MemoryEntry with explicit values from VerificationResult. See VisionVerifier.swift handleResult comment for the C1-bug rationale.")
     static func makeEntry(
         timestamp: Date = .now,
         fromAttempt attempt: WakeAttempt,

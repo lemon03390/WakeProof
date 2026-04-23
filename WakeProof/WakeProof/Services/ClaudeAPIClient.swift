@@ -293,10 +293,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 do {
                     let redacted = try JSONSerialization.data(withJSONObject: redactedDict)
                     try redacted.write(to: dumpURL, options: [.atomic])
-                    var mutableDump = dumpURL
-                    var rv = URLResourceValues()
-                    rv.isExcludedFromBackup = true
-                    try? mutableDump.setResourceValues(rv)
+                    dumpURL.markingExcludedFromBackup()
                     logger.error("Dumped redacted request shape to \(dumpURL.path, privacy: .private)")
                 } catch {
                     logger.error("Failed to dump redacted request: \(error.localizedDescription, privacy: .public)")

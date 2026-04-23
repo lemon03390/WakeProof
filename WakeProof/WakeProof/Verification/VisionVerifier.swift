@@ -200,21 +200,22 @@ final class VisionVerifier {
             }
         }
 
-        switch result.verdict {
+        switch finalVerdict {
         case .verified:
             await finish(attempt: attempt, context: context, verdict: .verified, reasoning: result.reasoning)
         case .rejected:
-            await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: result.reasoning)
-        case .retry:
-            if currentAttemptIndex >= 2 {
-                // We already did one anti-spoof retry; another RETRY burns ceiling and can't
-                // improve. Coerce to REJECTED so the user re-captures via the ringing path
-                // with full context of why.
+            // Two sub-paths:
+            //   (a) Claude returned REJECTED directly → user sees Claude's reasoning
+            //   (b) Second-RETRY was coerced to REJECTED → prepend the "still uncertain after retry" context
+            if result.verdict == .retry {
                 logger.warning("Second RETRY verdict coerced to REJECTED — one anti-spoof attempt per fire")
                 await finish(attempt: attempt, context: context, verdict: .rejected,
                              reasoning: "Verification still uncertain after retry: \(result.reasoning)")
-                return
+            } else {
+                await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: result.reasoning)
             }
+        case .retry:
+            // First RETRY — pick an anti-spoof instruction and transition to that phase.
             let instruction = Self.antiSpoofBank.randomElement() ?? "Blink twice"
             currentAntiSpoofInstruction = instruction
             guard persistOrFallbackToRinging(
@@ -222,6 +223,10 @@ final class VisionVerifier {
                 fallbackMessage: "Retry save failed — tap \"Prove you're awake\" to retry."
             ) else { return }
             scheduler?.beginAntiSpoofPrompt(instruction: instruction)
+        case .captured, .timeout, .unresolved:
+            // Unreachable — finalVerdict only ever resolves to verified/rejected/retry.
+            logger.fault("handleResult reached unreachable finalVerdict case: \(finalVerdict.rawValue, privacy: .public)")
+            await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: "Verification hit an unexpected state.")
         }
     }
 

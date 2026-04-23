@@ -69,6 +69,28 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertEqual(snap.profile, "second")
     }
 
+    /// S4: a single buggy or malicious Claude response that returns an empty
+    /// profile_delta must NEVER wipe the user's entire profile. rewriteProfile
+    /// guards against empty + whitespace-only strings; write should no-op and
+    /// leave the existing profile intact.
+    func testRewriteProfileEmptyStringDoesNotWipeExistingProfile() async throws {
+        let store = makeStore()
+        try await store.rewriteProfile("## Original profile\nUser wakes groggy on Mondays.")
+        // Sanity: the write landed.
+        let before = try await store.read()
+        XCTAssertEqual(before.profile?.contains("groggy"), true)
+        // Empty string should be ignored, not overwrite.
+        try await store.rewriteProfile("")
+        let afterEmpty = try await store.read()
+        XCTAssertEqual(afterEmpty.profile, before.profile,
+                       "empty-string rewrite must preserve the existing profile")
+        // Whitespace-only should also be ignored.
+        try await store.rewriteProfile("   \n\t  ")
+        let afterWhitespace = try await store.read()
+        XCTAssertEqual(afterWhitespace.profile, before.profile,
+                       "whitespace-only rewrite must preserve the existing profile")
+    }
+
     func testOversizedProfileIsTruncatedPreservingNewlines() async throws {
         let store = makeStore(profileCap: 64)
         let oversized = String(repeating: "line\n", count: 200)  // 1000 bytes

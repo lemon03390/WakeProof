@@ -58,7 +58,7 @@ enum MemoryPromptBuilder {
     // MARK: - Private
 
     private static func renderRow(_ entry: MemoryEntry) -> String {
-        let when = iso8601.string(from: entry.timestamp)
+        let when = entry.timestamp.ISO8601Format()
         let confidence = entry.confidence.map { String(format: "%.2f", $0) } ?? "—"
         // B1/R2 fix: escape angle brackets before pipe/newline flattening so a
         // Claude-authored note can't close <recent_history> or <memory_context>
@@ -98,10 +98,4 @@ enum MemoryPromptBuilder {
         let profileOnly = MemorySnapshot(profile: snapshot.profile, recentHistory: [], totalHistoryCount: snapshot.totalHistoryCount)
         return render(profileOnly)
     }
-
-    private static let iso8601: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
 }

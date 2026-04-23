@@ -78,14 +78,13 @@ actor MemoryStore {
     func bootstrapIfNeeded() async throws {
         let userDir = try userDirectoryURL()
         let fm = FileManager.default
+        // Idempotent backup-exclusion writes. Also mark the `memories/` parent
+        // directory so a directory-listing leak via iCloud Backup metadata
+        // doesn't expose the structural shape of which users have memory files.
+        try fm.createDirectory(at: configuration.rootDirectory, withIntermediateDirectories: true)
+        configuration.rootDirectory.markingExcludedFromBackup()
         try fm.createDirectory(at: userDir, withIntermediateDirectories: true)
-        // Idempotent backup-exclusion write. If setResourceValues fails (transient
-        // filesystem state), log and continue; the directory itself already exists.
-        var mutable = userDir
-        var rv = URLResourceValues()
-        rv.isExcludedFromBackup = true
-        do { try mutable.setResourceValues(rv) }
-        catch { logger.warning("Failed to mark memories dir excluded-from-backup: \(error.localizedDescription, privacy: .public)") }
+        userDir.markingExcludedFromBackup()
         logger.info("MemoryStore bootstrap ok for user \(self.configuration.userUUID.prefix(8), privacy: .private)…")
     }
 
@@ -130,11 +129,11 @@ actor MemoryStore {
             try handle.seekToEnd()
             try handle.write(contentsOf: line)
         } else {
-            // R5 fix: create the file with `.complete` protection in a single
-            // call so the inode's protection class is set at birth — no brief
-            // weaker-class window between atomic-write landing and a subsequent
-            // setAttributes upgrade. isExcludedFromBackup is a URL resource
-            // value (not a file attribute), so it's applied separately.
+            // Create the file with `.complete` protection in a single call so the
+            // inode's protection class is set at birth — no brief weaker-class
+            // window between atomic-write landing and a subsequent setAttributes
+            // upgrade. isExcludedFromBackup is a URL resource value (not a file
+            // attribute), so it's applied separately.
             let created = fm.createFile(
                 atPath: file.path,
                 contents: line,
@@ -143,10 +142,7 @@ actor MemoryStore {
             guard created else {
                 throw MemoryStoreError.fileCreationFailed
             }
-            var mutable = file
-            var rv = URLResourceValues()
-            rv.isExcludedFromBackup = true
-            try? mutable.setResourceValues(rv)
+            file.markingExcludedFromBackup()
         }
 
         // Capacity probe — log only. Rotation is Day 5.
@@ -161,6 +157,13 @@ actor MemoryStore {
     /// the last newline within the cap so we don't slice mid-sentence — if no
     /// newline exists, byte-level truncation wins over refusing the write.
     func rewriteProfile(_ markdown: String) async throws {
+        // Empty-string guard: a single buggy or malicious Claude response must
+        // never wipe the user's entire profile in one call. Whitespace-only
+        // counts as empty — the profile is markdown prose, not blank lines.
+        guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.warning("rewriteProfile called with empty/whitespace markdown — ignoring (preserves existing profile)")
+            return
+        }
         let userDir = try userDirectoryURL()
         let fm = FileManager.default
         try fm.createDirectory(at: userDir, withIntermediateDirectories: true)
@@ -179,12 +182,12 @@ actor MemoryStore {
             // protection class (set at first-create below), so a subsequent
             // applyFileProtection is a no-op upgrade when the file was
             // already .complete. Retaining the call is defensive — a prior
-            // build (pre-R5) may have created the file at the weaker default.
+            // build may have created the file at the weaker default.
             try bounded.write(to: file, options: [.atomic])
             try applyFileProtection(to: file)
         } else {
-            // R5 fix: first-create path sets `.complete` protection at birth
-            // via `createFile(…attributes:)`. No brief weaker-class window.
+            // First-create path sets `.complete` protection at birth via
+            // `createFile(…attributes:)`. No brief weaker-class window.
             let created = fm.createFile(
                 atPath: file.path,
                 contents: bounded,
@@ -193,10 +196,7 @@ actor MemoryStore {
             guard created else {
                 throw MemoryStoreError.fileCreationFailed
             }
-            var mutable = file
-            var rv = URLResourceValues()
-            rv.isExcludedFromBackup = true
-            try? mutable.setResourceValues(rv)
+            file.markingExcludedFromBackup()
         }
     }
 
@@ -231,16 +231,23 @@ actor MemoryStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         // Decode all so partial corruption in older entries doesn't crater the
-        // most-recent read; tolerate per-line decode failures with a warning.
+        // most-recent read; per-line decode failures are logged at .error
+        // because with the v0-format churn period behind us, a row failing to
+        // decode is genuinely unusual and deserves triage visibility.
         let entries: [MemoryEntry] = lines.compactMap { line in
             guard !line.isEmpty,
                   let data = line.data(using: .utf8) else { return nil }
             do { return try decoder.decode(MemoryEntry.self, from: data) }
             catch {
-                logger.warning("history.jsonl line decode failed, skipping: \(error.localizedDescription, privacy: .public)")
+                logger.error("history.jsonl line decode failed, skipping: \(error.localizedDescription, privacy: .public)")
                 return nil
             }
         }
+        .sorted { $0.timestamp < $1.timestamp }
+        // Sort before slicing: concurrent appendHistory calls can interleave
+        // bytes on disk in non-timestamp order. Claude's calibration depends on
+        // chronological ordering, so guarantee it at read time rather than
+        // assuming file position happens to match.
         let recent = Array(entries.suffix(configuration.historyReadLimit))
         return (recent, total)
     }
@@ -250,10 +257,7 @@ actor MemoryStore {
             [.protectionKey: FileProtectionType.complete],
             ofItemAtPath: url.path
         )
-        var mutable = url
-        var rv = URLResourceValues()
-        rv.isExcludedFromBackup = true
-        try? mutable.setResourceValues(rv)
+        url.markingExcludedFromBackup()
     }
 
     private static func truncatePreservingNewlines(_ data: Data, to byteLimit: Int) -> Data {
@@ -263,11 +267,11 @@ actor MemoryStore {
             // +1 to include the newline so the file ends on a clean line boundary.
             return Data(slice.prefix(upTo: slice.index(after: newlineIndex)))
         }
-        // R3 fix: no newline found — byte-truncate, but snap back to the nearest
-        // UTF-8 codepoint boundary so we never split a multi-byte codepoint. An
-        // invalid trailing byte would make the whole profile fail to decode on
-        // the next read (String(contentsOf:encoding:.utf8) returns nil) and
-        // silently evict the file via loadProfile's try-returning-nil.
+        // No newline found — byte-truncate, but snap back to the nearest UTF-8
+        // codepoint boundary so we never split a multi-byte codepoint. An invalid
+        // trailing byte would make the whole profile fail to decode on the next
+        // read (String(contentsOf:encoding:.utf8) returns nil) and silently evict
+        // the file via loadProfile's try-returning-nil.
         //
         // Detection: if the byte immediately AFTER our slice is a continuation
         // byte (10xxxxxx), then our slice ends mid-codepoint. Walk back over
@@ -290,10 +294,10 @@ actor MemoryStore {
 
 enum MemoryStoreError: LocalizedError {
     case invalidUserUUID
-    /// R5 fix: first-create via `FileManager.createFile(atPath:contents:attributes:)`
-    /// returns `false` (rather than throwing) on write failure. Surface it as a
-    /// specific error so callers don't silently lose the write — the caller's
-    /// `do/catch` block will log it as a non-fatal memory-write failure.
+    /// First-create via `FileManager.createFile(atPath:contents:attributes:)` returns
+    /// `false` (rather than throwing) on write failure. Surface it as a specific error
+    /// so callers don't silently lose the write — the caller's `do/catch` block will
+    /// log it as a non-fatal memory-write failure.
     case fileCreationFailed
 
     var errorDescription: String? {

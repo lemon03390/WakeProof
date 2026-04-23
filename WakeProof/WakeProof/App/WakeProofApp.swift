@@ -69,11 +69,19 @@ struct WakeProofApp: App {
         Task { @MainActor in
             do {
                 try await memoryStore.bootstrapIfNeeded()
+                // Only expose the store to the verifier AFTER bootstrap completes so
+                // the first verify() call can never win the directory-creation race.
+                // (The actor's read() handles missing-dir gracefully via .empty, but
+                // moving the assignment here makes the invariant visible in the code
+                // shape — S6 in memory-tool-findings.md.)
+                visionVerifier.memoryStore = memoryStore
             } catch {
                 Self.logger.error("MemoryStore bootstrap failed: \(error.localizedDescription, privacy: .public)")
+                // Bootstrap failed — do NOT expose the store. read() would still work
+                // (it early-returns .empty on missing dir), but writes would fail
+                // repeatedly — better to run memory-less for this launch.
             }
         }
-        visionVerifier.memoryStore = memoryStore
         // Recover any fire that started in a prior session but never resolved (force-quit
         // during ring). Persists an UNRESOLVED WakeAttempt so the audit trail records the
         // missed wake instead of silently forgetting it.

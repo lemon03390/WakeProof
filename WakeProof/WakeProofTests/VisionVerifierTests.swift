@@ -207,7 +207,7 @@ final class VisionVerifierTests: XCTestCase {
     /// verify() must NOT call Claude if scheduler isn't in .capturing. Prevents
     /// burned credits + silently-refused scheduler transitions.
     func testVerifyBailsBeforeClaudeSpendWhenSchedulerNotInCapturing() async {
-        let recorder = RecordingClient()
+        let recorder = RecordingClient(verdict: .rejected)
         let verifier = VisionVerifier(client: recorder)
         verifier.scheduler = scheduler
         // Scheduler is .idle (never entered .ringing/.capturing)
@@ -551,15 +551,20 @@ final class VisionVerifierTests: XCTestCase {
     /// `lastMemoryContext` is read by Layer 2 B.3 tests to assert the memory block
     /// threads through VisionVerifier. Verdict + memoryUpdate are init-parameterized
     /// so a single class covers both the REJECTED call-count paths and the VERIFIED
-    /// memory-integration paths. Default `verdict: .rejected` keeps existing callers
-    /// (`RecordingClient()`) working unchanged.
+    /// memory-integration paths. Callers must pass `verdict` explicitly — no default —
+    /// so a future test doesn't accidentally rely on an implicit .rejected default that
+    /// hides intent.
+    /// @MainActor: the class has mutable state (callCount, lastMemoryContext) that's
+    /// read by the main-actor test body; @MainActor-annotating the class documents
+    /// the test-only isolation invariant (all accesses stay on the main actor).
+    @MainActor
     private final class RecordingClient: ClaudeVisionClient {
         var callCount = 0
         var lastMemoryContext: String?
         let verdict: VerificationResult.Verdict
         let memoryUpdate: VerificationResult.MemoryUpdate?
 
-        init(verdict: VerificationResult.Verdict = .rejected, memoryUpdate: VerificationResult.MemoryUpdate? = nil) {
+        init(verdict: VerificationResult.Verdict, memoryUpdate: VerificationResult.MemoryUpdate? = nil) {
             self.verdict = verdict
             self.memoryUpdate = memoryUpdate
         }
@@ -583,6 +588,9 @@ final class VisionVerifierTests: XCTestCase {
     /// Returns a different result per call and records the antiSpoofInstruction
     /// argument of each invocation. Lets us assert the instruction threads through
     /// the RETRY → antiSpoofPrompt → re-capture → verify chain.
+    /// @MainActor: mutable `results` + `capturedInstructions` are accessed by the
+    /// main-actor test body; annotation documents the test-only isolation invariant.
+    @MainActor
     private final class InstructionSpyClient: ClaudeVisionClient {
         var results: [VerificationResult]
         var capturedInstructions: [String?] = []

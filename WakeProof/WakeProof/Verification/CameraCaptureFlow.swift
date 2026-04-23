@@ -150,10 +150,7 @@ struct CameraCaptureFlow: View {
         // Mark the directory as excluded from iCloud backup. Unconditional set is
         // idempotent (microsecond write); the previous pre-check read was doing the
         // same kind of stat syscall and saving nothing on the happy path.
-        var dirURL = dir
-        var rv = URLResourceValues()
-        rv.isExcludedFromBackup = true
-        try? dirURL.setResourceValues(rv)
+        dir.markingExcludedFromBackup()
         let dest = dir.appendingPathComponent("\(UUID().uuidString).mov")
         do {
             try fm.moveItem(at: tmpURL, to: dest)

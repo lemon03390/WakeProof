@@ -77,6 +77,10 @@ final class MemoryEntryTests: XCTestCase {
         XCTAssertEqual(entry.confidence!, decoded.confidence!, accuracy: 1e-10)
     }
 
+    // Note: the following two tests intentionally exercise the deprecated
+    // `makeEntry(fromAttempt:)` factory to guard its behaviour for any caller
+    // that still references it. Production code must NOT use this factory —
+    // see the @available(deprecated) annotation on MemoryEntry for rationale.
     func testMakeEntryFromAttempt() {
         let attempt = WakeAttempt(scheduledAt: fixedDate)
         attempt.verdict = "VERIFIED"

@@ -2,6 +2,11 @@
 //  ClaudeAPIClientTests.swift
 //  WakeProofTests
 //
+//  NOTE: this test file uses a static-handler URLProtocol stub (StubProtocol).
+//  Tests must run SERIALLY — do NOT enable `-parallel-testing-enabled` in the
+//  scheme, or concurrent test methods will race on StubProtocol.handler /
+//  .throwing and produce nondeterministic results.
+//
 
 import XCTest
 @testable import WakeProof
