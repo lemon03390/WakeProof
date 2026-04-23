@@ -104,13 +104,28 @@ final class VisionVerifier {
         }
         let baselineJPEG = baseline.imageData
 
+        let memoryContext: String?
+        if let memoryStore {
+            do {
+                let snapshot = try await memoryStore.read()
+                memoryContext = MemoryPromptBuilder.render(snapshot)
+                logger.info("Memory loaded: profile=\(snapshot.profile != nil, privacy: .public) history=\(snapshot.recentHistory.count, privacy: .public)/\(snapshot.totalHistoryCount, privacy: .public)")
+            } catch {
+                logger.fault("MemoryStore read failed, verifying without memory: \(error.localizedDescription, privacy: .public)")
+                memoryContext = nil
+            }
+        } else {
+            memoryContext = nil
+        }
+
         let instructionForThisCall = currentAntiSpoofInstruction
         do {
             let result = try await client.verify(
                 baselineJPEG: baselineJPEG,
                 stillJPEG: stillJPEG,
                 baselineLocation: baseline.locationLabel,
-                antiSpoofInstruction: instructionForThisCall
+                antiSpoofInstruction: instructionForThisCall,
+                memoryContext: memoryContext
             )
             await handleResult(result, attempt: attempt, context: context)
         } catch let apiError as ClaudeAPIError {
@@ -127,6 +142,28 @@ final class VisionVerifier {
         // Only count attempts that actually resulted in a Claude verdict. Network errors
         // handled in `handleAPIError` deliberately skip this increment.
         currentAttemptIndex += 1
+
+        // Fire-and-forget memory write. Runs concurrent with the scheduler transition
+        // the switch dispatches. Failure is logged but never rewinds the verdict —
+        // the alarm UX has already committed to the outcome by this point.
+        if let memoryStore, let memoryUpdate = result.memoryUpdate {
+            let entry = MemoryEntry.makeEntry(
+                fromAttempt: attempt,
+                confidence: result.confidence,
+                note: memoryUpdate.historyNote
+            )
+            Task { [logger] in
+                do {
+                    try await memoryStore.appendHistory(entry)
+                    if let delta = memoryUpdate.profileDelta {
+                        try await memoryStore.rewriteProfile(delta)
+                    }
+                } catch {
+                    logger.error("MemoryStore write failed (non-fatal): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
         switch result.verdict {
         case .verified:
             await finish(attempt: attempt, context: context, verdict: .verified, reasoning: result.reasoning)

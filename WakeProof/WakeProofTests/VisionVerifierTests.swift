@@ -282,6 +282,106 @@ final class VisionVerifierTests: XCTestCase {
                        "second call's instruction must match the instruction chosen at RETRY time — this is the load-bearing anti-spoof invariant")
     }
 
+    // MARK: - Layer 2 memory integration
+
+    func testVerifyWithoutMemoryStoreCallsClientWithNilMemoryContext() async {
+        let fake = RecordingClient(verdict: .verified)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = nil
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        XCTAssertNil(fake.lastMemoryContext)
+    }
+
+    func testVerifyWithEmptyMemoryStoreStillCallsClientWithNilMemoryContext() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        let fake = RecordingClient(verdict: .verified)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        XCTAssertNil(fake.lastMemoryContext,
+                     "Empty snapshot → builder returns nil → client sees nil memoryContext")
+    }
+
+    func testVerifyWithPopulatedMemoryStorePassesRenderedBlock() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        try await store.rewriteProfile("PROFILE_MARKER")
+        let fake = RecordingClient(verdict: .verified)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        XCTAssertNotNil(fake.lastMemoryContext)
+        XCTAssertTrue(fake.lastMemoryContext!.contains("PROFILE_MARKER"))
+    }
+
+    func testVerifiedWithMemoryUpdateWritesHistoryAndProfile() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        let update = VerificationResult.MemoryUpdate(
+            profileDelta: "updated profile",
+            historyNote: "weekend fast"
+        )
+        let fake = RecordingClient(verdict: .verified, memoryUpdate: update)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        // Wait for the detached Task.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.profile, "updated profile")
+        XCTAssertEqual(snapshot.recentHistory.first?.note, "weekend fast")
+    }
+
+    func testVerifiedWithoutMemoryUpdateDoesNotWrite() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        let fake = RecordingClient(verdict: .verified, memoryUpdate: nil)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let snapshot = try await store.read()
+        XCTAssertNil(snapshot.profile)
+        XCTAssertTrue(snapshot.recentHistory.isEmpty)
+    }
+
+    private func tempMemoryStoreRoot() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verifier-mem-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     // MARK: - Fake client
 
     private final class FakeClient: ClaudeVisionClient {
@@ -297,18 +397,34 @@ final class VisionVerifierTests: XCTestCase {
 
     /// Records every verify() invocation so tests can assert call-count invariants.
     /// `lastMemoryContext` is read by Layer 2 B.3 tests to assert the memory block
-    /// threads through VisionVerifier.
+    /// threads through VisionVerifier. Verdict + memoryUpdate are init-parameterized
+    /// so a single class covers both the REJECTED call-count paths and the VERIFIED
+    /// memory-integration paths. Default `verdict: .rejected` keeps existing callers
+    /// (`RecordingClient()`) working unchanged.
     private final class RecordingClient: ClaudeVisionClient {
         var callCount = 0
         var lastMemoryContext: String?
+        let verdict: VerificationResult.Verdict
+        let memoryUpdate: VerificationResult.MemoryUpdate?
+
+        init(verdict: VerificationResult.Verdict = .rejected, memoryUpdate: VerificationResult.MemoryUpdate? = nil) {
+            self.verdict = verdict
+            self.memoryUpdate = memoryUpdate
+        }
+
         func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?, memoryContext: String?) async throws -> VerificationResult {
             callCount += 1
             lastMemoryContext = memoryContext
-            return VerificationResult(sameLocation: false, personUpright: false, eyesOpen: false,
-                                     appearsAlert: false, lightingSuggestsRoomLit: false,
-                                     confidence: 0.0, reasoning: "recorder-stub",
-                                     spoofingRuledOut: nil,
-                                     verdict: .rejected)
+            return VerificationResult(
+                sameLocation: verdict == .verified, personUpright: verdict == .verified,
+                eyesOpen: verdict == .verified, appearsAlert: verdict == .verified,
+                lightingSuggestsRoomLit: verdict == .verified,
+                confidence: verdict == .verified ? 0.9 : 0.5,
+                reasoning: "recorder-stub",
+                spoofingRuledOut: nil,
+                verdict: verdict,
+                memoryUpdate: memoryUpdate
+            )
         }
     }
 
