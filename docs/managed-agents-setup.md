@@ -89,3 +89,50 @@ If Step 5 specifically returns 404 or 405, the `terminateSession()` method in `O
 ## Re-use on subsequent nights
 
 `OvernightAgentClient` caches the agent id and environment id in UserDefaults after first successful create. Nightly use is `startSession()` only.
+
+## Decision record (2026-04-24)
+
+**B.3 dry-run outcome: PRIMARY PATH chosen (Managed Agents).**
+
+All 5 steps passed in ~3 minutes via curl against the Vercel wildcard proxy.
+Total cost: ~$0.003 (559 input + 29 output tokens on a single agent call
+plus resource creation which is free).
+
+### API-shape corrections discovered
+
+The plan's A.8 code assumed API shapes that turned out to be wrong. Corrections
+now landed in `OvernightAgentClient.swift`:
+
+| Endpoint | Plan assumed | Reality |
+|---|---|---|
+| `POST /v1/environments` | `{"name", "runtime":"python"}` | `{"name"}` only — no runtime field |
+| `POST /v1/sessions` | `{"agent_id", "environment_id", "initial_message", "task_budget"}` | `{"agent", "environment_id"}` only. Send seed prompt as follow-up event. |
+| `POST /v1/sessions/:id/events` | `{"event": {...}}` (singular) | `{"events": [{...}]}` (plural array) |
+| Terminate | `PATCH /v1/sessions/:id {"status":"terminated"}` | `DELETE /v1/sessions/:id` — PATCH endpoint doesn't exist |
+| Session ID prefix | `sess_` | `sesn_` |
+| `GET events` response key | `{"events": [...]}` | `{"data": [...]}` |
+
+### Observed event flow (single-message round-trip)
+
+1. `session.status_running` (~0.1s after POST event)
+2. Our `user.message` (captured)
+3. `span.model_request_start`
+4. **`agent.message`** — the briefing content (~1s after event)
+5. `span.model_request_end` with `model_usage` (input/output tokens)
+6. `session.status_idle` with `stop_reason.type = "end_turn"`
+
+Round-trip event → agent.message: ~2 seconds. Well under the Vercel 10s cap.
+
+### Next steps
+
+- **B.4a**: implement `ManagedAgentBriefingSource` as an `OvernightBriefingSource` conformer wrapping the corrected `OvernightAgentClient`.
+- **B.5**: swap `NoopBriefingSource` for `ManagedAgentBriefingSource` in `WakeProofApp`.
+- **B.6**: compressed-night smoke test.
+
+### Cost projection
+
+Per-night production run (assuming 1 session open at bedtime, 2-3 BGTask pokes during night, one fetch at wake):
+- Session create: free
+- 4 user.message events × ~500 input tokens each + agent response: ~2500 input + ~200 output = ~$0.0175 per night.
+- Session DELETE: free.
+- 7-night demo: ~$0.12. Well under $50 cap.

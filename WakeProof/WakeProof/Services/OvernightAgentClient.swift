@@ -11,6 +11,19 @@
 //  Anthropic key never reaches the device. Required beta header:
 //  `managed-agents-2026-04-01`.
 //
+//  API shapes (confirmed by Task B.3 dry-run on 2026-04-24):
+//   - POST /v1/environments: body is `{"name": "..."}` only. No runtime field.
+//   - POST /v1/sessions:    body is `{"agent": <id>, "environment_id": <id>}`
+//                           only. `initial_message` and `task_budget` are NOT
+//                           accepted at session-create in the
+//                           managed-agents-2026-04-01 beta; send the seed
+//                           prompt as a follow-up user.message event.
+//   - POST /v1/sessions/:id/events: body is `{"events": [{...}]}` — plural
+//                           array with a single element.
+//   - Session termination:  `DELETE /v1/sessions/:id` (PATCH returns 404).
+//   - Session id prefix:    `sesn_...` (four-letter, not `sess_`).
+//   - GET  /v1/sessions/:id/events response shape: `{"data": [...]}` top-level.
+//
 
 import Foundation
 import os
@@ -125,17 +138,23 @@ actor OvernightAgentClient {
 
     /// Start a new session for tonight. Returns the session id + the attached
     /// agent / environment ids baked into a `Handle`.
+    ///
+    /// The `taskBudgetTokens` parameter is currently unused — Anthropic's
+    /// Managed Agents API at `managed-agents-2026-04-01` does NOT accept
+    /// `task_budget` at session-create time. Parameter kept for API-surface
+    /// compatibility; will be wired up when we migrate to the full
+    /// agentic-loop SDK (or when Anthropic adds it to the session-create body).
+    ///
+    /// After session-create succeeds we immediately post the `seedMessage` as
+    /// a `user.message` event so the agent has something to react to — the
+    /// same flow runtime pokes use later in the night.
     func startSession(seedMessage: String, taskBudgetTokens: Int = 128_000) async throws -> Handle {
+        _ = taskBudgetTokens // intentionally unused — see doc-comment above.
         let (agentID, envID) = try await ensureAgentAndEnvironment()
         let url = baseURL.appendingPathComponent("v1/sessions")
         let body: [String: Any] = [
-            "agent_id": agentID,
-            "environment_id": envID,
-            "initial_message": [
-                "role": "user",
-                "content": [["type": "text", "text": seedMessage]]
-            ],
-            "task_budget": ["type": "tokens", "total": taskBudgetTokens]
+            "agent": agentID,
+            "environment_id": envID
         ]
         let data = try await postJSON(url: url, body: body)
         struct Resp: Decodable { let id: String? }
@@ -147,17 +166,28 @@ actor OvernightAgentClient {
             throw OvernightAgentError.decodingFailed(underlying: error)
         }
         guard let id = parsed.id else { throw OvernightAgentError.missingResourceID("session.id") }
-        logger.info("Managed Agent session started id=\(id, privacy: .public) budget=\(taskBudgetTokens, privacy: .public) tokens")
+        logger.info("Managed Agent session started id=\(id, privacy: .public)")
+
+        // Send the seed message as a follow-up user.message event. Same shape
+        // as runtime overnight pokes — session-create does not accept
+        // initial_message in this API version.
+        try await appendEvent(sessionID: id, text: seedMessage)
+
         return Handle(agentID: agentID, environmentID: envID, sessionID: id)
     }
 
     /// Append a user.message event to a live session.
+    ///
+    /// Request body is `{"events": [{...}]}` — the plural `events` key takes
+    /// an array of event objects. We send one event per call.
     func appendEvent(sessionID: String, text: String) async throws {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)/events")
         let body: [String: Any] = [
-            "event": [
-                "type": "user.message",
-                "content": [["type": "text", "text": text]]
+            "events": [
+                [
+                    "type": "user.message",
+                    "content": [["type": "text", "text": text]]
+                ]
             ]
         ]
         _ = try await postJSON(url: url, body: body)
@@ -165,69 +195,43 @@ actor OvernightAgentClient {
     }
 
     /// Fetch events and return the latest agent.message content (if any).
+    ///
+    /// Response shape is `{"data": [<event>, ...]}` — the top-level key is
+    /// `data`, not `events`. Each event has `type`, and `agent.message`
+    /// events carry `content: [{"type": "text", "text": "..."}]`.
     func fetchLatestAgentMessage(sessionID: String) async throws -> String? {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)/events")
         let data = try await getJSON(url: url)
-        struct Events: Decodable {
+        struct EventsResponse: Decodable {
             struct Event: Decodable {
                 struct Block: Decodable { let type: String; let text: String? }
                 let type: String
                 let content: [Block]?
             }
-            let events: [Event]?
+            let data: [Event]?
         }
-        let parsed: Events
+        let parsed: EventsResponse
         do {
-            parsed = try JSONDecoder().decode(Events.self, from: data)
+            parsed = try JSONDecoder().decode(EventsResponse.self, from: data)
         } catch {
             logger.error("fetchLatestAgentMessage: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
         }
-        let agentMessages = parsed.events?.filter { $0.type == "agent.message" } ?? []
+        let agentMessages = parsed.data?.filter { $0.type == "agent.message" } ?? []
         let lastText = agentMessages.last?.content?.first(where: { $0.type == "text" })?.text
         logger.info("fetchLatestAgentMessage session=\(sessionID, privacy: .public) foundAgentMessages=\(agentMessages.count, privacy: .public) lastTextBytes=\(lastText?.utf8.count ?? 0, privacy: .public)")
         return lastText
     }
 
-    /// Terminate the session so its `running` runtime stops accruing. Sessions
-    /// can be listed and read after termination; this only stops billing the
-    /// running time.
-    ///
-    /// **API shape is assumed, not confirmed by the research notes.** The notes
-    /// (docs/opus-4-7-research-notes.md Question 3) document session statuses
-    /// (`idle`/`running`/`rescheduling`/`terminated`) and note that "A running
-    /// session cannot be deleted; send an interrupt event if you need to delete
-    /// it immediately." The PATCH shape below is our best-effort first attempt;
-    /// if Task B.3 dry-run Step 5 rejects the PATCH, switch to the interrupt-
-    /// event fallback (defined below this method). Task B.3 Step 5 verifies.
+    /// Terminate the session so its running-time billing stops accruing.
+    /// Uses `DELETE /v1/sessions/:id` — confirmed by Task B.3 dry-run as the
+    /// only supported termination path (PATCH returns 404). Response body is
+    /// `{"id": "sesn_...", "type": "session_deleted"}` which we do not need
+    /// to parse.
     func terminateSession(sessionID: String) async throws {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)")
-        let body: [String: Any] = ["status": "terminated"]
-        do {
-            _ = try await patchJSON(url: url, body: body)
-            logger.info("Terminated session \(sessionID, privacy: .public) via PATCH /v1/sessions/:id")
-        } catch OvernightAgentError.httpError(let status, _) where status == 404 || status == 405 {
-            // PATCH path doesn't exist — fall back to the documented interrupt-event pattern.
-            logger.info("PATCH termination got \(status, privacy: .public); retrying with interrupt event")
-            try await terminateViaInterruptEvent(sessionID: sessionID)
-        }
-    }
-
-    /// Fallback termination path — send a user event with an interrupt payload.
-    /// Shape inferred from research notes ("send an interrupt event if you need
-    /// to delete it immediately"). Task B.3's dry-run records the actual shape
-    /// Anthropic accepts; update this body literal if dry-run reveals a different
-    /// required key.
-    private func terminateViaInterruptEvent(sessionID: String) async throws {
-        let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)/events")
-        let body: [String: Any] = [
-            "event": [
-                "type": "user.interrupt",
-                "reason": "client-terminated"
-            ]
-        ]
-        _ = try await postJSON(url: url, body: body)
-        logger.info("Terminated session \(sessionID, privacy: .public) via interrupt event")
+        _ = try await jsonRequest(url: url, method: "DELETE", body: nil)
+        logger.info("Session \(sessionID, privacy: .public) deleted")
     }
 
     // MARK: - Private helpers
@@ -254,9 +258,10 @@ actor OvernightAgentClient {
 
     private func createEnvironment() async throws -> String {
         let url = baseURL.appendingPathComponent("v1/environments")
+        // Managed Agents API at managed-agents-2026-04-01 does NOT accept a
+        // `runtime` field — environments default to cloud Python-capable.
         let body: [String: Any] = [
-            "name": "wakeproof-env-python",
-            "runtime": "python"
+            "name": "wakeproof-env-v1"
         ]
         let data = try await postJSON(url: url, body: body)
         struct Resp: Decodable { let id: String? }
@@ -301,10 +306,6 @@ actor OvernightAgentClient {
 
     private func getJSON(url: URL) async throws -> Data {
         try await jsonRequest(url: url, method: "GET", body: nil)
-    }
-
-    private func patchJSON(url: URL, body: [String: Any]) async throws -> Data {
-        try await jsonRequest(url: url, method: "PATCH", body: body)
     }
 
     private func jsonRequest(url: URL, method: String, body: [String: Any]?) async throws -> Data {

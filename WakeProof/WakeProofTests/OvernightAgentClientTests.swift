@@ -151,28 +151,46 @@ final class OvernightAgentClientTests: XCTestCase {
     func testStartSessionReturnsHandleWithSessionID() async throws {
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
+        // startSession now (1) POSTs /v1/sessions then (2) POSTs the seed as a
+        // follow-up events event. Both stubbed responses must be valid.
         StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = try! JSONSerialization.data(withJSONObject: ["id": "sess_42"])
-            return (response, body)
+            if path.hasSuffix("/v1/sessions") {
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "sesn_42"])
+                return (response, body)
+            } else if path.hasSuffix("/events") {
+                return (response, Data("{}".utf8))
+            }
+            return (response, Data("{}".utf8))
         }
         let client = makeClient()
         let handle = try await client.startSession(seedMessage: "hello")
-        XCTAssertEqual(handle.sessionID, "sess_42")
+        XCTAssertEqual(handle.sessionID, "sesn_42")
         XCTAssertEqual(handle.agentID, "agent_preset")
         XCTAssertEqual(handle.environmentID, "env_preset")
 
-        let posts = StubProtocol.requests.filter { $0.method == "POST" && $0.path.hasSuffix("/v1/sessions") }
-        XCTAssertEqual(posts.count, 1)
+        let sessionPosts = StubProtocol.requests.filter { $0.method == "POST" && $0.path.hasSuffix("/v1/sessions") }
+        XCTAssertEqual(sessionPosts.count, 1)
+        let eventPosts = StubProtocol.requests.filter { $0.method == "POST" && $0.path.hasSuffix("/v1/sessions/sesn_42/events") }
+        XCTAssertEqual(eventPosts.count, 1, "seed message must be posted as a follow-up event")
     }
 
-    func testStartSessionIncludesTaskBudget() async throws {
+    func testStartSessionBodyShapeIsAgentAndEnvironmentIDOnly() async throws {
+        // API shape confirmed by Task B.3 dry-run: {"agent": <id>, "environment_id": <id>}.
+        // No initial_message, no task_budget at session-create time.
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
         StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = try! JSONSerialization.data(withJSONObject: ["id": "sess_budget"])
-            return (response, body)
+            if path.hasSuffix("/v1/sessions") {
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "sesn_budget"])
+                return (response, body)
+            } else if path.hasSuffix("/events") {
+                return (response, Data("{}".utf8))
+            }
+            return (response, Data("{}".utf8))
         }
         let client = makeClient()
         _ = try await client.startSession(seedMessage: "hi", taskBudgetTokens: 55_555)
@@ -186,18 +204,55 @@ final class OvernightAgentClientTests: XCTestCase {
               let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return XCTFail("session POST body did not parse as JSON object")
         }
-        XCTAssertEqual(json["agent_id"] as? String, "agent_preset")
+        XCTAssertEqual(json["agent"] as? String, "agent_preset",
+                       "session-create body must use 'agent' key (not 'agent_id')")
         XCTAssertEqual(json["environment_id"] as? String, "env_preset")
-        guard let budget = json["task_budget"] as? [String: Any] else {
-            return XCTFail("task_budget missing from POST body")
+        XCTAssertNil(json["agent_id"], "'agent_id' is rejected by the API; must use 'agent'")
+        XCTAssertNil(json["initial_message"], "initial_message not accepted at session-create — seed via events POST")
+        XCTAssertNil(json["task_budget"], "task_budget not accepted at session-create in managed-agents-2026-04-01")
+    }
+
+    func testStartSessionSendsSeedAsFollowUpEvent() async throws {
+        // Seed prompt is sent as an events POST immediately after session-create.
+        suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
+        suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
+        StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if path.hasSuffix("/v1/sessions") {
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "sesn_seed"])
+                return (response, body)
+            } else if path.hasSuffix("/events") {
+                return (response, Data("{}".utf8))
+            }
+            return (response, Data("{}".utf8))
         }
-        XCTAssertEqual(budget["type"] as? String, "tokens")
-        XCTAssertEqual(budget["total"] as? Int, 55_555)
+        let client = makeClient()
+        _ = try await client.startSession(seedMessage: "seed payload")
+
+        guard let eventPost = StubProtocol.requests.first(where: {
+            $0.method == "POST" && $0.path.hasSuffix("/v1/sessions/sesn_seed/events")
+        }) else {
+            return XCTFail("missing POST /v1/sessions/sesn_seed/events")
+        }
+        guard let body = eventPost.body,
+              let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let events = json["events"] as? [[String: Any]],
+              let first = events.first,
+              let content = first["content"] as? [[String: Any]],
+              let block = content.first else {
+            return XCTFail("seed-event body did not parse")
+        }
+        XCTAssertEqual(first["type"] as? String, "user.message")
+        XCTAssertEqual(block["type"] as? String, "text")
+        XCTAssertEqual(block["text"] as? String, "seed payload")
     }
 
     // MARK: - appendEvent
 
     func testAppendEventPostsToCorrectPath() async throws {
+        // API shape confirmed by Task B.3 dry-run: body is {"events": [{...}]}
+        // with the plural `events` key wrapping a single-element array.
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
         StubProtocol.handler = { request in
@@ -205,21 +260,26 @@ final class OvernightAgentClientTests: XCTestCase {
             return (response, Data("{}".utf8))
         }
         let client = makeClient()
-        try await client.appendEvent(sessionID: "sess_42", text: "heart rate dropped")
+        try await client.appendEvent(sessionID: "sesn_42", text: "heart rate dropped")
 
         guard let post = StubProtocol.requests.first else {
             return XCTFail("no request captured")
         }
         XCTAssertEqual(post.method, "POST")
-        XCTAssertTrue(post.path.hasSuffix("/v1/sessions/sess_42/events"), "got path \(post.path)")
+        XCTAssertTrue(post.path.hasSuffix("/v1/sessions/sesn_42/events"), "got path \(post.path)")
 
         guard let body = post.body,
-              let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let event = json["event"] as? [String: Any] else {
-            return XCTFail("append body did not parse")
+              let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return XCTFail("append body did not parse as JSON object")
         }
-        XCTAssertEqual(event["type"] as? String, "user.message")
-        guard let content = event["content"] as? [[String: Any]],
+        XCTAssertNil(json["event"], "singular 'event' key is rejected — must be plural 'events' array")
+        guard let events = json["events"] as? [[String: Any]] else {
+            return XCTFail("append body must contain 'events' array at top level")
+        }
+        XCTAssertEqual(events.count, 1, "we send one event per call")
+        let firstEvent = events[0]
+        XCTAssertEqual(firstEvent["type"] as? String, "user.message")
+        guard let content = firstEvent["content"] as? [[String: Any]],
               let first = content.first else {
             return XCTFail("append content block missing")
         }
@@ -230,12 +290,14 @@ final class OvernightAgentClientTests: XCTestCase {
     // MARK: - fetchLatestAgentMessage
 
     func testFetchLatestAgentMessageFindsAgentMessageEvents() async throws {
+        // API shape confirmed by Task B.3 dry-run: response top-level is
+        // {"data": [<event>, ...]} (not {"events": [...]}).
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
         StubProtocol.handler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let payload: [String: Any] = [
-                "events": [
+                "data": [
                     ["type": "user.message", "content": [["type": "text", "text": "user seed"]]],
                     ["type": "agent.message", "content": [["type": "text", "text": "first draft"]]],
                     ["type": "agent.message", "content": [["type": "text", "text": "FINAL BRIEFING"]]]
@@ -245,14 +307,14 @@ final class OvernightAgentClientTests: XCTestCase {
             return (response, body)
         }
         let client = makeClient()
-        let text = try await client.fetchLatestAgentMessage(sessionID: "sess_42")
+        let text = try await client.fetchLatestAgentMessage(sessionID: "sesn_42")
         XCTAssertEqual(text, "FINAL BRIEFING")
 
         guard let get = StubProtocol.requests.first else {
             return XCTFail("no request captured")
         }
         XCTAssertEqual(get.method, "GET")
-        XCTAssertTrue(get.path.hasSuffix("/v1/sessions/sess_42/events"), "got path \(get.path)")
+        XCTAssertTrue(get.path.hasSuffix("/v1/sessions/sesn_42/events"), "got path \(get.path)")
     }
 
     func testFetchLatestAgentMessageReturnsNilWhenNoAgentMessages() async throws {
@@ -261,7 +323,7 @@ final class OvernightAgentClientTests: XCTestCase {
         StubProtocol.handler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let payload: [String: Any] = [
-                "events": [
+                "data": [
                     ["type": "user.message", "content": [["type": "text", "text": "just user"]]]
                 ]
             ]
@@ -269,62 +331,35 @@ final class OvernightAgentClientTests: XCTestCase {
             return (response, body)
         }
         let client = makeClient()
-        let text = try await client.fetchLatestAgentMessage(sessionID: "sess_42")
+        let text = try await client.fetchLatestAgentMessage(sessionID: "sesn_42")
         XCTAssertNil(text)
     }
 
     // MARK: - terminateSession
 
-    func testTerminateSessionHappyPathPATCHes() async throws {
+    func testTerminateSessionCallsDELETE() async throws {
+        // API shape confirmed by Task B.3 dry-run: DELETE /v1/sessions/:id is
+        // the only supported termination path. PATCH returns 404.
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
         StubProtocol.handler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("{}".utf8))
+            let payload: [String: Any] = ["id": "sesn_42", "type": "session_deleted"]
+            let body = try! JSONSerialization.data(withJSONObject: payload)
+            return (response, body)
         }
         let client = makeClient()
-        try await client.terminateSession(sessionID: "sess_42")
+        try await client.terminateSession(sessionID: "sesn_42")
+
+        let deletes = StubProtocol.requests.filter { $0.method == "DELETE" }
+        XCTAssertEqual(deletes.count, 1, "terminate must issue exactly one DELETE")
+        XCTAssertTrue(deletes[0].path.hasSuffix("/v1/sessions/sesn_42"))
+        XCTAssertNil(deletes[0].body, "DELETE termination takes no body")
 
         let patches = StubProtocol.requests.filter { $0.method == "PATCH" }
-        XCTAssertEqual(patches.count, 1)
-        XCTAssertTrue(patches[0].path.hasSuffix("/v1/sessions/sess_42"))
-        guard let body = patches[0].body,
-              let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            return XCTFail("PATCH body did not parse")
-        }
-        XCTAssertEqual(json["status"] as? String, "terminated")
-
+        XCTAssertTrue(patches.isEmpty, "PATCH termination path was removed — must not be used")
         let fallbackPosts = StubProtocol.requests.filter { $0.method == "POST" && $0.path.hasSuffix("/events") }
-        XCTAssertTrue(fallbackPosts.isEmpty, "happy path must not fall back to interrupt event")
-    }
-
-    func testTerminateSessionFallsBackToInterruptEventOn404() async throws {
-        suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
-        suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
-        StubProtocol.handler = { request in
-            if request.httpMethod == "PATCH" {
-                let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
-                return (response, Data("not found".utf8))
-            }
-            // Interrupt event POST succeeds.
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("{}".utf8))
-        }
-        let client = makeClient()
-        try await client.terminateSession(sessionID: "sess_42")
-
-        let patches = StubProtocol.requests.filter { $0.method == "PATCH" }
-        XCTAssertEqual(patches.count, 1)
-
-        let posts = StubProtocol.requests.filter { $0.method == "POST" && $0.path.hasSuffix("/v1/sessions/sess_42/events") }
-        XCTAssertEqual(posts.count, 1, "404 PATCH must fall back to exactly one interrupt POST")
-        guard let body = posts[0].body,
-              let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let event = json["event"] as? [String: Any] else {
-            return XCTFail("interrupt-event POST body did not parse")
-        }
-        XCTAssertEqual(event["type"] as? String, "user.interrupt")
-        XCTAssertEqual(event["reason"] as? String, "client-terminated")
+        XCTAssertTrue(fallbackPosts.isEmpty, "interrupt-event fallback was removed — must not be used")
     }
 
     // MARK: - Beta header
@@ -338,21 +373,26 @@ final class OvernightAgentClientTests: XCTestCase {
             } else if path.hasSuffix("/v1/environments") {
                 return (response, try! JSONSerialization.data(withJSONObject: ["id": "env_xyz"]))
             } else if path.hasSuffix("/v1/sessions") {
-                return (response, try! JSONSerialization.data(withJSONObject: ["id": "sess_42"]))
+                return (response, try! JSONSerialization.data(withJSONObject: ["id": "sesn_42"]))
             } else if path.hasSuffix("/events") {
-                return (response, Data("{}".utf8))
+                // GET returns {"data": [...]}; POST events returns {}. Either
+                // shape parses cleanly for this header-only test.
+                return (response, Data("{\"data\": []}".utf8))
             } else {
-                return (response, Data("{}".utf8))
+                return (response, try! JSONSerialization.data(withJSONObject: ["id": "sesn_42", "type": "session_deleted"]))
             }
         }
         let client = makeClient()
         let handle = try await client.startSession(seedMessage: "ping")
         try await client.appendEvent(sessionID: handle.sessionID, text: "midnight data point")
         _ = try? await client.fetchLatestAgentMessage(sessionID: handle.sessionID)
-        // We intentionally swallow termination — PATCH returns `{}` on 200 which is fine.
         try await client.terminateSession(sessionID: handle.sessionID)
 
         XCTAssertFalse(StubProtocol.requests.isEmpty, "no requests captured")
+        // Confirm we saw at least one DELETE (termination) so the header
+        // assertions actually cover that path.
+        XCTAssertTrue(StubProtocol.requests.contains { $0.method == "DELETE" },
+                      "expected DELETE termination request in captured traffic")
         for captured in StubProtocol.requests {
             let beta = captured.headers["anthropic-beta"]
             XCTAssertEqual(beta, "managed-agents-2026-04-01",
