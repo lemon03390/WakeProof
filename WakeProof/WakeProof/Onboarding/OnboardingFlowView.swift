@@ -11,8 +11,9 @@
 //    2. Camera permission
 //    3. HealthKit permission
 //    4. Motion permission
-//    5. Baseline photo capture
-//    6. Done — hand off to home
+//    5. Bedtime (Layer 3 briefing enablement — skippable, default 23:00)
+//    6. Baseline photo capture
+//    7. Done — hand off to home
 //
 
 import SwiftData
@@ -29,7 +30,7 @@ struct OnboardingFlowView: View {
     private let logger = Logger(subsystem: "com.wakeproof.onboarding", category: "flow")
 
     enum Step: CaseIterable {
-        case welcome, notifications, camera, health, motion, baseline, done
+        case welcome, notifications, camera, health, motion, bedtime, baseline, done
     }
 
     var body: some View {
@@ -92,6 +93,11 @@ struct OnboardingFlowView: View {
                         onAdvance: advance,
                         secondaryHandler: advance
                     )
+                case .bedtime:
+                    // Layer 3 — bedtime arms the overnight-briefing scheduler. Skippable;
+                    // users who skip or disable the toggle never trigger BGProcessingTask
+                    // refreshes, so the Managed Agents $0.08/hr meter never starts.
+                    BedtimeStep(onAdvance: advance)
                 case .baseline:
                     VStack(spacing: 12) {
                         BaselinePhotoView(onCaptured: persistBaseline)

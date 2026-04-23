@@ -6,6 +6,7 @@
 //  to show onboarding, the alarm scheduler home, or the ringing alarm modal.
 //
 
+import BackgroundTasks
 import SwiftData
 import SwiftUI
 import os
@@ -18,12 +19,26 @@ struct WakeProofApp: App {
     @State private var scheduler = AlarmScheduler()
     @State private var soundEngine = AlarmSoundEngine()
     @State private var visionVerifier = VisionVerifier()
-    @State private var memoryStore = MemoryStore()
     /// One-shot guard so .task running on every RootView re-mount (multi-scene attach,
     /// SwiftUI identity churn) doesn't repeatedly cancel + reschedule the fire pipeline.
     @State private var didBootstrap = false
 
+    // Non-Observable actor services — held as `private let` rather than `@State` because
+    // they provide no SwiftUI-observable surface. A @State wrapper around a value-type
+    // actor-reference adds binding machinery we never use.
+    private let memoryStore = MemoryStore()
+    private let noopSource = NoopBriefingSource()
+    private let sleepReader = HealthKitSleepReader()
+    private let overnightScheduler: OvernightScheduler
+
     private static let logger = Logger(subsystem: "com.wakeproof.app", category: "root")
+    /// Weak bridge between `init()`'s synchronously-registered BGTask launch handler and
+    /// the scheduler instance. `nonisolated static` so the handler closure can capture
+    /// it without reaching into `self` (which the closure can't safely hold at register
+    /// time — the runtime invokes it during cold-launch before any instance lifetime
+    /// guarantees). Weak so the box itself never keeps the scheduler alive past app
+    /// teardown; live reference is held by `WakeProofApp.overnightScheduler`.
+    private static let schedulerBox = OvernightSchedulerBox()
     let modelContainer: ModelContainer
 
     init() {
@@ -38,20 +53,56 @@ struct WakeProofApp: App {
             Self.logger.critical("ModelContainer init failed: \(error.localizedDescription, privacy: .public)")
             fatalError("Failed to initialize SwiftData ModelContainer: \(error)")
         }
+
+        // Build scheduler synchronously so it's ready for RootView at first render.
+        // Phase B.5 will swap `NoopBriefingSource` for the concrete source chosen by
+        // the B.3 decision gate — until then, `fetchBriefing` throws loudly so a
+        // wake-time finalize logs an error rather than silently succeeding.
+        let scheduler = OvernightScheduler(
+            source: noopSource,
+            sleepReader: sleepReader,
+            memoryStore: memoryStore,
+            modelContainer: modelContainer
+        )
+        self.overnightScheduler = scheduler
+        Self.schedulerBox.value = scheduler
+        Self.logger.info("OvernightScheduler instantiated with NoopBriefingSource (B.5 swaps)")
+
+        // BGTaskScheduler requires identifier registration before
+        // `application(_:didFinishLaunchingWithOptions:)` returns. `.task { bootstrapIfNeeded }`
+        // fires AFTER first scene attach, which is well past launch completion — iOS has
+        // already crashed the app by then on any early BGTask fire. Registering here in
+        // init() is the crash-safety guarantee (plan's R1 fix).
+        let box = Self.schedulerBox
+        OvernightScheduler.registerBackgroundTask { task in
+            Task {
+                guard let scheduler = box.value else {
+                    Self.logger.warning("BGTask fired before scheduler ready; completing as failure so iOS retries")
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                await scheduler.handleBackgroundRefresh(task)
+            }
+        }
+        Self.logger.info("BGTaskScheduler registered identifier=\(OvernightScheduler.backgroundTaskIdentifier, privacy: .public)")
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            // `overnightScheduler` is passed as a constructor parameter rather than via
+            // SwiftUI's `.environment(_:)` because it's an `actor` (not `@Observable`) —
+            // same constraint as MemoryStore. Downstream views either read it here in
+            // RootView's closure, or access it through RootView's state-transition hook.
+            RootView(overnightScheduler: overnightScheduler)
                 .environment(permissions)
                 .environment(audioKeepalive)
                 .environment(scheduler)
                 .environment(soundEngine)
                 .environment(visionVerifier)
-                // NOTE: MemoryStore is a Swift `actor`, not `Observable`, so SwiftUI's
-                // .environment(_:) refuses it. Downstream consumers access the store via
-                // `visionVerifier.memoryStore` (wired below), which is the only read path
-                // the memory-tool plan uses — no SwiftUI view ever reads it directly.
+                // NOTE: MemoryStore + OvernightScheduler are Swift `actor`s, not `Observable`,
+                // so SwiftUI's .environment(_:) refuses them. MemoryStore reaches views via
+                // `visionVerifier.memoryStore`; OvernightScheduler is passed directly to
+                // RootView above.
                 .task { bootstrapIfNeeded() }
         }
         .modelContainer(modelContainer)
@@ -87,6 +138,19 @@ struct WakeProofApp: App {
         // missed wake instead of silently forgetting it.
         scheduler.recoverUnresolvedFireIfNeeded()
         scheduler.scheduleNextFireIfEnabled()
+
+        // Launch-time stale-handle cleanup. C.1 cost-containment: Managed Agents charges
+        // $0.08/hr while a session is running; a crash during the night leaves the
+        // session meter running until its 24h ceiling. Catching it on next launch caps
+        // the cost at "time until next launch" instead. No-op when no stale handle is
+        // present (the happy path after a clean finalize).
+        if let staleHandle = UserDefaults.standard.string(forKey: OvernightScheduler.activeHandleKey) {
+            let scheduler = overnightScheduler
+            Task {
+                Self.logger.warning("Found stale overnight handle on launch; attempting cleanup")
+                await scheduler.cleanupStale(handle: staleHandle)
+            }
+        }
     }
 
     /// Install the scheduler's late-bound callbacks. Each guard makes the call idempotent
@@ -161,6 +225,11 @@ struct WakeProofApp: App {
 // MARK: - Root
 
 struct RootView: View {
+    /// `actor` reference — held directly rather than through `@Environment` because
+    /// SwiftUI environment requires `@Observable` types. See WakeProofApp.body for
+    /// the rationale.
+    let overnightScheduler: OvernightScheduler
+
     @Query private var baselines: [BaselinePhoto]
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
@@ -168,6 +237,13 @@ struct RootView: View {
     @Environment(VisionVerifier.self) private var visionVerifier
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+
+    /// Briefing finalized on the (.verifying → .idle) transition. Latched here so the
+    /// fullScreenCover reads a stable reference even after its background Task resolves.
+    @State private var latestBriefing: MorningBriefing?
+    @State private var showBriefing = false
+
+    private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "briefing-view")
 
     var body: some View {
         ZStack {
@@ -188,6 +264,16 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: scheduler.phase)
+        .fullScreenCover(isPresented: $showBriefing) {
+            // Presented on VERIFIED. `latestBriefing` can be nil when the scheduler
+            // had no active session (fresh install, no bedtime set, or the Noop source
+            // returned an error at fetchBriefing) — MorningBriefingView handles nil
+            // by rendering a fallback "no briefing yet" card.
+            MorningBriefingView(briefing: latestBriefing) {
+                showBriefing = false
+                latestBriefing = nil
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 // Catches the case where Task.sleep was suspended past its fire time overnight
@@ -202,6 +288,19 @@ struct RootView: View {
                 soundEngine.stop()
                 audioKeepalive.stopAlarmSound()
                 visionVerifier.resetForNewFire()
+                // Surface the overnight briefing right after a successful verify. The
+                // fetch runs in a detached Task so the scheduler's isolation boundary
+                // is honoured; the main-actor hop afterwards drives the cover binding.
+                // The whole thing is ancillary — any error here just means no briefing
+                // appears, which is the same UX as no bedtime being set (handled by
+                // MorningBriefingView's nil-briefing fallback).
+                let scheduler = overnightScheduler
+                Task { @MainActor in
+                    let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
+                    Self.logger.info("VERIFIED transition: briefing fetched present=\(briefing != nil, privacy: .public)")
+                    latestBriefing = briefing
+                    showBriefing = true
+                }
             case (_, .verifying):
                 // Reduce but do not mute during verification; Decision 2 failure-mode table says
                 // a full mute makes the user think they already succeeded. Applies to both the
@@ -266,4 +365,15 @@ struct RootView: View {
             )
         }
     }
+}
+
+// MARK: - File-scope helpers
+
+/// Weak bridge from the file-scope BGTask launch handler registered in
+/// `WakeProofApp.init()` to the scheduler instance. Declared at file scope (not nested
+/// inside the struct) so the launch-handler closure — which must be captured before
+/// the struct has any stable instance identity — can reference it without a `self`
+/// capture. Weak because this box should never extend the scheduler's lifetime.
+final class OvernightSchedulerBox {
+    weak var value: OvernightScheduler?
 }

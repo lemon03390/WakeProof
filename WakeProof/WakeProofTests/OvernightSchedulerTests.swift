@@ -24,36 +24,13 @@ final class OvernightSchedulerTests: XCTestCase {
 
     // MARK: - BGTask launch-handler registration
     //
-    // Once `BGTaskSchedulerPermittedIdentifiers` declares the identifier
-    // (Phase A.11), iOS enforces that a launch handler must be registered
-    // before any `BGTaskScheduler.shared.submit(...)` call — otherwise it
-    // raises `NSInternalInconsistencyException` (an ObjC exception the
-    // scheduler's `try`/catch cannot intercept). The production wiring is
-    // scheduled for Phase B.x in `WakeProofApp.init()`; until then the test
-    // host must install a stub registration so `scheduleNextBackgroundRefresh`
-    // can run without crashing.
-    //
-    // `register(forTaskWithIdentifier:)` MUST be called exactly once per
-    // identifier per process — a second call is a runtime error. The
-    // `registeredIdentifier` flag makes this class-level setUp safe even if
-    // XCTest re-enters the class bootstrap (it doesn't today, but the guard
-    // costs nothing).
-    private static var registeredIdentifier = false
-
-    override class func setUp() {
-        super.setUp()
-        guard !registeredIdentifier else { return }
-        registeredIdentifier = true
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: OvernightScheduler.backgroundTaskIdentifier,
-            using: nil
-        ) { task in
-            // Tests never invoke this handler — BGProcessingTask cannot be
-            // constructed in unit tests (initialiser is unavailable). The
-            // closure exists solely to satisfy iOS's registration contract.
-            task.setTaskCompleted(success: true)
-        }
-    }
+    // Phase B.1 moved BGTaskScheduler registration into `WakeProofApp.init()`.
+    // Since the unit-test target is hosted by `WakeProof.app` (TEST_HOST set in
+    // the project), the app's `init()` runs when the test process launches and
+    // registers the identifier before any test can. `register(forTaskWithIdentifier:)`
+    // raises NSInternalInconsistencyException on duplicate registration, so the
+    // tests must NOT call `register(...)` again — previously this was a stub
+    // here for Phase A where init() didn't wire it yet.
 
     // MARK: - Recording fake source
 
