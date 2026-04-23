@@ -1,0 +1,10 @@
+{
+  "name": "wakeproof-proxy-vercel",
+  "version": "1.0.0",
+  "description": "Vercel Serverless fallback proxy for Claude API (bypasses Cloudflare HKG edge bot rules)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
