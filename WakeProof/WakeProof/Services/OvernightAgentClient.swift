@@ -123,7 +123,7 @@ actor OvernightAgentClient {
         let cachedAgent = defaults.string(forKey: Self.agentIDKey)
         let cachedEnv = defaults.string(forKey: Self.environmentIDKey)
         if let a = cachedAgent, let e = cachedEnv {
-            logger.info("Reusing cached agent+environment IDs agent=\(a, privacy: .public) env=\(e, privacy: .public)")
+            logger.info("Reusing cached agent+environment IDs agent=\(a.prefix(12), privacy: .private) env=\(e.prefix(12), privacy: .private)")
             return (a, e)
         }
 
@@ -132,7 +132,7 @@ actor OvernightAgentClient {
         defaults.set(agentID, forKey: Self.agentIDKey)
         let envID = try await createEnvironment()
         defaults.set(envID, forKey: Self.environmentIDKey)
-        logger.info("Fresh agent+environment created agent=\(agentID, privacy: .public) env=\(envID, privacy: .public)")
+        logger.info("Fresh agent+environment created agent=\(agentID.prefix(12), privacy: .private) env=\(envID.prefix(12), privacy: .private)")
         return (agentID, envID)
     }
 
@@ -166,7 +166,7 @@ actor OvernightAgentClient {
             throw OvernightAgentError.decodingFailed(underlying: error)
         }
         guard let id = parsed.id else { throw OvernightAgentError.missingResourceID("session.id") }
-        logger.info("Managed Agent session started id=\(id, privacy: .public)")
+        logger.info("Managed Agent session started id=\(id.prefix(12), privacy: .private)")
 
         // Send the seed message as a follow-up user.message event. Same shape
         // as runtime overnight pokes — session-create does not accept
@@ -191,7 +191,7 @@ actor OvernightAgentClient {
             ]
         ]
         _ = try await postJSON(url: url, body: body)
-        logger.info("Appended event to session \(sessionID, privacy: .public) (bytes=\(text.utf8.count, privacy: .public))")
+        logger.info("Appended event to session \(sessionID.prefix(12), privacy: .private) (bytes=\(text.utf8.count, privacy: .public))")
     }
 
     /// Fetch events and return the latest agent.message content (if any).
@@ -219,7 +219,7 @@ actor OvernightAgentClient {
         }
         let agentMessages = parsed.data?.filter { $0.type == "agent.message" } ?? []
         let lastText = agentMessages.last?.content?.first(where: { $0.type == "text" })?.text
-        logger.info("fetchLatestAgentMessage session=\(sessionID, privacy: .public) foundAgentMessages=\(agentMessages.count, privacy: .public) lastTextBytes=\(lastText?.utf8.count ?? 0, privacy: .public)")
+        logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) foundAgentMessages=\(agentMessages.count, privacy: .public) lastTextBytes=\(lastText?.utf8.count ?? 0, privacy: .public)")
         return lastText
     }
 
@@ -231,7 +231,7 @@ actor OvernightAgentClient {
     func terminateSession(sessionID: String) async throws {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)")
         _ = try await jsonRequest(url: url, method: "DELETE", body: nil)
-        logger.info("Session \(sessionID, privacy: .public) deleted")
+        logger.info("Session \(sessionID.prefix(12), privacy: .private) deleted")
     }
 
     // MARK: - Private helpers

@@ -22,7 +22,12 @@ actor NoopBriefingSource: OvernightBriefingSource {
         "noop-handle-\(UUID().uuidString)"
     }
 
-    func pokeIfNeeded(handle: String, sleep: SleepSnapshot) async throws -> Bool { true }
+    // Returns false to match the primary-path "keep refreshing until alarm time"
+    // semantic. Per the protocol doc, `true` tells the scheduler "briefing ready —
+    // stop refreshing". Returning `true` here was inconsistent with Managed Agents
+    // (which never terminates early) and would falsely short-circuit the pipeline
+    // in any future refactor that honors the return value. C.3 fix.
+    func pokeIfNeeded(handle: String, sleep: SleepSnapshot) async throws -> Bool { false }
 
     func fetchBriefing(handle: String) async throws -> (text: String, memoryUpdate: String?) {
         throw OvernightNoopError.notConfigured

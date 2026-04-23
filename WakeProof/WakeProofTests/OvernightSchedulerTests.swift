@@ -232,6 +232,33 @@ final class OvernightSchedulerTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
     }
 
+    func testFinalizeBriefingWithMemoryRewriteFailureLeavesFlagFalse() async throws {
+        // Drive MemoryStore.rewriteProfile to throw MemoryStoreError.invalidUserUUID
+        // via a non-UUID-shaped userUUID (the path-traversal guard in userDirectoryURL).
+        // The C.3 fix wrapped rewriteProfile in do/catch; previously `try?` swallowed the
+        // error and `memoryUpdateApplied = true` ran unconditionally, making the flag lie.
+        // Invariant: the briefing itself is still returned (it's the user-facing artefact
+        // and memory is ancillary), but the flag reflects the actual memory-write outcome.
+        suiteDefaults.set("active-handle-delta", forKey: OvernightScheduler.activeHandleKey)
+        let memoryStore = makeMemoryStore(uuid: "../evil")
+        let source = RecordingSource()
+        await source.setFetchResult((text: "Briefing prose.", memoryUpdate: "## New profile\nSomething."))
+        let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
+
+        let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        XCTAssertNotNil(briefing, "briefing must still be returned even if memory rewrite fails")
+        XCTAssertEqual(briefing?.briefingText, "Briefing prose.")
+        XCTAssertFalse(briefing?.memoryUpdateApplied ?? true,
+                       "rewriteProfile threw → flag must stay false (no silent lies)")
+
+        // Handle is still cleared and cleanup still runs — memory is ancillary, not
+        // a blocker for the finalize happy path.
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
+        let cleanupCalls = await source.cleanupCalls
+        XCTAssertEqual(cleanupCalls, ["active-handle-delta"])
+    }
+
     func testFinalizeBriefingAppliesMemoryUpdateWhenPresent() async throws {
         suiteDefaults.set("active-handle-gamma", forKey: OvernightScheduler.activeHandleKey)
         let uuid = UUID().uuidString

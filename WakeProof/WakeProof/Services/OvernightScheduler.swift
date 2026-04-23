@@ -93,9 +93,12 @@ actor OvernightScheduler {
     /// BGProcessingTask handler. **Order is load-bearing** (R1 in plan review):
     /// (1) expirationHandler first — iOS can reclaim the task at any moment
     ///     and we need a reasoner for "time ran out" rather than revocation.
-    /// (2) scheduleNextBackgroundRefresh before the work — a crash during the
-    ///     work still leaves tomorrow's refresh queued.
-    /// (3) the work itself — poke the source with fresh HealthKit data.
+    /// (2) Bail fast if there is no active handle — crucial termination condition
+    ///     for the BGTask chain. After `finalizeBriefing` clears the handle the
+    ///     pipeline must stop re-queuing; previously we submitted tomorrow's task
+    ///     BEFORE checking the guard, which kept the chain alive forever (C.3 fix).
+    /// (3) scheduleNextBackgroundRefresh — only while a session is active.
+    /// (4) the work itself — poke the source with fresh HealthKit data.
     func handleBackgroundRefresh(_ task: BGProcessingTask) async {
         // (1) expirationHandler FIRST. The handler runs on an unspecified
         // queue from BackgroundTasks; hop onto the scheduler actor to log
@@ -107,15 +110,19 @@ actor OvernightScheduler {
             }
             task.setTaskCompleted(success: false)
         }
-        // (2) Schedule next refresh BEFORE the work so a crash during the
-        // work still leaves tomorrow's refresh queued.
-        scheduleNextBackgroundRefresh()
-        // (3) The work itself.
+        // (2) No active handle → pipeline is stopped, exit silently. Do NOT
+        // re-queue: finalizeBriefing clears the handle on VERIFIED, and if a
+        // late BGTask fires after that we want the chain to terminate rather
+        // than burn a task every 2h for nothing (Phase C review #2).
         guard let handle = defaults.string(forKey: Self.activeHandleKey) else {
-            logger.warning("handleBackgroundRefresh: no active handle — nothing to poke, completing successfully")
+            logger.warning("handleBackgroundRefresh: no active handle (pipeline stopped); completing")
             task.setTaskCompleted(success: true)
             return
         }
+        // (3) Only re-queue while an active session exists. After finalizeBriefing
+        // clears the handle, the pipeline stops until next bedtime.
+        scheduleNextBackgroundRefresh()
+        // (4) The work itself.
         do {
             let sleep = await readSleepSafely()
             let briefingReady = try await source.pokeIfNeeded(handle: handle, sleep: sleep)
@@ -152,13 +159,23 @@ actor OvernightScheduler {
             try context.save()
             logger.info("finalizeBriefing: briefing inserted chars=\(text.count, privacy: .public)")
             if let memoryUpdate {
-                // `try?` on memory writes: a rewrite failure (disk full, permission
-                // flap) must NOT prevent the briefing itself from being returned.
-                // The briefing is the user-facing artefact; memory is ancillary.
-                try? await memoryStore.rewriteProfile(memoryUpdate)
-                briefing.memoryUpdateApplied = true
-                try? context.save()
-                logger.info("finalizeBriefing: memory update applied chars=\(memoryUpdate.count, privacy: .public)")
+                // Previously `try?` swallowed rewrite failures then unconditionally set
+                // the flag — so `memoryUpdateApplied` lied when a disk-full or invalid-
+                // UUID error hit. CLAUDE.md promoted rule #2 forbids silent catch; wrap
+                // in do/catch so the flag reflects reality and a failure logs visibly.
+                // The briefing itself is still returned — it's the user-facing artefact
+                // and memory is ancillary, so a memory-store hiccup must not mask the
+                // briefing on the morning cover. The `try? context.save()` on the flag
+                // update is acceptable: save failure on the flag is recoverable — the
+                // main concern was silent profile-write drops.
+                do {
+                    try await memoryStore.rewriteProfile(memoryUpdate)
+                    briefing.memoryUpdateApplied = true
+                    try? context.save()
+                    logger.info("finalizeBriefing: memory update applied chars=\(memoryUpdate.count, privacy: .public)")
+                } catch {
+                    logger.warning("finalizeBriefing: memory rewrite failed; briefing kept, flag stays false: \(error.localizedDescription, privacy: .public)")
+                }
             }
             await source.cleanup(handle: handle)
             defaults.removeObject(forKey: Self.activeHandleKey)

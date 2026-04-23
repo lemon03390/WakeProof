@@ -11,6 +11,11 @@ import os
 
 struct AlarmSchedulerView: View {
 
+    /// `actor` reference — passed by constructor because SwiftUI's `.environment(_:)`
+    /// refuses non-`@Observable` types. See WakeProofApp.body for the rationale.
+    /// Only the DEBUG buttons read this; the release build never touches it.
+    let overnightScheduler: OvernightScheduler
+
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(PermissionsManager.self) private var permissions
@@ -51,6 +56,15 @@ struct AlarmSchedulerView: View {
                 Section("DEBUG") {
                     Button("Fire alarm now") { scheduler.fireNow() }
                         .foregroundStyle(.red)
+                    Button("Start overnight session now") {
+                        Task { await overnightScheduler.startOvernightSession() }
+                    }
+                    Button("Finalize briefing now") {
+                        Task {
+                            let briefing = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
+                            logger.info("Debug finalize: briefingText=\(briefing?.briefingText ?? "nil", privacy: .public)")
+                        }
+                    }
                 }
                 #endif
             }

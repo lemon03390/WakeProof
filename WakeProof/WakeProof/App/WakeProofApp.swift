@@ -153,6 +153,38 @@ struct WakeProofApp: App {
                 await scheduler.cleanupStale(handle: staleHandle)
             }
         }
+
+        // Auto-kick the overnight session when the user launches the app after
+        // their configured bedtime has already passed today. C.3 BLOCKING fix:
+        // without this, `startOvernightSession` had zero production call sites —
+        // the Layer 3 pipeline was dead code despite being wired end-to-end.
+        //
+        // "Bedtime passed recently" = within the last 12 hours. `nextBedtime(after:)`
+        // always returns a future date (today's if still upcoming, else tomorrow's),
+        // so the most recent bedtime is `nextBedtime - 24h`. If that was within the
+        // last 12h AND no active handle exists AND bedtime is enabled, start the
+        // session now. The 12h window intentionally undershoots a full day to avoid
+        // kicking a session in the afternoon after a missed bedtime — by then the
+        // morning briefing would be stale.
+        //
+        // The real-bedtime-in-future path (user opens app earlier in the evening)
+        // still needs a proper scheduled Task to fire at 23:00; that's a Day-4
+        // follow-up. The launch-side trigger covers the demo case and the common
+        // "I opened the app as I went to bed" case.
+        Task { @MainActor in
+            let settings = BedtimeSettings.load()
+            guard settings.isEnabled else { return }
+            let hasActiveHandle = UserDefaults.standard.string(forKey: OvernightScheduler.activeHandleKey) != nil
+            guard !hasActiveHandle else { return }
+
+            guard let nextBedtime = settings.nextBedtime(after: .now) else { return }
+            let mostRecentBedtime = nextBedtime.addingTimeInterval(-24 * 3600)
+            let secondsSinceBedtime = Date.now.timeIntervalSince(mostRecentBedtime)
+            guard secondsSinceBedtime > 0, secondsSinceBedtime < 12 * 3600 else { return }
+
+            Self.logger.info("Auto-triggering startOvernightSession (bedtime was \(Int(secondsSinceBedtime / 60), privacy: .public)min ago)")
+            await self.overnightScheduler.startOvernightSession()
+        }
     }
 
     /// Install the scheduler's late-bound callbacks. Each guard makes the call idempotent
@@ -252,7 +284,7 @@ struct RootView: View {
             if baselines.isEmpty {
                 OnboardingFlowView()
             } else {
-                AlarmSchedulerView()
+                AlarmSchedulerView(overnightScheduler: overnightScheduler)
             }
 
             // Alarm overlay sits on top of whatever's below. Using a ZStack instead of a
