@@ -1,0 +1,21 @@
+{
+  "version": "1",
+  "label": "SYNTHETIC_SEED — not real user data",
+  "generatedAt": "2026-04-24T00:00:00Z",
+  "entries": [
+    {"day": "2026-04-11 (Sat)", "wakeTime": "06:32", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.88, "note": "clear"},
+    {"day": "2026-04-12 (Sun)", "wakeTime": "06:29", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.91, "note": "fast"},
+    {"day": "2026-04-13 (Mon)", "wakeTime": "06:31", "verdictTrail": ["RETRY", "VERIFIED"], "retries": 1, "confidence": 0.72, "note": "groggy"},
+    {"day": "2026-04-14 (Tue)", "wakeTime": "06:30", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.84, "note": "normal"},
+    {"day": "2026-04-15 (Wed)", "wakeTime": "06:33", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.86, "note": "normal"},
+    {"day": "2026-04-16 (Thu)", "wakeTime": "06:31", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.85, "note": "normal"},
+    {"day": "2026-04-17 (Fri)", "wakeTime": "06:30", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.87, "note": "fast"},
+    {"day": "2026-04-18 (Sat)", "wakeTime": "06:35", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.89, "note": "clear"},
+    {"day": "2026-04-19 (Sun)", "wakeTime": "06:29", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.90, "note": "clear"},
+    {"day": "2026-04-20 (Mon)", "wakeTime": "06:31", "verdictTrail": ["RETRY", "RETRY-coerced-REJECTED"], "retries": 2, "confidence": 0.65, "note": "groggy + lighting"},
+    {"day": "2026-04-21 (Tue)", "wakeTime": "06:30", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.83, "note": "normal"},
+    {"day": "2026-04-22 (Wed)", "wakeTime": "06:32", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.88, "note": "normal"},
+    {"day": "2026-04-23 (Thu)", "wakeTime": "06:30", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.86, "note": "normal"},
+    {"day": "2026-04-24 (Fri)", "wakeTime": "06:31", "verdictTrail": ["VERIFIED"], "retries": 0, "confidence": 0.87, "note": "fast"}
+  ]
+}

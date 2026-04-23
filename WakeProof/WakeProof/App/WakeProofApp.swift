@@ -19,6 +19,7 @@ struct WakeProofApp: App {
     @State private var scheduler = AlarmScheduler()
     @State private var soundEngine = AlarmSoundEngine()
     @State private var visionVerifier = VisionVerifier()
+    @State private var weeklyCoach = WeeklyCoach()
     /// One-shot guard so .task running on every RootView re-mount (multi-scene attach,
     /// SwiftUI identity churn) doesn't repeatedly cancel + reschedule the fire pipeline.
     @State private var didBootstrap = false
@@ -101,6 +102,7 @@ struct WakeProofApp: App {
                 .environment(scheduler)
                 .environment(soundEngine)
                 .environment(visionVerifier)
+                .environment(weeklyCoach)
                 // NOTE: MemoryStore + OvernightScheduler are Swift `actor`s, not `Observable`,
                 // so SwiftUI's .environment(_:) refuses them. MemoryStore reaches views via
                 // `visionVerifier.memoryStore`; OvernightScheduler is passed directly to

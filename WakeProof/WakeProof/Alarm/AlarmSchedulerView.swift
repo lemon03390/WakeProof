@@ -19,6 +19,7 @@ struct AlarmSchedulerView: View {
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(PermissionsManager.self) private var permissions
+    @Environment(WeeklyCoach.self) private var weeklyCoach
 
     @State private var startTime: Date = .now
     @State private var isEnabled: Bool = false
@@ -67,6 +68,15 @@ struct AlarmSchedulerView: View {
                     }
                 }
                 #endif
+
+                Section {
+                    WeeklyInsightView(
+                        insight: weeklyCoach.currentInsight,
+                        generatedAt: weeklyCoach.generatedAt
+                    )
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                }
             }
             .navigationTitle("WakeProof")
             .onAppear(perform: loadFromScheduler)
