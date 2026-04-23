@@ -58,6 +58,22 @@ Phase A is fully additive with zero runtime integration risk. Phase B is where D
 
 ---
 
+## Token-cost budget (measured 2026-04-24, corrected in Phase C.1 from R7)
+
+| Item | Size | Token delta vs v2 | USD delta @ Opus 4.7 input $15/Mtok |
+|---|---|---|---|
+| v2 system prompt | 1167 chars | baseline | baseline |
+| v3 system prompt | 2459 chars | +~323 tokens | +$0.00485 per call |
+| v3 user prompt `memory_update` schema block | +~100 chars | +~25 tokens | +$0.00038 per call |
+| Per-call delta vs v2, memory empty | — | +~348 tokens | +$0.00523 per call |
+| Per-call delta vs v2, memory active (profile + 5 history rows ~2000 chars) | — | +~848 tokens | +$0.01272 per call |
+
+Measured 2026-04-24 against the live B.5 smoke test: **1120 input tokens + 204 output tokens** on a minimal request (no memory), producing **$0.0107** — grounded figure for the zero-memory branch.
+
+The pre-C.1 estimate of "~225 extra tokens/call for v3" undershot by ~44% because it accounted for the system-prompt delta only, not the v3 user-prompt schema block. Corrected figures above are what the budget tracker in `docs/opus-4-7-strategy.md` should use.
+
+---
+
 ## File Structure
 
 New or modified in this plan:

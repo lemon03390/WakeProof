@@ -411,6 +411,122 @@ final class VisionVerifierTests: XCTestCase {
         XCTAssertTrue(snapshot.recentHistory.isEmpty)
     }
 
+    // MARK: - R1: profile rewrite gate on VERIFIED verdict
+
+    /// The profile represents durable TRUTH about this user — only rewrite when
+    /// we believe the verdict (VERIFIED). REJECTED/RETRY still append a history
+    /// row (useful calibration signal) but must NOT override the profile:
+    /// otherwise a failed spoof attempt, where Claude was fooled into emitting a
+    /// profile_delta while correctly REJECTING the photo, would pollute durable
+    /// state. Seed the store with a known profile; fire REJECTED + profileDelta;
+    /// assert the profile is unchanged but the history row landed.
+    func testRejectedVerdictDoesNotRewriteProfileEvenWithMemoryUpdate() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+        try await store.rewriteProfile("SEED_PROFILE")
+
+        let update = VerificationResult.MemoryUpdate(
+            profileDelta: "EVIL OVERRIDE",
+            historyNote: "attempted spoof"
+        )
+        let fake = RecordingClient(verdict: .rejected, memoryUpdate: update)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        enterVerifyingState()
+        let attempt = makeAttempt()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.profile, "SEED_PROFILE",
+                       "REJECTED verdict must NOT rewrite profile — prevents failed-spoof pollution (R1 fix)")
+        XCTAssertEqual(snapshot.recentHistory.first?.note, "attempted spoof",
+                       "history row must still land — it's a useful calibration signal even when verdict was REJECTED")
+        XCTAssertEqual(snapshot.recentHistory.first?.verdict, "REJECTED")
+    }
+
+    // MARK: - R9: second-RETRY memory row reflects coerced REJECTED verdict
+
+    /// handleResult's switch coerces a second RETRY verdict to REJECTED (one
+    /// anti-spoof attempt per fire). Before the R9 fix, memory wrote the raw
+    /// Claude verdict (RETRY) while updatePersistedAttempt wrote the coerced one
+    /// (REJECTED), so history.jsonl and the SwiftData WakeAttempt diverged on
+    /// the second-RETRY path. Simulate that path: first RETRY → antiSpoofPrompt
+    /// → second RETRY → coerced REJECTED. Both the SwiftData verdict and the
+    /// memory history row must say REJECTED.
+    func testSecondRetryCoercedMemoryRowReflectsFinalRejection() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+
+        // Both calls return RETRY + a memoryUpdate. Second call gets coerced to REJECTED.
+        let update = VerificationResult.MemoryUpdate(profileDelta: nil, historyNote: "still unclear")
+        let retryResult = makeResult(
+            verdict: .retry,
+            confidence: 0.6,
+            reasoning: "Still unclear.",
+            personUpright: false,
+            appearsAlert: false
+        )
+        let coercedResult = VerificationResult(
+            sameLocation: retryResult.sameLocation,
+            personUpright: retryResult.personUpright,
+            eyesOpen: retryResult.eyesOpen,
+            appearsAlert: retryResult.appearsAlert,
+            lightingSuggestsRoomLit: retryResult.lightingSuggestsRoomLit,
+            confidence: retryResult.confidence,
+            reasoning: retryResult.reasoning,
+            spoofingRuledOut: retryResult.spoofingRuledOut,
+            verdict: retryResult.verdict,
+            memoryUpdate: update
+        )
+        let sequencedClient = SequencedClient(results: [coercedResult, coercedResult])
+        let verifier = VisionVerifier(client: sequencedClient)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        enterVerifyingState()
+        let firstAttempt = makeAttempt()
+
+        // First call: RETRY → antiSpoofPrompt
+        await verifier.verify(attempt: firstAttempt, baseline: baseline, context: context)
+        guard case .antiSpoofPrompt = scheduler.phase else {
+            return XCTFail("expected .antiSpoofPrompt after first RETRY, got \(scheduler.phase)")
+        }
+
+        // User taps "I'm ready" → re-enters capturing → fresh attempt
+        scheduler.beginCapturing()
+        let secondAttempt = makeAttempt()
+        // Second call: RETRY again → coerced to REJECTED by handleResult
+        await verifier.verify(attempt: secondAttempt, baseline: baseline, context: context)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(secondAttempt.verdictEnum, .rejected,
+                       "second RETRY must coerce the SwiftData row to REJECTED")
+
+        let snapshot = try await store.read()
+        // Two history rows were written (one per verify call). Both should exist.
+        XCTAssertEqual(snapshot.recentHistory.count, 2,
+                       "both verify calls should have written a memory history row")
+        // The most-recent row must reflect the coerced REJECTED, not the raw RETRY.
+        XCTAssertEqual(snapshot.recentHistory.last?.verdict, "REJECTED",
+                       "coerced second-RETRY memory row must record REJECTED (R9 fix) — agrees with SwiftData")
+    }
+
+    /// SequencedClient returns the next result in order on each call. Lets tests
+    /// drive the RETRY → re-verify → coerced-REJECTED path by pre-loading both
+    /// results. Unlike InstructionSpyClient this variant doesn't record inputs —
+    /// it exists solely to feed a two-call verdict sequence.
+    private final class SequencedClient: ClaudeVisionClient {
+        var results: [VerificationResult]
+        init(results: [VerificationResult]) { self.results = results }
+        func verify(baselineJPEG: Data, stillJPEG: Data, baselineLocation: String, antiSpoofInstruction: String?, memoryContext: String?) async throws -> VerificationResult {
+            guard !results.isEmpty else { throw ClaudeAPIError.emptyResponse }
+            return results.removeFirst()
+        }
+    }
+
     private func tempMemoryStoreRoot() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("verifier-mem-\(UUID().uuidString)", isDirectory: true)

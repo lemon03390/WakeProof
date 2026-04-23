@@ -27,7 +27,12 @@ enum MemoryPromptBuilder {
 
         if let profile = snapshot.profile, !profile.isEmpty {
             parts.append("<profile>")
-            parts.append(profile)
+            // B1/R2 fix: escape angle brackets in Claude-authored content so a
+            // previously-authored profile can't close our wrapping tag early
+            // and inject pseudo-instructions into the next verify call. The
+            // v3 prompt frames memory as "observed patterns" — HTML-encoded
+            // brackets read as literal characters, not as XML structure.
+            parts.append(escapeForXML(profile))
             parts.append("</profile>")
         }
 
@@ -55,9 +60,25 @@ enum MemoryPromptBuilder {
     private static func renderRow(_ entry: MemoryEntry) -> String {
         let when = iso8601.string(from: entry.timestamp)
         let confidence = entry.confidence.map { String(format: "%.2f", $0) } ?? "—"
-        let note = (entry.note?.replacingOccurrences(of: "|", with: "/")
-                                .replacingOccurrences(of: "\n", with: " ")) ?? ""
+        // B1/R2 fix: escape angle brackets before pipe/newline flattening so a
+        // Claude-authored note can't close <recent_history> or <memory_context>
+        // early. Apply escape FIRST so the subsequent pipe/newline rules see the
+        // already-encoded form.
+        let note = (entry.note.map { escapeForXML($0)
+                                        .replacingOccurrences(of: "|", with: "/")
+                                        .replacingOccurrences(of: "\n", with: " ") }) ?? ""
         return "| \(when) | \(entry.verdict) | \(confidence) | \(entry.retryCount) | \(note) |"
+    }
+
+    /// Replace `<` and `>` with their HTML-encoded equivalents so Claude-authored
+    /// content round-tripped through the memory store can't inject synthetic
+    /// closing tags that break out of `<profile>` / `<recent_history>` and smuggle
+    /// new instructions into the next system prompt. The v3 prompt describes the
+    /// memory block as observed patterns, so encoded brackets read as literal
+    /// characters — no decoder consumes them.
+    private static func escapeForXML(_ text: String) -> String {
+        text.replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     private static func buildTruncated(_ snapshot: MemorySnapshot) -> String? {

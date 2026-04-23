@@ -180,6 +180,73 @@ final class MemoryStoreTests: XCTestCase {
         let values = try file.resourceValues(forKeys: [.isExcludedFromBackupKey])
         XCTAssertEqual(values.isExcludedFromBackup, true)
     }
+
+    // MARK: - R3: UTF-8-safe truncation
+
+    /// R3 fix: when the profile is oversized AND contains no newline to fall back on,
+    /// byte-truncation alone can slice a multi-byte UTF-8 codepoint in half and leave
+    /// an invalid trailing byte. `String(contentsOf:encoding:.utf8)` then returns nil
+    /// on the next read, which silently evicts the profile (loadProfile returns nil
+    /// via `try?`). The fix walks back over UTF-8 continuation bytes (10xxxxxx) until
+    /// the last byte is a leading byte or ASCII.
+    ///
+    /// Input: `"a" * 19 + "¢"` = 19 ASCII bytes + 2 UTF-8 bytes (0xC2 0xA2) = 21 bytes.
+    /// With profileCap=20, byte-truncation would slice to byte 20 (the 0xA2 continuation),
+    /// leaving invalid UTF-8. With the fix, we walk back to byte 19 (drop the whole ¢).
+    func testOversizedProfileWithoutNewlineTruncatesAtCodepointBoundary() async throws {
+        let store = makeStore(profileCap: 20)
+        let input = String(repeating: "a", count: 19) + "¢"  // 21 bytes, no newline
+        try await store.rewriteProfile(input)
+        let snap = try await store.read()
+        XCTAssertNotNil(snap.profile, "truncated profile must still decode as valid UTF-8")
+        // The ¢ must be dropped entirely; 19 a's remain.
+        XCTAssertEqual(snap.profile, String(repeating: "a", count: 19))
+        // Defensive check that the byte count is valid UTF-8 boundary.
+        let bytes = Data(snap.profile!.utf8)
+        XCTAssertEqual(bytes.count, 19)
+    }
+
+    // MARK: - R5: first-create protection class
+
+    /// R5 fix: memory files are created with `.complete` file protection from the
+    /// first write — no brief weaker-default window between atomic-write landing
+    /// and a subsequent `setAttributes` upgrade.
+    ///
+    /// The iPhone 17 simulator (iOS 26.4) does not surface a protectionKey on
+    /// APFS-backed sim storage — `FileManager.attributesOfItem` returns an
+    /// attributes dict without the key. On device the key IS present and equals
+    /// `.complete` (validated in B.4 device-test-protocol Test 14). Assert that
+    /// IF the attribute is visible we get the right value; otherwise the test
+    /// records the simulator gap via `XCTSkip` so the suite stays green without
+    /// hiding a production regression — if production code ever regresses to
+    /// "no attribute set at all," this test will still fail on device.
+    func testHistoryFileHasCompleteProtection() async throws {
+        let uuid = UUID().uuidString
+        let store = makeStore(uuid: uuid)
+        try await store.appendHistory(
+            MemoryEntry(timestamp: .now, verdict: "VERIFIED", confidence: nil, retryCount: 0, note: nil)
+        )
+        let file = root.appendingPathComponent(uuid).appendingPathComponent("history.jsonl")
+        let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard let protection = attrs[.protectionKey] as? FileProtectionType else {
+            throw XCTSkip("Simulator does not surface .protectionKey on APFS — validated on device via B.4 Test 14")
+        }
+        XCTAssertEqual(protection, .complete,
+                       "history.jsonl must be .complete-protected from first-create (R5 fix)")
+    }
+
+    func testProfileFileHasCompleteProtection() async throws {
+        let uuid = UUID().uuidString
+        let store = makeStore(uuid: uuid)
+        try await store.rewriteProfile("hello")
+        let file = root.appendingPathComponent(uuid).appendingPathComponent("profile.md")
+        let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard let protection = attrs[.protectionKey] as? FileProtectionType else {
+            throw XCTSkip("Simulator does not surface .protectionKey on APFS — validated on device via B.4 Test 14")
+        }
+        XCTAssertEqual(protection, .complete,
+                       "profile.md must be .complete-protected from first-create (R5 fix)")
+    }
 }
 
 // Test-only peek so the bootstrap-idempotent test can verify the directory landed.

@@ -143,6 +143,23 @@ final class VisionVerifier {
         // handled in `handleAPIError` deliberately skip this increment.
         currentAttemptIndex += 1
 
+        // R9 fix: compute the FINAL verdict up-front — including the second-RETRY
+        // coercion to REJECTED — so the memory write (below) and the scheduler
+        // dispatch (switch below) agree. Previously the memory row captured the
+        // raw Claude verdict while updatePersistedAttempt wrote the coerced one,
+        // leaving history.jsonl and the SwiftData WakeAttempt divergent on the
+        // second-RETRY path. Future memory readers (Layer 3 overnight agent,
+        // Layer 4 weekly coach) need rows that reflect the UX-final outcome.
+        let finalVerdict: WakeAttempt.Verdict
+        switch result.verdict {
+        case .verified:
+            finalVerdict = .verified
+        case .rejected:
+            finalVerdict = .rejected
+        case .retry:
+            finalVerdict = currentAttemptIndex >= 2 ? .rejected : .retry
+        }
+
         // Fire-and-forget memory write. Runs concurrent with the scheduler transition
         // the switch dispatches. Failure is logged but never rewinds the verdict —
         // the alarm UX has already committed to the outcome by this point.
@@ -155,13 +172,13 @@ final class VisionVerifier {
         // from the Claude response so the on-disk row reflects what Claude actually
         // said, not the stale pre-verify state.
         if let memoryStore, let memoryUpdate = result.memoryUpdate {
-            let mappedVerdict = result.verdict.mapped
             // Mirror the retryCount adjustment updatePersistedAttempt applies: only
-            // the .retry branch increments, matching `if verdict == .retry` at L284.
-            let effectiveRetryCount = mappedVerdict == .retry ? attempt.retryCount + 1 : attempt.retryCount
+            // the .retry branch increments. Use finalVerdict (post-coercion) so the
+            // row reflects the UX outcome, not the raw Claude verdict.
+            let effectiveRetryCount = finalVerdict == .retry ? attempt.retryCount + 1 : attempt.retryCount
             let entry = MemoryEntry(
                 timestamp: .now,
-                verdict: mappedVerdict.rawValue,
+                verdict: finalVerdict.rawValue,
                 confidence: result.confidence,
                 retryCount: effectiveRetryCount,
                 note: memoryUpdate.historyNote
@@ -169,7 +186,12 @@ final class VisionVerifier {
             Task { [logger] in
                 do {
                     try await memoryStore.appendHistory(entry)
-                    if let delta = memoryUpdate.profileDelta {
+                    // R1 fix: the profile represents durable TRUTH about this user;
+                    // only rewrite on a verdict we believe (VERIFIED). REJECTED/RETRY
+                    // verdicts still append a history row (useful calibration signal)
+                    // but must NOT override the profile — otherwise failed spoof
+                    // attempts pollute durable state.
+                    if finalVerdict == .verified, let delta = memoryUpdate.profileDelta {
                         try await memoryStore.rewriteProfile(delta)
                     }
                 } catch {

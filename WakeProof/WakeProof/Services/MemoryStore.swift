@@ -130,8 +130,23 @@ actor MemoryStore {
             try handle.seekToEnd()
             try handle.write(contentsOf: line)
         } else {
-            try line.write(to: file, options: [.atomic])
-            try applyFileProtection(to: file)
+            // R5 fix: create the file with `.complete` protection in a single
+            // call so the inode's protection class is set at birth — no brief
+            // weaker-class window between atomic-write landing and a subsequent
+            // setAttributes upgrade. isExcludedFromBackup is a URL resource
+            // value (not a file attribute), so it's applied separately.
+            let created = fm.createFile(
+                atPath: file.path,
+                contents: line,
+                attributes: [.protectionKey: FileProtectionType.complete]
+            )
+            guard created else {
+                throw MemoryStoreError.fileCreationFailed
+            }
+            var mutable = file
+            var rv = URLResourceValues()
+            rv.isExcludedFromBackup = true
+            try? mutable.setResourceValues(rv)
         }
 
         // Capacity probe — log only. Rotation is Day 5.
@@ -159,8 +174,30 @@ actor MemoryStore {
             logger.warning("profile.md rewrite oversized (\(data.count, privacy: .public) > \(self.configuration.profileMaxBytes, privacy: .public)) — truncating")
             bounded = Self.truncatePreservingNewlines(data, to: configuration.profileMaxBytes)
         }
-        try bounded.write(to: file, options: [.atomic])
-        try applyFileProtection(to: file)
+        if fm.fileExists(atPath: file.path) {
+            // Overwrite path: atomic rename preserves the existing inode's
+            // protection class (set at first-create below), so a subsequent
+            // applyFileProtection is a no-op upgrade when the file was
+            // already .complete. Retaining the call is defensive — a prior
+            // build (pre-R5) may have created the file at the weaker default.
+            try bounded.write(to: file, options: [.atomic])
+            try applyFileProtection(to: file)
+        } else {
+            // R5 fix: first-create path sets `.complete` protection at birth
+            // via `createFile(…attributes:)`. No brief weaker-class window.
+            let created = fm.createFile(
+                atPath: file.path,
+                contents: bounded,
+                attributes: [.protectionKey: FileProtectionType.complete]
+            )
+            guard created else {
+                throw MemoryStoreError.fileCreationFailed
+            }
+            var mutable = file
+            var rv = URLResourceValues()
+            rv.isExcludedFromBackup = true
+            try? mutable.setResourceValues(rv)
+        }
     }
 
     // MARK: - Private helpers
@@ -220,22 +257,51 @@ actor MemoryStore {
     }
 
     private static func truncatePreservingNewlines(_ data: Data, to byteLimit: Int) -> Data {
+        guard data.count > byteLimit else { return data }
         let slice = data.prefix(byteLimit)
-        guard let newlineIndex = slice.lastIndex(of: UInt8(ascii: "\n")) else {
-            return Data(slice)
+        if let newlineIndex = slice.lastIndex(of: UInt8(ascii: "\n")) {
+            // +1 to include the newline so the file ends on a clean line boundary.
+            return Data(slice.prefix(upTo: slice.index(after: newlineIndex)))
         }
-        // +1 to include the newline so the file ends on a clean line boundary.
-        return Data(slice.prefix(upTo: slice.index(after: newlineIndex)))
+        // R3 fix: no newline found — byte-truncate, but snap back to the nearest
+        // UTF-8 codepoint boundary so we never split a multi-byte codepoint. An
+        // invalid trailing byte would make the whole profile fail to decode on
+        // the next read (String(contentsOf:encoding:.utf8) returns nil) and
+        // silently evict the file via loadProfile's try-returning-nil.
+        //
+        // Detection: if the byte immediately AFTER our slice is a continuation
+        // byte (10xxxxxx), then our slice ends mid-codepoint. Walk back over
+        // any trailing continuation bytes inside the slice (10xxxxxx), then
+        // drop the leading byte of the bisected codepoint (11xxxxxx). If the
+        // byte after the slice is ASCII or a new-codepoint leading byte, the
+        // slice is already on a valid boundary — nothing to do.
+        var end = byteLimit
+        if (data[end] & 0b1100_0000) == 0b1000_0000 {
+            while end > 0 && (data[end - 1] & 0b1100_0000) == 0b1000_0000 {
+                end -= 1
+            }
+            if end > 0 && (data[end - 1] & 0b1100_0000) == 0b1100_0000 {
+                end -= 1
+            }
+        }
+        return Data(data.prefix(end))
     }
 }
 
 enum MemoryStoreError: LocalizedError {
     case invalidUserUUID
+    /// R5 fix: first-create via `FileManager.createFile(atPath:contents:attributes:)`
+    /// returns `false` (rather than throwing) on write failure. Surface it as a
+    /// specific error so callers don't silently lose the write — the caller's
+    /// `do/catch` block will log it as a non-fatal memory-write failure.
+    case fileCreationFailed
 
     var errorDescription: String? {
         switch self {
         case .invalidUserUUID:
             return "Memory store: stored user UUID is not a valid UUID shape — refusing to open directory."
+        case .fileCreationFailed:
+            return "Memory store: failed to create profile.md or history.jsonl on first write."
         }
     }
 }
