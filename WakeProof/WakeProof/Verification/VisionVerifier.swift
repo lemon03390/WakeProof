@@ -163,8 +163,8 @@ final class VisionVerifier {
         // again — which gives us a *new* capture (fresher, possibly on a different route).
         let userMessage: String
         switch error {
-        case .missingAPIKey:
-            userMessage = "Claude API key missing. Check Secrets.swift in the project."
+        case .missingProxyToken:
+            userMessage = "Proxy token missing. Check Secrets.swift in the project."
         case .timeout, .transportFailed:
             userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
         case .httpError(let status, _):

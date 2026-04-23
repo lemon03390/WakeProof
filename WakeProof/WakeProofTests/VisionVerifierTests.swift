@@ -150,8 +150,8 @@ final class VisionVerifierTests: XCTestCase {
         XCTAssertTrue(scheduler.lastCaptureError?.contains("Couldn't reach Claude") == true)
     }
 
-    func testMissingAPIKeyShowsConfigMessage() async {
-        let client = FakeClient(result: .failure(ClaudeAPIError.missingAPIKey))
+    func testMissingProxyTokenShowsConfigMessage() async {
+        let client = FakeClient(result: .failure(ClaudeAPIError.missingProxyToken))
         let verifier = VisionVerifier(client: client)
         verifier.scheduler = scheduler
         enterVerifyingState()

@@ -24,7 +24,10 @@ protocol ClaudeVisionClient {
 }
 
 enum ClaudeAPIError: LocalizedError {
-    case missingAPIKey
+    /// B1 fix: renamed from `missingAPIKey`. The Anthropic key no longer lives on
+    /// the iOS client — the proxy holds it. What we check here is the per-install
+    /// shared token that authenticates this client to the proxy.
+    case missingProxyToken
     case invalidURL
     case transportFailed(underlying: Error)
     case httpError(status: Int, snippet: String)
@@ -34,8 +37,8 @@ enum ClaudeAPIError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingAPIKey:
-            return "Claude API key not configured. Copy Secrets.swift.example to Secrets.swift and add your key."
+        case .missingProxyToken:
+            return "Proxy token not configured. Copy Secrets.swift.example to Secrets.swift and paste your token."
         case .invalidURL:
             return "Couldn't build the Claude API request URL."
         case .transportFailed:
@@ -56,7 +59,8 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
     /// Injectable for tests — production uses `.shared`.
     let session: URLSession
-    let apiKey: String
+    /// Per-install shared token (not the Anthropic API key — that's in the proxy env).
+    let proxyToken: String
     let model: String
     let endpoint: URL
     let promptTemplate: VisionPromptTemplate
@@ -65,13 +69,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
     init(
         session: URLSession = Self.defaultSession,
-        apiKey: String = Secrets.claudeAPIKey,
+        proxyToken: String = Secrets.wakeproofToken,
         model: String = Secrets.visionModel,
         endpoint: URL = Self.defaultEndpoint,
         promptTemplate: VisionPromptTemplate = .v1
     ) {
         self.session = session
-        self.apiKey = apiKey
+        self.proxyToken = proxyToken
         self.model = model
         self.endpoint = endpoint
         self.promptTemplate = promptTemplate
@@ -107,24 +111,39 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         antiSpoofInstruction: String?
     ) async throws -> VerificationResult {
         // Sentinel matches the exact placeholder shipped in Secrets.swift.example.
-        // An underscore, not a hyphen — if these two strings drift, the guard fails open.
-        guard apiKey != "sk-ant-REPLACE_ME", !apiKey.isEmpty else {
-            throw ClaudeAPIError.missingAPIKey
+        // The proxy token authenticates this client to our Vercel proxy; the Anthropic
+        // credential itself lives in the proxy's env var and never reaches this code.
+        guard proxyToken != "REPLACE_WITH_OPENSSL_RAND_HEX_32", !proxyToken.isEmpty else {
+            throw ClaudeAPIError.missingProxyToken
         }
 
-        let requestBody = buildRequestBody(
-            baselineJPEG: baselineJPEG,
-            stillJPEG: stillJPEG,
-            baselineLocation: baselineLocation,
-            antiSpoofInstruction: antiSpoofInstruction
-        )
+        // R4 fix: base64-encoding the 2.78 MB baseline + 45 KB still + JSONSerialization
+        // of the resulting [String: Any] dictionary allocates ~3.7 MB of String and blocks
+        // MainActor for 40–100 ms on older devices. Both the verifier and SwiftUI's
+        // `.easeInOut(duration: 0.2)` phase-transition animation run on MainActor, so the
+        // block stutters the .capturing → .verifying animation. Detach the encode work
+        // to a userInitiated background task and await its value. `promptTemplate` + `model`
+        // are let-properties on a struct; `buildRequestBody` is pure — safe to detach.
+        let frozenPromptTemplate = promptTemplate
+        let frozenModel = model
+        let bodyData = try await Task.detached(priority: .userInitiated) {
+            let requestBody = Self.buildRequestBody(
+                baselineJPEG: baselineJPEG,
+                stillJPEG: stillJPEG,
+                baselineLocation: baselineLocation,
+                antiSpoofInstruction: antiSpoofInstruction,
+                promptTemplate: frozenPromptTemplate,
+                model: frozenModel
+            )
+            return try JSONSerialization.data(withJSONObject: requestBody)
+        }.value
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue(proxyToken, forHTTPHeaderField: "x-wakeproof-token")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        request.httpBody = bodyData
 
         let start = Date()
         // B5 fix: image byte counts and anti-spoof instruction live inside `.private` —
@@ -241,11 +260,16 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         return result
     }
 
-    private func buildRequestBody(
+    /// R4 fix: moved to a nonisolated static so `Task.detached` can call it without
+    /// pulling the surrounding actor context. `promptTemplate` and `model` are passed
+    /// in explicitly rather than captured off `self`.
+    private static func buildRequestBody(
         baselineJPEG: Data,
         stillJPEG: Data,
         baselineLocation: String,
-        antiSpoofInstruction: String?
+        antiSpoofInstruction: String?,
+        promptTemplate: VisionPromptTemplate,
+        model: String
     ) -> [String: Any] {
         let systemPrompt = promptTemplate.systemPrompt()
         let userPrompt = promptTemplate.userPrompt(

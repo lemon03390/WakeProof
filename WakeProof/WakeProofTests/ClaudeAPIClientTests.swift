@@ -40,7 +40,7 @@ final class ClaudeAPIClientTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubProtocol.self]
         let session = URLSession(configuration: config)
-        return ClaudeAPIClient(session: session, apiKey: "sk-ant-test-key", model: "claude-opus-4-7")
+        return ClaudeAPIClient(session: session, proxyToken: "test-token", model: "claude-opus-4-7")
     }
 
     private let happyBodyJSON: [String: Any] = [
@@ -94,19 +94,19 @@ final class ClaudeAPIClientTests: XCTestCase {
         }
     }
 
-    func testMissingAPIKeyShortCircuits() async {
-        // Placeholder must match the sentinel in ClaudeAPIClient.verify exactly —
-        // underscore, not hyphen. This duplication is intentional: if either drifts
-        // this test fails loudly in CI rather than letting a bogus key hit the wire.
+    func testMissingProxyTokenShortCircuits() async {
+        // Placeholder must match the sentinel in ClaudeAPIClient.verify exactly.
+        // This duplication is intentional: if either drifts, this test fails
+        // loudly in CI rather than letting a bogus token hit the wire.
         let client = ClaudeAPIClient(
             session: URLSession(configuration: .ephemeral),
-            apiKey: "sk-ant-REPLACE_ME",
+            proxyToken: "REPLACE_WITH_OPENSSL_RAND_HEX_32",
             model: "claude-opus-4-7"
         )
         do {
             _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
-            XCTFail("expected missingAPIKey")
-        } catch ClaudeAPIError.missingAPIKey {
+            XCTFail("expected missingProxyToken")
+        } catch ClaudeAPIError.missingProxyToken {
             // expected
         } catch {
             XCTFail("wrong error: \(error)")
@@ -118,7 +118,7 @@ final class ClaudeAPIClientTests: XCTestCase {
         StubProtocol.throwing = URLError(.timedOut)
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubProtocol.self]
-        let client = ClaudeAPIClient(session: URLSession(configuration: config), apiKey: "sk-ant-test", model: "claude-opus-4-7")
+        let client = ClaudeAPIClient(session: URLSession(configuration: config), proxyToken: "test-token", model: "claude-opus-4-7")
         do {
             _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
             XCTFail("expected .timeout")
@@ -134,7 +134,7 @@ final class ClaudeAPIClientTests: XCTestCase {
         StubProtocol.throwing = URLError(.notConnectedToInternet)
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubProtocol.self]
-        let client = ClaudeAPIClient(session: URLSession(configuration: config), apiKey: "sk-ant-test", model: "claude-opus-4-7")
+        let client = ClaudeAPIClient(session: URLSession(configuration: config), proxyToken: "test-token", model: "claude-opus-4-7")
         do {
             _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
             XCTFail("expected .transportFailed")
@@ -173,6 +173,119 @@ final class ClaudeAPIClientTests: XCTestCase {
             XCTFail("expected .decodingFailed")
         } catch ClaudeAPIError.decodingFailed {
             // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    // MARK: - R11: malformed Anthropic response shapes
+
+    /// Anthropic adds a new block type (e.g., extended thinking) in a future model
+    /// bump and pushes a response with `content[0].type != "text"`. Our parser scans
+    /// for the first text block — if none, decodingFailed fires.
+    func testResponseWithOnlyToolUseBlockMapsToDecodingFailed() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = try! JSONSerialization.data(withJSONObject: [
+                "content": [[ "type": "tool_use", "id": "x", "name": "y", "input": [:] ]]
+            ])
+            return (response, body)
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .decodingFailed")
+        } catch ClaudeAPIError.decodingFailed {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// Empty content array — Anthropic SHOULD never do this on a successful call,
+    /// but if a bug slips through, we must not crash.
+    func testResponseWithEmptyContentArrayMapsToDecodingFailed() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = try! JSONSerialization.data(withJSONObject: ["content": [] as [Any]])
+            return (response, body)
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .decodingFailed")
+        } catch ClaudeAPIError.decodingFailed {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// Content key missing entirely.
+    func testResponseMissingContentKeyMapsToDecodingFailed() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = try! JSONSerialization.data(withJSONObject: ["id": "msg_123"])
+            return (response, body)
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data(), stillJPEG: Data(), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .decodingFailed")
+        } catch ClaudeAPIError.decodingFailed {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// R2: proxy upload_timeout / body_too_large / upstream_fetch_failed responses
+    /// must map to `.transportFailed`, not `.httpError`. User-facing copy hinges on this.
+    func testProxyUploadTimeoutMapsToTransportFailed() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 408, httpVersion: nil, headerFields: nil)!
+            let body = try! JSONSerialization.data(withJSONObject: [
+                "error": ["type": "upload_timeout", "message": "Proxy upload_timeout before reaching Anthropic"]
+            ])
+            return (response, body)
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data([0xFF]), stillJPEG: Data([0xFF]), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .transportFailed")
+        } catch ClaudeAPIError.transportFailed {
+            // expected — user sees "Couldn't reach Claude" which is the accurate diagnosis
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    func testProxyUpstreamFetchFailedMapsToTransportFailed() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: nil)!
+            let body = try! JSONSerialization.data(withJSONObject: [
+                "error": ["type": "upstream_fetch_failed", "message": "TLS handshake failed to api.anthropic.com"]
+            ])
+            return (response, body)
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data([0xFF]), stillJPEG: Data([0xFF]), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .transportFailed")
+        } catch ClaudeAPIError.transportFailed {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// A plain HTTP error without the proxy's JSON error envelope must still be classified
+    /// as httpError — we only special-case the recognised proxy envelope types.
+    func testPlainHTTP500WithoutProxyEnvelopeStaysHttpError() async {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data("upstream error".utf8))
+        }
+        do {
+            _ = try await client.verify(baselineJPEG: Data([0xFF]), stillJPEG: Data([0xFF]), baselineLocation: "x", antiSpoofInstruction: nil)
+            XCTFail("expected .httpError")
+        } catch ClaudeAPIError.httpError(let status, _) {
+            XCTAssertEqual(status, 500)
         } catch {
             XCTFail("wrong error: \(error)")
         }

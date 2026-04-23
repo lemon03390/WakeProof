@@ -29,9 +29,29 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) {
-    res.status(401).json({ error: { type: 'unauthorized', message: 'Missing x-api-key header' } });
+  // B1 + B2 fix: Anthropic key now lives in a Vercel env var (ANTHROPIC_API_KEY)
+  // rather than shipped inside the iOS binary. The iOS client authenticates to
+  // this proxy with a shared per-install token (x-wakeproof-token) that we
+  // validate against WAKEPROOF_CLIENT_TOKEN in env — combined, this means the
+  // binary no longer contains the Anthropic credential, and the proxy is no
+  // longer an open relay for arbitrary keys. Abuse is bounded to clients who
+  // extracted the token from a .ipa; the token is trivially rotatable.
+  const expectedToken = process.env.WAKEPROOF_CLIENT_TOKEN;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!expectedToken || !anthropicKey) {
+    res.status(500).json({
+      error: {
+        type: 'proxy_not_configured',
+        message: 'Vercel env missing WAKEPROOF_CLIENT_TOKEN or ANTHROPIC_API_KEY',
+      },
+    });
+    return;
+  }
+  const clientToken = req.headers['x-wakeproof-token'];
+  if (!clientToken || clientToken !== expectedToken) {
+    res.status(401).json({
+      error: { type: 'unauthorized', message: 'Missing or invalid x-wakeproof-token' },
+    });
     return;
   }
 
@@ -89,7 +109,7 @@ export default async function handler(req, res) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
+        'x-api-key': anthropicKey, // from env, never from the client
         'anthropic-version': anthropicVersion,
         'User-Agent': 'wakeproof-proxy-vercel/1.0',
       },
