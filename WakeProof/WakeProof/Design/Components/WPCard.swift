@@ -14,7 +14,7 @@ import SwiftUI
 struct WPCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     let padding: CGFloat
-    @ViewBuilder let content: () -> Content
+    let content: () -> Content
 
     init(padding: CGFloat = WPSpacing.xl2, @ViewBuilder content: @escaping () -> Content) {
         self.padding = padding
@@ -22,10 +22,15 @@ struct WPCard<Content: View>: View {
     }
 
     var body: some View {
-        content()
+        // Order matters: clipShape BEFORE overlay so the hairline paints on
+        // top of the clipped fill. Reversing this would clip the hairline
+        // by the rounded corners and trim the visible line at both ends —
+        // exactly where the hairline reads strongest.
+        let clipped = content()
             .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity)
             .background(background)
+            .clipShape(RoundedRectangle(cornerRadius: WPRadius.lg))
             .overlay(alignment: .top) {
                 if colorScheme == .dark {
                     Rectangle()
@@ -33,8 +38,17 @@ struct WPCard<Content: View>: View {
                         .frame(height: 1)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: WPRadius.lg))
-            .wpShadow(colorScheme == .light ? .md : .sm)
+
+        // Per README § "Borders, cards, transparency": dark cards have NO
+        // shadow (warm-tinted shadows don't read on warm-charcoal). The
+        // hairline above does the visual edge work instead.
+        return Group {
+            if colorScheme == .light {
+                clipped.wpShadow(.md)
+            } else {
+                clipped
+            }
+        }
     }
 
     private var background: Color {
