@@ -23,17 +23,24 @@ struct BaselinePhotoView: View {
     private let logger = Logger(subsystem: LogSubsystem.onboarding, category: "baseline")
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: WPSpacing.lg) {
             Spacer()
 
             Text("Your wake-location")
-                .font(.system(size: 32, weight: .bold))
+                .wpFont(.title1)
+                .foregroundStyle(Color.wpCream50)
                 .multilineTextAlignment(.center)
 
-            Text("Pick the spot in your home where you will physically be when you successfully wake up — kitchen counter, bathroom sink, your desk. Capture it now in the lighting you'll see it in tomorrow morning.")
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.8))
-                .multilineTextAlignment(.center)
+            // Explainer card: location ritual + lighting guidance.
+            // Rendered above the preview image so the user reads the instruction
+            // before capturing — on dark surface WPCard uses wpChar800 fill.
+            WPCard(padding: WPSpacing.md) {
+                Text("Pick the spot in your home where you will physically be when you successfully wake up — kitchen counter, bathroom sink, your desk. Capture it now in the lighting you'll see it in tomorrow morning.")
+                    .wpFont(.body)
+                    .foregroundStyle(Color.wpCream50.opacity(0.75))
+                    .multilineTextAlignment(.leading)
+            }
+            .environment(\.colorScheme, .dark)
 
             if let capturedImage {
                 Image(uiImage: capturedImage)
@@ -45,8 +52,8 @@ struct BaselinePhotoView: View {
 
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.orange)
+                    .wpFont(.callout)
+                    .foregroundStyle(Color.wpAttempted)
                     .multilineTextAlignment(.center)
             }
 
