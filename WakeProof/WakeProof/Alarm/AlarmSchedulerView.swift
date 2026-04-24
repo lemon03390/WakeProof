@@ -113,8 +113,9 @@ struct AlarmSchedulerView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: WPSpacing.xl) {
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(spacing: WPSpacing.xl) {
 
                     // MARK: — Banner strip
                     // Priority chain defined by `systemBanner` (reinstall >
@@ -127,6 +128,28 @@ struct AlarmSchedulerView: View {
                                 .wpFont(.callout)
                                 .foregroundStyle(Color.wpAttempted)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    // MARK: — Fresh-install empty hero
+                    // Renders only when the user hasn't yet armed an alarm AND
+                    // has no attempt history — the home is otherwise dominated
+                    // by a ticking clock with no context. The CTA scrolls to
+                    // the wake-window section (id: "wake-window") so the user
+                    // can complete their first contract without hunting for it.
+                    if scheduler.nextFireAt == nil, wakeAttempts.isEmpty {
+                        WPCard {
+                            VStack(alignment: .leading, spacing: WPSpacing.md) {
+                                Text("Your contract starts the night you set an alarm.")
+                                    .wpFont(.title3)
+                                    .foregroundStyle(Color.wpChar900)
+                                Button("Set your first alarm") {
+                                    withAnimation {
+                                        scrollProxy.scrollTo("wake-window", anchor: .top)
+                                    }
+                                }
+                                .buttonStyle(.primaryConfirm)
+                            }
                         }
                     }
 
@@ -201,6 +224,9 @@ struct AlarmSchedulerView: View {
                     }
 
                     // MARK: — Wake window
+                    // .id("wake-window") tags this section so the fresh-install
+                    // empty hero CTA above can call scrollProxy.scrollTo() to
+                    // bring it into view without the user hunting for it.
                     WPSection("Wake window") {
                         WPCard {
                             VStack(spacing: WPSpacing.xs2) {
@@ -242,6 +268,7 @@ struct AlarmSchedulerView: View {
                             }
                         }
                     }
+                    .id("wake-window")
 
                     // MARK: — Save & schedule
                     VStack(spacing: WPSpacing.xs2) {
@@ -432,6 +459,7 @@ struct AlarmSchedulerView: View {
             .onChange(of: scheduler.window.isEnabled) { _, newValue in
                 isEnabled = newValue
             }
+            }   // end ScrollViewReader
         }
     }
 
