@@ -111,7 +111,7 @@
 4. **H1 observation layout robustness** — the 30-60 char observation from Opus 4.7 can be CJK or English. Any MorningBriefing layout must:
    - Use `.lineLimit(nil)` + `.fixedSize(horizontal: false, vertical: true)` on the observation text.
    - Use `.multilineTextAlignment(.center)`.
-   - Use horizontal padding `WPSpacing.xl4` (32pt) for safe iPhone SE readability.
+   - Use horizontal padding `WPSpacing.xl4` (48pt) for safe iPhone SE readability — leaves ~279pt of text width on a 375pt-wide device, comfortably room for CJK and EN observation strings without edge crowding.
    - Smoke-test with both English (~60 chars) and Chinese (~30 chars) sample text.
 
 5. **ImageRenderer share-card drift** — H5 renders a 1080×1920 share card offscreen via `ImageRenderer`. After Phase 6 migration to tokens, re-verify render on iPhone 15/SE/15 Pro Max. The existing `shareCardFailed` @State latch + `.fault` log remains — surfacing render failure via DEBUG reason-tag.

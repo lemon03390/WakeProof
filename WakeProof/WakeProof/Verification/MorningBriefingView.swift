@@ -103,10 +103,14 @@ struct MorningBriefingView: View {
             // from .onAppear); all other cases use wpChar900 — warm charcoal,
             // never pure black per design-system non-negotiable #1.
             if case .success = result {
+                // The withAnimation(.easeOut(duration: 1.2)) call in .onAppear
+                // owns the transition curve; no implicit .animation modifier
+                // here, otherwise a future revealOpacity reset (e.g. on
+                // re-presentation) would dual-drive against withAnimation's
+                // explicit transaction.
                 LinearGradient.wpSunrise
                     .ignoresSafeArea()
                     .opacity(revealOpacity)
-                    .animation(.easeOut(duration: 1.2), value: revealOpacity)
             } else {
                 Color.wpChar900.ignoresSafeArea()
             }
@@ -156,8 +160,13 @@ struct MorningBriefingView: View {
                             .italic()
                             .multilineTextAlignment(.center)
                             .foregroundStyle(Color.wpCream50.opacity(0.65))
+                            // .lineLimit(nil) + .fixedSize together guarantee
+                            // unlimited vertical growth for CJK / EN observation
+                            // strings (30-60 chars per H1 prompt). Either alone
+                            // can silently truncate on iPhone SE.
+                            .lineLimit(nil)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, WPSpacing.xl2)
+                            .padding(.horizontal, WPSpacing.xl4)
                     }
                     .padding(.top, WPSpacing.md)
                     .opacity(observationOpacity)
