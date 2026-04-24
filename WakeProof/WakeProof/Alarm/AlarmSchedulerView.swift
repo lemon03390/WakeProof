@@ -93,6 +93,16 @@ struct AlarmSchedulerView: View {
     /// both surfaces read the same UserDefaults bool without any plumbing.
     @AppStorage("com.wakeproof.shareCardEnabled") private var shareCardEnabled: Bool = false
 
+    /// Wave 5 G1 (§12.4-G1): DEBUG-only toggle that lets demo recordings flip
+    /// the alarm off without the vision-verified challenge. The underlying
+    /// UserDefaults key is consumed by `AlarmScheduler.requestDisable` inside a
+    /// `#if DEBUG` guard — release builds never read the value. The `@AppStorage`
+    /// wrapper on the view side stays compiled in both configurations because
+    /// `#if DEBUG` around a stored-property wrapper declaration is finicky and
+    /// we want a single source of truth per key; the Toggle that renders it
+    /// IS wrapped in `#if DEBUG`, so release UI can't flip the bit in practice.
+    @AppStorage(AlarmScheduler.disableChallengeBypassKey) private var disableChallengeBypassEnabled: Bool = false
+
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "schedulerView")
 
     var body: some View {
@@ -145,7 +155,31 @@ struct AlarmSchedulerView: View {
 
                 Section("Wake window") {
                     DatePicker("Start", selection: $startTime, displayedComponents: .hourAndMinute)
-                    Toggle("Alarm enabled", isOn: $isEnabled)
+                    // Wave 5 G1 (§12.4-G1): the enabled toggle is no longer a
+                    // plain Binding — flipping OFF goes through the scheduler's
+                    // disable-challenge policy so evening-self can't silence
+                    // the contract without the same proof as morning-self. Flipping
+                    // ON is unchanged (the contract STARTS with user consent). The
+                    // proxy's `set` block is responsible for either propagating
+                    // the new value or calling `handleDisableRequest()`; in the
+                    // challenge-required case it leaves `isEnabled` at its
+                    // current value so the toggle visibly stays ON until the
+                    // challenge resolves (see `.onChange(of: scheduler.window.isEnabled)`
+                    // below which then syncs the local state).
+                    Toggle("Alarm enabled", isOn: Binding(
+                        get: { isEnabled },
+                        set: { newValue in
+                            if newValue {
+                                // Enabling is just the local state flip — the
+                                // user still has to tap "Save & schedule" below
+                                // to persist. This matches the prior behavior
+                                // exactly; we only intercept the OFF path.
+                                isEnabled = true
+                            } else {
+                                handleDisableRequest()
+                            }
+                        }
+                    ))
                 }
 
                 // Wave 5 H2: pre-sleep commitment note. Positioned between the wake
@@ -211,6 +245,15 @@ struct AlarmSchedulerView: View {
 
                 #if DEBUG
                 Section("DEBUG") {
+                    // Wave 5 G1 (§12.4-G1): DEBUG-only bypass toggle. Lets demo
+                    // recordings flip the alarm off without the challenge. Ethics
+                    // boundary: this is a self-commitment-device — the bypass
+                    // MUST NOT ship in release builds. The `#if DEBUG` wrap on
+                    // the Section covers this UI, and `AlarmScheduler.isDisable
+                    // ChallengeBypassActive` (which reads the backing UserDefaults
+                    // key) is itself `#if DEBUG` so release builds cannot honor
+                    // the flag even if a prior DEBUG build wrote to the key.
+                    Toggle("Bypass disable challenge (DEV)", isOn: $disableChallengeBypassEnabled)
                     Button("Fire alarm now") { scheduler.fireNow() }
                         .foregroundStyle(.red)
                     Button("Start overnight session now") {
@@ -273,6 +316,21 @@ struct AlarmSchedulerView: View {
             .onAppear(perform: recomputeStreak)
             .onChange(of: wakeAttempts.count) { _, _ in
                 recomputeStreak()
+            }
+            // Wave 5 G1 (§12.4-G1): sync the local `isEnabled` state whenever
+            // the scheduler's source-of-truth flips. Two paths drive this:
+            //   (1) The disable challenge resolves VERIFIED — scheduler's
+            //       `disableChallengeSucceeded()` calls updateWindow(...) which
+            //       flips `scheduler.window.isEnabled` to false, and this
+            //       observer mirrors the change into the local @State so the
+            //       Toggle visually flips.
+            //   (2) The grace / DEBUG bypass path — `handleDisableRequest` flips
+            //       the local state immediately so no observer work is needed,
+            //       BUT `save()` below ALSO writes scheduler.window.isEnabled
+            //       = false, so the observer would double-fire with a no-op
+            //       (both sides already false). Cheap no-op is fine here.
+            .onChange(of: scheduler.window.isEnabled) { _, newValue in
+                isEnabled = newValue
             }
         }
     }
@@ -373,6 +431,33 @@ struct AlarmSchedulerView: View {
         // non-optional binding). If the user had saved a note on a previous
         // launch, the field repopulates so they can see / edit / keep it.
         commitmentNote = w.commitmentNote ?? ""
+    }
+
+    /// Wave 5 G1 (§12.4-G1): Toggle-off handler. Asks the scheduler whether the
+    /// direct-disable path is allowed (24h grace window OR DEBUG bypass);
+    /// otherwise transitions to `.disableChallenge` and lets
+    /// `DisableChallengeView` drive the vision-verified flow.
+    ///
+    /// On `.allowed`, we flip the local `isEnabled` state AND call `save()` so
+    /// the scheduler's window actually persists the disable — the Toggle's
+    /// visual state is just the view's; the commitment is the persisted
+    /// `WakeWindow.isEnabled = false`. On `.challengeRequired`, we leave
+    /// `isEnabled` at `true` so the Toggle reads "still on" until the
+    /// challenge resolves (the `.onChange(of: scheduler.window.isEnabled)`
+    /// observer below will sync the flip when VERIFIED lands).
+    private func handleDisableRequest() {
+        let outcome = scheduler.requestDisable()
+        switch outcome {
+        case .allowed:
+            isEnabled = false
+            save()
+        case .challengeRequired:
+            // Leave `isEnabled` at true visually; the scheduler will drive the
+            // transition, and the observer syncs the state when the challenge
+            // succeeds. If the challenge cancels / fails, nothing flips in the
+            // window state, so the local `isEnabled=true` stays accurate.
+            scheduler.beginDisableChallenge()
+        }
     }
 
     private func save() {

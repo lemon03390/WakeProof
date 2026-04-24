@@ -200,6 +200,248 @@ final class VisionVerifier {
         }
     }
 
+    // MARK: - Wave 5 G1: disable-challenge verify
+
+    /// Wave 5 G1 (§12.4-G1): sibling of `verify(...)` for the disable-challenge
+    /// flow. Reuses the Claude Opus 4.7 vision call verbatim (same prompt, same
+    /// schema) so the evening-self can't cheat by finding a different surface —
+    /// it's literally the same verification as morning-self's ring.
+    ///
+    /// Differences from `verify(...)`:
+    ///   * Guards on `scheduler.phase == .disableChallenge` (not `.capturing`).
+    ///   * Single-shot: a RETRY verdict is coerced to REJECTED. The disable flow
+    ///     is not a wake-up sequence — we're not going to chain anti-spoof
+    ///     re-prompts on top of a user trying to toggle the alarm off.
+    ///   * On VERIFIED, routes to `scheduler.disableChallengeSucceeded()` (which
+    ///     flips `window.isEnabled = false`) — not `finishVerifyingVerified()`
+    ///     (which is the ring-resolution surface).
+    ///   * On REJECTED / RETRY-coerced / network error, routes to
+    ///     `scheduler.disableChallengeFailed(error:)` and the alarm stays
+    ///     enabled.
+    ///
+    /// The WakeAttempt rows written here count toward the audit trail
+    /// identically to ring-time rows — by design. A disable challenge is a
+    /// verified wake moment; dropping it from streak / investment metrics
+    /// would distort the picture.
+    func verifyDisableChallenge(
+        attempt: WakeAttempt,
+        baseline: BaselinePhoto,
+        context: ModelContext
+    ) async {
+        guard let scheduler else {
+            logger.fault("verifyDisableChallenge called but scheduler not wired — challenge will hang")
+            return
+        }
+        guard scheduler.phase == .disableChallenge else {
+            logger.fault("verifyDisableChallenge called with scheduler.phase=\(String(describing: scheduler.phase), privacy: .public) (expected .disableChallenge) — aborting before Claude spend")
+            return
+        }
+        lastError = nil
+
+        guard let stillJPEG = attempt.imageData else {
+            logger.error("Disable-challenge attempt has no imageData — cannot verify")
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .rejected,
+                reasoning: "Internal error: no image captured."
+            )
+            return
+        }
+        let baselineJPEG = baseline.imageData
+
+        // Memory context threads through the same as `verify(...)`. A failed
+        // read flips `requiresReinstall` on the invalidUserUUID path so the
+        // scheduler-view banner surfaces the security warning, matching the
+        // ring-flow's handling. Branches are kept synchronized so future
+        // Claude prompt / memory-integration changes don't diverge between
+        // the two call sites.
+        let memoryContext: String?
+        if let memoryStore {
+            do {
+                let snapshot = try await memoryStore.read()
+                memoryContext = MemoryPromptBuilder.render(snapshot)
+                logger.info("Disable-challenge memory loaded: profile=\(snapshot.profile != nil, privacy: .public) history=\(snapshot.recentHistory.count, privacy: .public)/\(snapshot.totalHistoryCount, privacy: .public)")
+            } catch MemoryStoreError.invalidUserUUID {
+                logger.fault("MemoryStore rejected UUID (invalidUserUUID) during disable challenge — reinstall recommended.")
+                requiresReinstall = true
+                memoryContext = nil
+            } catch {
+                logger.fault("MemoryStore read failed during disable challenge, verifying without memory: \(error.localizedDescription, privacy: .public)")
+                memoryContext = nil
+            }
+        } else {
+            memoryContext = nil
+        }
+
+        do {
+            let result = try await client.verify(
+                baselineJPEG: baselineJPEG,
+                stillJPEG: stillJPEG,
+                baselineLocation: baseline.locationLabel,
+                // No anti-spoof instruction on disable — single-shot UX.
+                antiSpoofInstruction: nil,
+                memoryContext: memoryContext
+            )
+            await handleDisableChallengeResult(result, attempt: attempt, context: context)
+        } catch let apiError as ClaudeAPIError {
+            // Uses the neutral "try again" suffix — the disable flow is
+            // single-shot and doesn't have a "Prove you're awake" button
+            // the user would tap to retry; they just flip the toggle again.
+            let userMessage = Self.userMessage(for: apiError, retrySuffix: "try again.")
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .rejected,
+                reasoning: userMessage
+            )
+        } catch {
+            logger.error("Unexpected disable-challenge error: \(error.localizedDescription, privacy: .public)")
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .rejected,
+                reasoning: "Verification failed. Try again."
+            )
+        }
+    }
+
+    /// Handle the Claude result for a disable challenge. RETRY is coerced to
+    /// REJECTED (single-shot flow). The memory-write hook is intentionally
+    /// mirrored from `handleResult` so history.jsonl captures disable-challenge
+    /// verdicts too — the audit trail contract extends to this surface.
+    private func handleDisableChallengeResult(
+        _ result: VerificationResult,
+        attempt: WakeAttempt,
+        context: ModelContext
+    ) async {
+        // Coerce raw Claude verdict to final UX verdict. RETRY → REJECTED in the
+        // disable flow (single-shot) — we do NOT count it as a retry consumed.
+        let finalVerdict: WakeAttempt.Verdict
+        switch result.verdict {
+        case .verified:
+            finalVerdict = .verified
+        case .rejected, .retry:
+            finalVerdict = .rejected
+        }
+
+        // Fire-and-forget memory write, mirroring `handleResult` — a disable
+        // challenge that landed VERIFIED is a calibration-relevant signal
+        // (user proved themselves at an off-ring moment), and REJECTED still
+        // contributes a history row. The profile-rewrite gate (VERIFIED-only)
+        // matches the ring-flow invariant so a failed disable challenge
+        // can't pollute durable state.
+        if let memoryStore, let memoryUpdate = result.memoryUpdate {
+            // Disable challenges don't count anti-spoof retries — the flow is
+            // single-shot; retryCount on the WakeAttempt row stays at its
+            // current value (normally 0 at challenge time).
+            let entry = MemoryEntry(
+                timestamp: .now,
+                verdict: finalVerdict.rawValue,
+                confidence: result.confidence,
+                retryCount: attempt.retryCount,
+                note: memoryUpdate.historyNote
+            )
+            let profileDelta: String? = (finalVerdict == .verified) ? memoryUpdate.profileDelta : nil
+            let queue = memoryWriteQueue
+            Task { [logger] in
+                do {
+                    try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
+                } catch {
+                    logger.error("MemoryStore disable-challenge write failed — enqueueing for retry: \(error.localizedDescription, privacy: .public)")
+                    let pending = PendingMemoryWrite(entry: entry, profileDelta: profileDelta)
+                    queue.enqueueSync(pending)
+                }
+            }
+        }
+
+        // Observation is persisted on VERIFIED here too — the disable-challenge
+        // briefing surface (if one is ever added) can surface it just like
+        // MorningBriefingView does. REJECTED rows drop it so verdict narrative
+        // stays consistent with H1's handling.
+        if finalVerdict == .verified {
+            attempt.observation = result.observation
+        }
+
+        switch finalVerdict {
+        case .verified:
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .verified,
+                reasoning: result.reasoning
+            )
+        case .rejected:
+            // Single-shot — tag the raw-RETRY-coerced case in the reasoning so
+            // the user's banner captures the nuance if a future UI decides to
+            // show it.
+            if result.verdict == .retry {
+                logger.info("Disable challenge RETRY coerced to REJECTED — single-shot flow")
+                await finishDisableChallenge(
+                    attempt: attempt,
+                    context: context,
+                    verdict: .rejected,
+                    reasoning: "Verification unclear: \(result.reasoning)"
+                )
+            } else {
+                await finishDisableChallenge(
+                    attempt: attempt,
+                    context: context,
+                    verdict: .rejected,
+                    reasoning: result.reasoning
+                )
+            }
+        case .retry, .captured, .timeout, .unresolved:
+            // Defensive fallback — finalVerdict only ever resolves to
+            // .verified / .rejected above, but a future shape change must
+            // fail closed (alarm stays enabled).
+            logger.fault("handleDisableChallengeResult reached unreachable finalVerdict case: \(finalVerdict.rawValue, privacy: .public)")
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .rejected,
+                reasoning: "Verification hit an unexpected state."
+            )
+        }
+    }
+
+    /// Persist the WakeAttempt row for a disable challenge and drive the
+    /// scheduler transition. Mirrors `finish(...)`'s shape but routes to the
+    /// G1 transitions (`disableChallengeSucceeded` / `disableChallengeFailed`)
+    /// instead of the ring-flow ones. Persistence failure keeps the alarm
+    /// enabled (returns caller to .idle via `disableChallengeFailed`) — the
+    /// self-commitment contract means a dropped audit row must not silently
+    /// let the user slip past the challenge.
+    private func finishDisableChallenge(
+        attempt: WakeAttempt,
+        context: ModelContext,
+        verdict: WakeAttempt.Verdict,
+        reasoning: String
+    ) async {
+        do {
+            try updatePersistedAttempt(attempt, context: context, verdict: verdict, reasoning: reasoning)
+        } catch {
+            logger.fault("Disable-challenge persistence failed for verdict \(verdict.rawValue, privacy: .public) — aborting challenge (alarm stays enabled) to protect audit trail")
+            scheduler?.disableChallengeFailed(
+                error: "Couldn't save verification — try again."
+            )
+            return
+        }
+        switch verdict {
+        case .verified:
+            scheduler?.disableChallengeSucceeded()
+        case .rejected:
+            scheduler?.disableChallengeFailed(error: reasoning)
+        case .retry, .captured, .timeout, .unresolved:
+            // Unreachable — handleDisableChallengeResult coerces to .verified
+            // or .rejected before reaching here. Defensive log + fail-closed.
+            logger.fault("finishDisableChallenge invoked with unexpected verdict \(verdict.rawValue, privacy: .public) — failing challenge")
+            scheduler?.disableChallengeFailed(
+                error: "Verification hit an unexpected state."
+            )
+        }
+    }
+
     // MARK: - Private
 
     private func handleResult(_ result: VerificationResult, attempt: WakeAttempt, context: ModelContext) async {
@@ -345,12 +587,40 @@ final class VisionVerifier {
         // same images so a transient network blip just delays the same outcome. REJECTED
         // keeps the alarm ringing and lets the user retry by tapping "Prove you're awake"
         // again — which gives us a *new* capture (fresher, possibly on a different route).
-        let userMessage: String
+        //
+        // Wave 5 G1 (§12.4-G1): `userMessage(for:retrySuffix:)` is the shared
+        // error-to-copy mapping consumed by both this ring-path handler AND
+        // the disable-challenge path in `verifyDisableChallenge`. Copy
+        // divergence (ring says "tap \"Prove you're awake\" to retry", disable
+        // says "try again.") is preserved via the retrySuffix argument — the
+        // SHAPE of the error mapping is identical so future ClaudeAPIError
+        // cases only need to land in one switch.
+        let userMessage = Self.userMessage(
+            for: error,
+            retrySuffix: "tap \"Prove you're awake\" to retry."
+        )
+        await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: userMessage)
+    }
+
+    /// Wave 5 G1: shared ClaudeAPIError → user-facing copy. The ring-path
+    /// appends "tap \"Prove you're awake\" to retry." (there's a button for
+    /// that); the disable-challenge path appends "try again." (single-shot,
+    /// user just flips the toggle again). One switch, one place to update
+    /// when a new ClaudeAPIError case is added — without this extraction the
+    /// two call sites would drift silently.
+    ///
+    /// `nonisolated static` so it can be referenced without touching the
+    /// @Observable actor surface. The switch is pure-functional and has no
+    /// side effects.
+    nonisolated private static func userMessage(
+        for error: ClaudeAPIError,
+        retrySuffix: String
+    ) -> String {
         switch error {
         case .missingProxyToken:
-            userMessage = "Proxy token missing. Check Secrets.swift in the project."
+            return "Proxy token missing. Check Secrets.swift in the project."
         case .timeout, .transportFailed:
-            userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
+            return "Couldn't reach Claude — \(retrySuffix)"
         case .httpError(let status, _):
             // L10 (Wave 2.7): unify 502 messaging. Our Vercel proxy returns a 502 with
             // `{error:{type:"upstream_fetch_failed"}}` when it can't reach Anthropic;
@@ -361,19 +631,18 @@ final class VisionVerifier {
             // diverge based on WHICH layer of the chain was unreachable. Keep the
             // httpError case distinct in logs (still `status=502` in the audit trail).
             if status == 502 {
-                userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
+                return "Couldn't reach Claude — \(retrySuffix)"
             } else {
-                userMessage = "Claude returned HTTP \(status) — tap \"Prove you're awake\" to retry."
+                return "Claude returned HTTP \(status) — \(retrySuffix)"
             }
         case .decodingFailed(let underlying):
             // Persist the underlying parse/shape error into reasoning so the audit trail
             // captures what went wrong at the protocol boundary (missing content block,
             // malformed JSON, unexpected error body) rather than just a generic message.
-            userMessage = "Couldn't read Claude's response (\(underlying.localizedDescription)) — tap \"Prove you're awake\" to retry."
+            return "Couldn't read Claude's response (\(underlying.localizedDescription)) — \(retrySuffix)"
         case .emptyResponse, .invalidURL:
-            userMessage = "Couldn't read Claude's response — tap \"Prove you're awake\" to retry."
+            return "Couldn't read Claude's response — \(retrySuffix)"
         }
-        await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: userMessage)
     }
 
     private func finish(attempt: WakeAttempt, context: ModelContext, verdict: WakeAttempt.Verdict, reasoning: String) async {

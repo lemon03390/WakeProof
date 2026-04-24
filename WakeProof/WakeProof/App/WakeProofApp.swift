@@ -128,6 +128,16 @@ struct WakeProofApp: App {
         didBootstrap = true
         audioKeepalive.start()
         wireSchedulerCallbacks()
+
+        // Wave 5 G1 (§12.4-G1): defensive backfill for the 24h grace window.
+        // Users who onboarded BEFORE the G1 code shipped (baseline already
+        // persisted, no `firstInstallAtKey` on disk) get a fresh 24h grace
+        // clock on first G1-aware launch — see the `recordFirstInstallIfNeeded`
+        // docstring for why this is deliberate rather than "grandfathered
+        // in as post-grace". New users who complete onboarding after G1
+        // ships have the timestamp written earlier (from
+        // OnboardingFlowView.persistBaseline) so this call is idempotent.
+        AlarmScheduler.recordFirstInstallIfNeeded()
         // Late-bind the scheduler into the verifier so VisionVerifier.verify(...) can drive
         // phase transitions on VERIFIED / REJECTED / RETRY without the verifier holding a
         // non-optional scheduler reference (which would couple it at test-time).
@@ -601,6 +611,13 @@ struct RootView: View {
                 instruction: instruction,
                 onReady: { scheduler.beginCapturing() }
             )
+        case .disableChallenge:
+            // Wave 5 G1 (§12.4-G1): disable-alarm mirror surface. The view owns
+            // its own baseline lookup + verifier hand-off so the scheduler's
+            // switch doesn't need to branch per phase — DisableChallengeView
+            // internally routes to VisionVerifier.verifyDisableChallenge on
+            // capture success, which drives the scheduler back to .idle.
+            DisableChallengeView()
         }
     }
 

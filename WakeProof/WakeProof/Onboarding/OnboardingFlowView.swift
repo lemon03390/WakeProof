@@ -109,6 +109,14 @@ struct OnboardingFlowView: View {
         do {
             try modelContext.save()
             saveError = nil
+            // Wave 5 G1 (§12.4-G1): the first successful BaselinePhoto persist
+            // is the moment the user has committed to WakeProof — start the
+            // 24h grace clock here. Idempotent: repeat calls never overwrite
+            // the first-install timestamp, so a user re-running onboarding
+            // (baseline re-capture path) keeps the original grace window.
+            // `WakeProofApp.bootstrapIfNeeded` also calls this as a defensive
+            // backfill for pre-G1 users whose baseline pre-dates the timestamp.
+            AlarmScheduler.recordFirstInstallIfNeeded()
             advance()
         } catch {
             // Without surfacing this, the user advances thinking the baseline is committed,

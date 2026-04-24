@@ -353,4 +353,200 @@ final class AlarmSchedulerTests: XCTestCase {
         XCTAssertTrue(saved, "valid window save must return true")
         XCTAssertEqual(scheduler.window, w)
     }
+
+    // MARK: - Wave 5 G1: disable-challenge grace period
+
+    /// G1 (§12.4-G1): within the 24h grace window, `requestDisable` returns
+    /// `.allowed` so AlarmSchedulerView can flip `isEnabled` directly without
+    /// the vision-verified challenge. New users recovering from a wrong-baseline
+    /// setup need this escape hatch per §7.1 "Nuances".
+    func testRequestDisableReturnsAllowedInGracePeriod() {
+        let installedAt = Date()
+        suiteDefaults.set(installedAt, forKey: AlarmScheduler.firstInstallAtKey)
+        // 1h after install → comfortably inside the 24h grace.
+        let now = installedAt.addingTimeInterval(60 * 60)
+        let outcome = scheduler.requestDisable(now: now)
+        XCTAssertEqual(outcome, .allowed,
+                       "within 24h grace window, disable must be allowed directly")
+    }
+
+    /// G1: past the 24h grace, `requestDisable` returns `.challengeRequired`
+    /// so the Toggle proxy binding routes into the vision-verified flow.
+    /// This is the contract-binding state for the vast majority of the app's
+    /// lifetime.
+    func testRequestDisableReturnsChallengeRequiredAfterGrace() {
+        let installedAt = Date()
+        suiteDefaults.set(installedAt, forKey: AlarmScheduler.firstInstallAtKey)
+        // 25h after install → past the 24h window.
+        let now = installedAt.addingTimeInterval(25 * 60 * 60)
+        let outcome = scheduler.requestDisable(now: now)
+        XCTAssertEqual(outcome, .challengeRequired,
+                       "past 24h, disable must require the vision-verified challenge")
+    }
+
+    /// G1: absent `firstInstallAt` timestamp is treated as "grace active"
+    /// so a pre-G1 user whose backfill hasn't landed yet (theoretically a
+    /// millisecond window during bootstrap) doesn't hit a locked-out state
+    /// on their first G1-aware launch. Once `recordFirstInstallIfNeeded`
+    /// writes the timestamp, the above tests' logic takes over.
+    func testRequestDisableAllowedWhenNoFirstInstallTimestamp() {
+        // Don't set `firstInstallAtKey` — simulates the defensive-backfill edge.
+        XCTAssertNil(suiteDefaults.object(forKey: AlarmScheduler.firstInstallAtKey),
+                     "precondition: no timestamp set")
+        let outcome = scheduler.requestDisable(now: Date())
+        XCTAssertEqual(outcome, .allowed,
+                       "absent timestamp must default to grace-active so first-launch G1-aware code doesn't lock the user out")
+    }
+
+    /// G1: `recordFirstInstallIfNeeded` is idempotent — a re-run (e.g.
+    /// bootstrap's defensive backfill firing after OnboardingFlowView
+    /// already recorded the timestamp) must NOT overwrite the first value.
+    /// Preserving the original timestamp is what makes "24h from first
+    /// commit" meaningful across app restarts.
+    func testRecordFirstInstallIfNeededIsIdempotent() {
+        let earlier = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        AlarmScheduler.recordFirstInstallIfNeeded(now: earlier, defaults: suiteDefaults)
+        let stored1 = suiteDefaults.object(forKey: AlarmScheduler.firstInstallAtKey) as? Date
+        XCTAssertEqual(stored1, earlier, "first call must write")
+
+        // Second call with a later timestamp must not overwrite.
+        let later = earlier.addingTimeInterval(3600)
+        AlarmScheduler.recordFirstInstallIfNeeded(now: later, defaults: suiteDefaults)
+        let stored2 = suiteDefaults.object(forKey: AlarmScheduler.firstInstallAtKey) as? Date
+        XCTAssertEqual(stored2, earlier,
+                       "second call must NOT overwrite — grace window is measured from FIRST install")
+    }
+
+    // MARK: - Wave 5 G1: disable-challenge phase transitions
+
+    /// G1: `beginDisableChallenge` valid only from .idle. A call while the
+    /// alarm is actively ringing must no-op — the Toggle is inside the
+    /// scheduler view which isn't visible during .ringing, so reaching
+    /// this branch is a programmer error but it must fail closed.
+    func testBeginDisableChallengeOnlyFromIdle() {
+        // From .idle → transitions
+        scheduler.beginDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .disableChallenge)
+
+        // Go back to .idle via cancel
+        scheduler.cancelDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .idle)
+
+        // From .ringing → no-op
+        scheduler.fireNow()
+        XCTAssertEqual(scheduler.phase, .ringing)
+        scheduler.beginDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .ringing,
+                       "beginDisableChallenge must be ignored when the alarm is ringing")
+    }
+
+    /// G1: a VERIFIED verdict on the disable challenge flips
+    /// `window.isEnabled` to false AND returns the scheduler to .idle.
+    /// This is the happy-path commit surface — the contract is what gets
+    /// silenced, not just the UI state.
+    func testDisableChallengeSucceededFlipsIsEnabledAndReturnsToIdle() {
+        // Seed: enabled window, enter challenge phase.
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        XCTAssertTrue(scheduler.window.isEnabled, "precondition: window enabled")
+        scheduler.beginDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .disableChallenge)
+
+        // Act: verify verdict lands.
+        scheduler.disableChallengeSucceeded()
+
+        // Assert: window disabled, phase idle, nextFireAt cleared (because
+        // updateWindow triggers scheduleNextFireIfEnabled which sees
+        // isEnabled=false and clears the scheduled fire).
+        XCTAssertFalse(scheduler.window.isEnabled,
+                       "VERIFIED disable challenge must flip window.isEnabled=false")
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "post-success must return to .idle")
+        XCTAssertNil(scheduler.nextFireAt,
+                     "disabled window must clear nextFireAt via the internal rescheduleEvents")
+    }
+
+    /// G1: a REJECTED verdict keeps the window enabled and returns the
+    /// scheduler to .idle with `lastCaptureError` set to the reasoning so a
+    /// future banner surface can render it. The alarm contract holds.
+    func testDisableChallengeFailedReturnsToIdleKeepsWindowEnabled() {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        scheduler.beginDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .disableChallenge)
+
+        scheduler.disableChallengeFailed(error: "Different person detected.")
+
+        XCTAssertTrue(scheduler.window.isEnabled,
+                      "REJECTED disable challenge must keep window enabled")
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "failed challenge returns to .idle with alarm still armed")
+        XCTAssertEqual(scheduler.lastCaptureError, "Different person detected.",
+                       "failure error must surface via lastCaptureError")
+    }
+
+    /// G1: user cancels the capture flow before resolving. Distinguished
+    /// from a REJECTED verdict in that no error message surfaces — this
+    /// is an intentional back-out, not a failed proof.
+    func testCancelDisableChallengeReturnsToIdle() {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        scheduler.beginDisableChallenge()
+
+        scheduler.cancelDisableChallenge()
+
+        XCTAssertEqual(scheduler.phase, .idle)
+        XCTAssertTrue(scheduler.window.isEnabled,
+                      "cancel must keep the window enabled — no contract change")
+        XCTAssertNil(scheduler.lastCaptureError,
+                     "cancel is intentional, not a failure — no error message should surface")
+    }
+
+    #if DEBUG
+    /// G1: the DEBUG bypass flag short-circuits `requestDisable` to `.allowed`
+    /// regardless of grace-window state. Demo recording only. A UIT launch
+    /// argument does the same thing (`-disableBypassForUIT`). Both live in
+    /// `#if DEBUG` so release builds can never honor them.
+    func testDebugBypassToggleAllowsDirectDisable() {
+        // Seed past-grace so only the bypass can allow.
+        let installedAt = Date()
+        suiteDefaults.set(installedAt, forKey: AlarmScheduler.firstInstallAtKey)
+        let now = installedAt.addingTimeInterval(25 * 60 * 60) // post-grace
+
+        // Without bypass: challenge required.
+        XCTAssertFalse(suiteDefaults.bool(forKey: AlarmScheduler.disableChallengeBypassKey),
+                       "precondition: bypass key off")
+        XCTAssertEqual(scheduler.requestDisable(now: now), .challengeRequired)
+
+        // With bypass on: allowed.
+        suiteDefaults.set(true, forKey: AlarmScheduler.disableChallengeBypassKey)
+        XCTAssertEqual(scheduler.requestDisable(now: now), .allowed,
+                       "DEBUG bypass flag must allow direct disable regardless of grace window")
+
+        // Clear for subsequent tests — the tearDown wipes the suite, but
+        // explicit reset makes the test readable.
+        suiteDefaults.set(false, forKey: AlarmScheduler.disableChallengeBypassKey)
+    }
+
+    /// G1: the UIT launch-arg pathway. Implementation inspects
+    /// `ProcessInfo.processInfo.arguments` at call time; the static helper
+    /// accepts an injected `arguments` array so tests can drive it without
+    /// monkey-patching the process-wide arg list.
+    func testUITLaunchArgumentActivatesBypass() {
+        XCTAssertTrue(
+            AlarmScheduler.isDisableChallengeBypassActive(
+                defaults: suiteDefaults,
+                arguments: ["-disableBypassForUIT"]
+            ),
+            "-disableBypassForUIT launch arg must flip bypass on in DEBUG builds"
+        )
+        XCTAssertFalse(
+            AlarmScheduler.isDisableChallengeBypassActive(
+                defaults: suiteDefaults,
+                arguments: []
+            ),
+            "no launch arg and no UserDefaults key → bypass off"
+        )
+    }
+    #endif
 }

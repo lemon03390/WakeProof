@@ -749,6 +749,152 @@ final class VisionVerifierTests: XCTestCase {
         return dir
     }
 
+    // MARK: - Wave 5 G1: disable-challenge verification
+
+    /// Helper that drops the scheduler into `.disableChallenge` via the
+    /// grace-free direct transition. Real flow goes through
+    /// `requestDisable` + `beginDisableChallenge`; for state-machine tests
+    /// we only need the phase so we skip the policy layer. Exercised
+    /// directly by the AlarmScheduler suite.
+    private func enterDisableChallengeState() {
+        scheduler.beginDisableChallenge()
+    }
+
+    /// G1: VERIFIED verdict on the disable challenge must drive the
+    /// scheduler back to `.idle` with `window.isEnabled = false`. The
+    /// WakeAttempt row lands with verdict=VERIFIED — disable challenges
+    /// count toward the audit trail exactly like ring verifies (by
+    /// design).
+    func testVerifyDisableChallengeOnVerifiedCallsSucceeded() async throws {
+        // Precondition: window enabled so disable actually has something to flip.
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        XCTAssertTrue(scheduler.window.isEnabled)
+
+        let client = FakeClient(result: .success(makeResult(verdict: .verified, reasoning: "Looks good.")))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterDisableChallengeState()
+        XCTAssertEqual(scheduler.phase, .disableChallenge)
+        let attempt = makeAttempt()
+
+        await verifier.verifyDisableChallenge(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "VERIFIED disable challenge must return to .idle")
+        XCTAssertFalse(scheduler.window.isEnabled,
+                       "VERIFIED disable challenge must flip window.isEnabled=false")
+        XCTAssertEqual(attempt.verdictEnum, .verified,
+                       "WakeAttempt row must record VERIFIED — audit trail invariant")
+    }
+
+    /// G1: REJECTED verdict keeps the alarm enabled and returns scheduler
+    /// to `.idle` with `lastCaptureError` set. The contract holds.
+    func testVerifyDisableChallengeOnRejectedCallsFailed() async {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+
+        let client = FakeClient(result: .success(makeResult(
+            verdict: .rejected,
+            confidence: 0.3,
+            reasoning: "Different location.",
+            sameLocation: false
+        )))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterDisableChallengeState()
+        let attempt = makeAttempt()
+
+        await verifier.verifyDisableChallenge(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "REJECTED disable challenge still returns to .idle")
+        XCTAssertTrue(scheduler.window.isEnabled,
+                      "REJECTED disable challenge must NOT flip window.isEnabled")
+        XCTAssertEqual(attempt.verdictEnum, .rejected,
+                       "WakeAttempt must record REJECTED")
+        XCTAssertTrue(scheduler.lastCaptureError?.contains("Different location") == true,
+                      "reasoning must surface via lastCaptureError")
+    }
+
+    /// G1: disable-challenge flow is single-shot. A RETRY verdict from
+    /// Claude must be coerced to REJECTED — no anti-spoof re-capture
+    /// chain on the disable path. The WakeAttempt row records REJECTED
+    /// (the UX-final verdict), and the scheduler returns to .idle with
+    /// alarm still armed.
+    func testVerifyDisableChallengeOnRetryCoercedToRejected() async {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+
+        let client = FakeClient(result: .success(makeResult(
+            verdict: .retry,
+            confidence: 0.6,
+            reasoning: "Blurry — try again.",
+            personUpright: false,
+            appearsAlert: false
+        )))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterDisableChallengeState()
+        let attempt = makeAttempt()
+
+        await verifier.verifyDisableChallenge(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "RETRY on disable path must coerce to .idle (single-shot)")
+        XCTAssertTrue(scheduler.window.isEnabled,
+                      "RETRY-coerced-REJECTED must keep the window enabled")
+        XCTAssertEqual(attempt.verdictEnum, .rejected,
+                       "WakeAttempt must record the coerced REJECTED verdict (not the raw RETRY)")
+        XCTAssertTrue(scheduler.lastCaptureError?.contains("unclear") == true
+                      || scheduler.lastCaptureError?.contains("Blurry") == true,
+                      "reasoning must surface the coerced-RETRY context — got \(scheduler.lastCaptureError ?? "nil")")
+    }
+
+    /// G1: the verifier must bail BEFORE calling Claude if the scheduler
+    /// isn't in `.disableChallenge`. Prevents burned credits on a
+    /// misrouted caller (e.g. a refactor that accidentally invokes the
+    /// disable verify from the ring path).
+    func testVerifyDisableChallengeBailsWhenSchedulerNotInDisableChallenge() async {
+        let recorder = RecordingClient(verdict: .verified)
+        let verifier = VisionVerifier(client: recorder)
+        verifier.scheduler = scheduler
+        // Scheduler is .idle — not .disableChallenge.
+        XCTAssertEqual(scheduler.phase, .idle)
+        let attempt = makeAttempt()
+
+        await verifier.verifyDisableChallenge(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(recorder.callCount, 0,
+                       "verifyDisableChallenge must not reach Claude when scheduler.phase != .disableChallenge")
+        XCTAssertEqual(attempt.verdictEnum, .captured,
+                       "attempt verdict must be unchanged when verify bails early")
+    }
+
+    /// G1: network-error paths must not flip the window. Treat as REJECTED
+    /// so evening-self can't silence the alarm by flipping airplane mode.
+    func testVerifyDisableChallengeOnNetworkErrorKeepsAlarmEnabled() async {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+
+        let client = FakeClient(result: .failure(ClaudeAPIError.timeout))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterDisableChallengeState()
+        let attempt = makeAttempt()
+
+        await verifier.verifyDisableChallenge(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "network error still transitions back to .idle (user can retry manually)")
+        XCTAssertTrue(scheduler.window.isEnabled,
+                      "network error must NOT flip window.isEnabled — airplane-mode bypass attempt is defeated")
+        XCTAssertEqual(attempt.verdictEnum, .rejected,
+                       "network-error disable attempts record as REJECTED in the audit trail")
+        XCTAssertTrue(scheduler.lastCaptureError?.contains("Couldn't reach Claude") == true,
+                      "network-error message must surface via lastCaptureError")
+    }
+
     // MARK: - Fake client
 
     private final class FakeClient: ClaudeVisionClient {

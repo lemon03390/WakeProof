@@ -20,12 +20,28 @@ import os
 /// Four-phase state machine for the alarm. A single ZStack overlay at the root swaps between
 /// the phase-specific views. .verifying and .antiSpoofPrompt were added in Day 3; the comment
 /// about nested fullScreenCover regressions still applies and the ZStack pattern prevents them.
+///
+/// Wave 5 G1 (§12.4-G1): `.disableChallenge` is the mirror surface of the morning ring —
+/// the user is asking to flip `window.isEnabled = false`, and the same vision-verification
+/// flow as a wake gates the transition. Zero associated values so synthesized Equatable
+/// conformance keeps working.
 enum AlarmPhase: Equatable {
     case idle
     case ringing
     case capturing
     case verifying
     case antiSpoofPrompt(instruction: String)
+    case disableChallenge
+}
+
+/// Wave 5 G1: outcome of `AlarmScheduler.requestDisable` so the caller (the Toggle
+/// proxy Binding in `AlarmSchedulerView`) can decide whether to flip `isEnabled`
+/// directly or transition into `.disableChallenge`. Intentionally a two-case enum
+/// rather than a Bool so a future third path (e.g. "refused — emergency lockout
+/// active") can be added without breaking call-site switches.
+enum DisableRequestOutcome: Equatable {
+    case allowed
+    case challengeRequired
 }
 
 @Observable
@@ -101,6 +117,78 @@ final class AlarmScheduler {
         "Your commitment expires soon.",
     ]
     private static let lastFireAtDefaultsKey = "com.wakeproof.alarm.lastFireAt"
+
+    // MARK: - Wave 5 G1: disable-challenge grace period
+
+    /// Wave 5 G1 (§12.4-G1): UserDefaults key that records the moment the user
+    /// first committed to WakeProof (successful BaselinePhoto persist, or a
+    /// defensive backfill on the first G1-aware launch if a baseline already
+    /// existed). The 24h grace window is measured from this timestamp so
+    /// onboarding-era users can recover from a wrong-baseline setup without
+    /// being gated by the vision-verification challenge.
+    static let firstInstallAtKey = "com.wakeproof.firstInstallAt"
+
+    /// Wave 5 G1: user-defaults key driving the DEBUG-only "bypass disable
+    /// challenge" toggle. Release builds MUST NOT consult this key (see
+    /// `isDisableChallengeBypassActive` for the `#if DEBUG` wrap). Mirrors
+    /// the `@AppStorage` binding in `AlarmSchedulerView` so UI + scheduler
+    /// read the same source of truth without extra plumbing.
+    static let disableChallengeBypassKey = "com.wakeproof.disableChallengeBypass"
+
+    /// Wave 5 G1: 24h grace window after first install. Length is pinned by
+    /// spec (§7.1 "Nuances" / §12.4-G1); tests reference the same constant so
+    /// a deliberate doc-plus-code change is required to shift it.
+    static let graceWindow: TimeInterval = 24 * 60 * 60
+
+    /// Wave 5 G1: is `now` inside the 24h grace window relative to the
+    /// recorded `firstInstallAt` timestamp? Absent timestamp is treated as
+    /// "grace active" so a user who launched the app once before the G1
+    /// release ships (no `firstInstallAtKey` on disk) still gets a
+    /// one-time safety net — the `recordFirstInstallIfNeeded` backfill
+    /// inside `bootstrapIfNeeded` lands the timestamp moments later, so
+    /// this absent-case branch is only taken once per install.
+    static func isInGracePeriod(now: Date = .now, defaults: UserDefaults = .standard) -> Bool {
+        guard let firstInstall = defaults.object(forKey: firstInstallAtKey) as? Date else {
+            return true
+        }
+        return now.timeIntervalSince(firstInstall) < graceWindow
+    }
+
+    /// Wave 5 G1: write `now` as the first-install timestamp if one isn't
+    /// already on disk. Idempotent — repeat calls never overwrite. Called
+    /// from two sites: (a) `OnboardingFlowView.persistBaseline` on the first
+    /// successful BaselinePhoto persist; (b) `WakeProofApp.bootstrapIfNeeded`
+    /// as a defensive backfill so users who onboarded BEFORE the G1 code
+    /// shipped (baseline exists, no timestamp) get a fresh 24h grace clock
+    /// the first time G1-aware code runs. The defensive backfill window
+    /// effectively resets a pre-G1 user to "fresh install" for the purpose
+    /// of the grace window — this is deliberate per §7.1 (existing users
+    /// should not be locked out of disable at first exposure to G1).
+    static func recordFirstInstallIfNeeded(now: Date = .now, defaults: UserDefaults = .standard) {
+        guard defaults.object(forKey: firstInstallAtKey) == nil else { return }
+        defaults.set(now, forKey: firstInstallAtKey)
+    }
+
+    #if DEBUG
+    /// DEBUG-only: is the user's bypass toggle active (UserDefaults key)
+    /// OR the UI-test launch argument present? Release builds never
+    /// compile this method so `requestDisable` can consult it without a
+    /// runtime branch in production. The UI-test hook stays inside `#if
+    /// DEBUG` as well — we never want a release build to honor a launch
+    /// argument that silently defeats the contract.
+    static func isDisableChallengeBypassActive(
+        defaults: UserDefaults = .standard,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        if defaults.bool(forKey: disableChallengeBypassKey) {
+            return true
+        }
+        if arguments.contains("-disableBypassForUIT") {
+            return true
+        }
+        return false
+    }
+    #endif
     private var fireTask: Task<Void, Never>?
     private var backupScheduleTask: Task<Void, Never>?
     /// Monotonic counter incremented on every `scheduleNextFireIfEnabled` /
@@ -340,6 +428,102 @@ final class AlarmScheduler {
         }
         stopRinging()
         logger.info("Phase → idle after verified")
+    }
+
+    // MARK: - Wave 5 G1: disable-challenge transitions
+
+    /// Wave 5 G1 (§12.4-G1): caller-owned entry point for "user wants to disable
+    /// the alarm". Routes through the grace-period check and the DEBUG bypass
+    /// (release builds ignore the bypass key entirely). Returns `.allowed` if the
+    /// caller may flip `window.isEnabled = false` directly, `.challengeRequired`
+    /// if the caller must hand off to the vision-verified disable-challenge flow.
+    ///
+    /// Deliberately does NOT mutate scheduler state — the caller decides whether
+    /// to invoke `beginDisableChallenge()` or flip isEnabled locally. Keeps the
+    /// policy (grace + bypass) separate from the transition, so tests can exercise
+    /// the policy without engaging the state machine.
+    func requestDisable(now: Date = .now) -> DisableRequestOutcome {
+        #if DEBUG
+        if Self.isDisableChallengeBypassActive(defaults: defaults) {
+            logger.info("requestDisable: DEBUG bypass active — allowing direct disable")
+            return .allowed
+        }
+        #endif
+        if Self.isInGracePeriod(now: now, defaults: defaults) {
+            logger.info("requestDisable: inside 24h grace — allowing direct disable")
+            return .allowed
+        }
+        logger.info("requestDisable: post-grace — challenge required")
+        return .challengeRequired
+    }
+
+    /// Wave 5 G1: transition .idle → .disableChallenge. Valid only from .idle —
+    /// a user tapping the Toggle while the alarm is actively ringing is a
+    /// programmer error and silently no-ops (the Toggle is hidden inside the
+    /// scheduler view which isn't visible during .ringing).
+    func beginDisableChallenge() {
+        guard phase == .idle else {
+            logger.warning("beginDisableChallenge ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = nil
+        phase = .disableChallenge
+        logger.info("Phase → disableChallenge")
+    }
+
+    /// Wave 5 G1: VERIFIED verdict on the disable challenge — flip
+    /// `window.isEnabled = false`, persist, and re-schedule (which in turn
+    /// cancels any pending fire because the window is now disabled). Mirrors
+    /// `finishVerifyingVerified()`'s shape so the two success surfaces stay
+    /// symmetric. A persist failure inside `updateWindow` still transitions
+    /// to .idle — the in-memory window reflects the user's intent for this
+    /// session even if the UserDefaults write was rejected; the retry path
+    /// lives in AlarmSchedulerView's save-failure banner if/when the user
+    /// re-opens the form.
+    func disableChallengeSucceeded() {
+        guard phase == .disableChallenge else {
+            logger.warning("disableChallengeSucceeded ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        var updated = window
+        updated.isEnabled = false
+        // updateWindow saves + reschedules (which sees isEnabled=false → no
+        // next fire). Return value deliberately dropped here — the boolean
+        // drives the AlarmSchedulerView save banner, but there's no equivalent
+        // UI surface in the disable-challenge flow. A save failure is logged
+        // inside `WakeWindow.save()`.
+        _ = updateWindow(updated)
+        phase = .idle
+        logger.info("Disable challenge succeeded — window.isEnabled=false, phase=.idle")
+    }
+
+    /// Wave 5 G1: REJECTED / RETRY verdict on the disable challenge. Surface
+    /// the reasoning via `lastCaptureError` so AlarmSchedulerView can decide
+    /// how to render it (a future banner; today it's logged). Window stays
+    /// enabled — evening-self didn't prove they're morning-self, so the
+    /// contract holds.
+    func disableChallengeFailed(error: String?) {
+        guard phase == .disableChallenge else {
+            logger.warning("disableChallengeFailed ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = error
+        phase = .idle
+        logger.info("Disable challenge failed — window.isEnabled kept true, error=\(error ?? "none", privacy: .public)")
+    }
+
+    /// Wave 5 G1: user cancelled the capture flow before it resolved to a
+    /// verdict. Distinct from `disableChallengeFailed` so future UX can
+    /// differentiate "claude said no" from "user backed out" if needed.
+    /// Today both paths just return to .idle with the alarm still enabled.
+    func cancelDisableChallenge() {
+        guard phase == .disableChallenge else {
+            logger.warning("cancelDisableChallenge ignored — phase=\(String(describing: self.phase), privacy: .public)")
+            return
+        }
+        lastCaptureError = nil
+        phase = .idle
+        logger.info("Disable challenge cancelled — window.isEnabled kept true")
     }
 
     /// Called by `CameraCaptureFlow` when a capture succeeded and a WakeAttempt row was
