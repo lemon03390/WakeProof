@@ -84,13 +84,20 @@ final class AlarmScheduler {
     /// `Task.isCancelled` alone can't detect across re-scheduling.
     private var schedulingGeneration: UInt64 = 0
 
+    /// R15 (Wave 2.5): injectable UserDefaults so tests use a per-run suite
+    /// (`UserDefaults(suiteName:)`) instead of mutating `.standard` — which
+    /// could otherwise leak into parallel tests or the next CI run on the same
+    /// simulator. Production still uses `.standard`.
+    private let defaults: UserDefaults
+
     /// Loading the window from UserDefaults in init is intentional: the owning
     /// `@State private var scheduler = AlarmScheduler()` in WakeProofApp means this
     /// init runs exactly once per scene, not on every view redraw. SwiftUI `@State`
     /// preserves the reference across redraws for class types.
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         self.window = WakeWindow.load()
-        self.lastFireAt = UserDefaults.standard.object(forKey: Self.lastFireAtDefaultsKey) as? Date
+        self.lastFireAt = defaults.object(forKey: Self.lastFireAtDefaultsKey) as? Date
     }
 
     // MARK: - Public API
@@ -386,9 +393,9 @@ final class AlarmScheduler {
 
     private func persistLastFireAt() {
         if let lastFireAt {
-            UserDefaults.standard.set(lastFireAt, forKey: Self.lastFireAtDefaultsKey)
+            defaults.set(lastFireAt, forKey: Self.lastFireAtDefaultsKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: Self.lastFireAtDefaultsKey)
+            defaults.removeObject(forKey: Self.lastFireAtDefaultsKey)
         }
     }
 

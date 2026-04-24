@@ -8,6 +8,13 @@ import SwiftData
 import UIKit
 @testable import WakeProof
 
+// M11 (Wave 2.5): tests in this file use `Data([0xFF, 0xD8, 0xFF])` for baseline /
+// still image data — a JPEG SOI (Start of Image) marker only, NOT a valid decodable
+// image. This bypasses any UIImage-round-trip validation that future camera-pipeline
+// code might add. Unit tests here are about VisionVerifier's state-machine and memory
+// integration; they aren't meant to exercise image-decoding correctness. Actual
+// image-validation coverage lives in device-only tests (see docs/device-test-protocol.md
+// and docs/go-no-go-audio-test.md).
 @MainActor
 final class VisionVerifierTests: XCTestCase {
 
@@ -16,20 +23,28 @@ final class VisionVerifierTests: XCTestCase {
     private var context: ModelContext { container.mainContext }
     private var scheduler: AlarmScheduler!
     private var baseline: BaselinePhoto!
+    /// R15 (Wave 2.5): per-run UserDefaults suite so the scheduler's lastFireAt
+    /// marker (and any UserDefaults-backed queue state) doesn't bleed into `.standard`.
+    private var suiteDefaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() async throws {
         try await super.setUp()
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         container = try ModelContainer(for: BaselinePhoto.self, WakeAttempt.self, configurations: config)
-        UserDefaults.standard.removeObject(forKey: "com.wakeproof.alarm.lastFireAt")
-        scheduler = AlarmScheduler()
+        suiteName = "com.wakeproof.tests.visionverifier.\(UUID().uuidString)"
+        suiteDefaults = UserDefaults(suiteName: suiteName)
+        suiteDefaults.removePersistentDomain(forName: suiteName)
+        scheduler = AlarmScheduler(defaults: suiteDefaults)
         baseline = BaselinePhoto(imageData: Data([0xFF, 0xD8, 0xFF]), locationLabel: "kitchen")
         context.insert(baseline)
     }
 
     override func tearDown() async throws {
         scheduler.cancel()
-        UserDefaults.standard.removeObject(forKey: "com.wakeproof.alarm.lastFireAt")
+        suiteDefaults?.removePersistentDomain(forName: suiteName)
+        suiteDefaults = nil
+        suiteName = nil
         scheduler = nil
         container = nil
         baseline = nil
@@ -186,6 +201,82 @@ final class VisionVerifierTests: XCTestCase {
         await verifier.verify(attempt: attempt, baseline: baseline, context: context)
 
         XCTAssertTrue(scheduler.lastCaptureError?.contains("Secrets.swift") == true)
+        // M10 (Wave 2.5): network / transport errors inside VisionVerifier land in
+        // `handleAPIError`, which calls `finish` WITHOUT bumping `currentAttemptIndex`
+        // (the counter is only bumped in handleResult where Claude actually returned
+        // a verdict). Verify the one-retry budget is intact so the user's legitimate
+        // next "Prove you're awake" tap gets a fair first-try verdict rather than
+        // hitting the second-RETRY coercion path. Same invariant applies to any of
+        // `missingProxyToken / timeout / transportFailed / httpError / decodingFailed`.
+        XCTAssertEqual(verifier.currentAttemptIndex, 0,
+                       "network/config errors must NOT consume retry budget — handleAPIError skips the counter bump")
+    }
+
+    /// M10 follow-up: after a network error, a fresh `verify()` on a NEW fake that
+    /// returns VERIFIED must succeed with verdict VERIFIED. Locks in the "retry budget
+    /// intact" invariant at the end-to-end level rather than only probing the counter.
+    /// Uses `.timeout` (vs. the config-message error above) to avoid the missing-token
+    /// UI text leaking into the follow-up state.
+    func testNetworkErrorThenSuccessReachesVerifiedVerdict() async {
+        enterVerifyingState()
+        let attempt = makeAttempt()
+
+        // First call: transport/network error — network error maps to REJECTED, returns
+        // alarm to .ringing. Counter stays at 0 (M10 invariant above).
+        let errClient = FakeClient(result: .failure(ClaudeAPIError.timeout))
+        let verifier = VisionVerifier(client: errClient)
+        verifier.scheduler = scheduler
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        XCTAssertEqual(verifier.currentAttemptIndex, 0, "network error must not consume retry budget")
+        XCTAssertEqual(scheduler.phase, .ringing)
+
+        // User taps "Prove you're awake" again → fresh capture with new attempt → VERIFIED.
+        // Construct a second verifier with a success client (FakeClient takes its result at
+        // init; simpler than a mutable pre-loaded array for a two-call sequence).
+        let okClient = FakeClient(result: .success(makeResult(verdict: .verified, reasoning: "Clear now.")))
+        let verifier2 = VisionVerifier(client: okClient)
+        verifier2.scheduler = scheduler
+        scheduler.beginCapturing()
+        let attempt2 = makeAttempt()
+        await verifier2.verify(attempt: attempt2, baseline: baseline, context: context)
+
+        XCTAssertEqual(attempt2.verdictEnum, .verified,
+                       "the second verify on an intact retry budget must reach VERIFIED — otherwise transient networks defeat the flow")
+        XCTAssertEqual(scheduler.phase, .idle, "VERIFIED must finish the alarm")
+    }
+
+    /// L14 (Wave 2.5): when Claude returns `memory_update: {}` (both inner fields nil,
+    /// but the envelope is non-nil), the production code in VisionVerifier still writes
+    /// a history row with verdict+confidence+retryCount but an empty `note`. That row
+    /// carries calibration signal (the fact that a VERIFIED was confident on this user)
+    /// so it's intentional behavior, not a bug — this test pins it so a refactor that
+    /// accidentally suppresses the row (e.g. "skip write when both inner fields nil")
+    /// gets caught.
+    func testEmptyMemoryUpdateStillAppendsHistoryRow() async throws {
+        let tmp = tempMemoryStoreRoot()
+        let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))
+        try await store.bootstrapIfNeeded()
+
+        // Both inner fields nil — equivalent to `memory_update: {}` in the wire JSON.
+        let update = VerificationResult.MemoryUpdate(profileDelta: nil, historyNote: nil)
+        let fake = RecordingClient(verdict: .verified, memoryUpdate: update)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = store
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.recentHistory.count, 1,
+                       "empty memory_update {} still appends a history row — carries verdict/confidence/retryCount calibration signal")
+        XCTAssertNil(snapshot.recentHistory.first?.note,
+                     "note field must be nil when historyNote was absent in memory_update")
+        XCTAssertNil(snapshot.profile,
+                     "profile must NOT be rewritten when profileDelta was nil (even on VERIFIED)")
     }
 
     func testResetForNewFireClearsCounter() async {
@@ -220,26 +311,16 @@ final class VisionVerifierTests: XCTestCase {
         XCTAssertEqual(attempt.verdictEnum, .captured, "attempt verdict must be unchanged when verify bails early")
     }
 
-    /// finish() catch-all for unexpected verdicts must return to ringing rather
-    /// than pinning the alarm in `.verifying`. Our current callers only emit
-    /// `.verified` / `.rejected` / (RETRY via handleResult), but the defensive
-    /// branch guards against a future refactor that introduces a new path.
-    func testUnexpectedVerdictFallbackReturnsToRinging() async {
-        let client = FakeClient(result: .success(makeResult(
-            verdict: .rejected,
-            confidence: 0.3,
-            reasoning: "Rejected.",
-            sameLocation: false
-        )))
-        let verifier = VisionVerifier(client: client)
-        verifier.scheduler = scheduler
-        enterVerifyingState()
-        let attempt = makeAttempt()
-
-        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
-
-        XCTAssertNotEqual(scheduler.phase, .verifying, "state machine must never leave alarm pinned in .verifying")
-    }
+    // M9 (Wave 2.5): `testUnexpectedVerdictFallbackReturnsToRinging` was deleted
+    // here because its name advertised coverage of the catch-all defensive branch
+    // in finish() / handleResult, but its body used `.rejected` — identical to
+    // `testRejectedVerdictReturnsToRingingWithError` above. See the matching
+    // comment in VisionVerifier.swift (handleResult's `.captured, .timeout,
+    // .unresolved` branch) — that branch is unreachable by current
+    // `VerificationResult.Verdict` cases and ships a `Logger.fault` as an audit
+    // trail if VerdictEnum ever grows. Adding a test that could actually exercise
+    // the branch would require constructing a `VerificationResult.Verdict` case
+    // that doesn't exist yet, which defeats the point of the defensive fallback.
 
     /// Anti-spoof re-entry must carry `currentAntiSpoofInstruction` into the
     /// second Claude call. Load-bearing for the product value prop: if the

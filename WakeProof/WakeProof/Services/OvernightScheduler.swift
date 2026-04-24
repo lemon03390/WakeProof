@@ -50,7 +50,11 @@ actor OvernightScheduler {
     static let activeHandleKey = "com.wakeproof.overnight.activeHandle"
 
     private let source: any OvernightBriefingSource
-    private let sleepReader: HealthKitSleepReader
+    // R11 (Wave 2.5): typed as `any SleepReading` so tests can swap in `FakeSleepReader`
+    // instead of relying on "simulator has no HealthKit data → empty snapshot" quirks.
+    // Production still passes the concrete `HealthKitSleepReader()` at the WakeProofApp
+    // wire-up site.
+    private let sleepReader: any SleepReading
     private let memoryStore: MemoryStore
     /// Retained on the scheduler for call-site compatibility (WakeProofApp +
     /// tests), but **no longer used inside the scheduler actor** after the R5
@@ -79,7 +83,7 @@ actor OvernightScheduler {
 
     init(
         source: any OvernightBriefingSource,
-        sleepReader: HealthKitSleepReader,
+        sleepReader: any SleepReading,
         memoryStore: MemoryStore,
         modelContainer: ModelContainer,
         defaults: UserDefaults = .standard
@@ -185,20 +189,32 @@ actor OvernightScheduler {
     /// (3) scheduleNextBackgroundRefresh — only while a session is active.
     /// (4) the work itself — poke the source with fresh HealthKit data.
     ///
-    /// B2 fix: `task.expirationHandler` is invoked by BackgroundTasks on an
-    /// unspecified queue — it may fire *while* this actor is suspended at an
+    /// R12 (Wave 2.5): public entry adapts the real `BGProcessingTask` to the
+    /// `BGProcessingTaskLike` protocol so the testable `handleRefresh(task:)` helper
+    /// can be driven by a fake in unit tests. iOS forbids constructing real
+    /// `BGProcessingTask` instances; the adapter pattern means the critical path
+    /// (completion-latch ordering) gets automated coverage.
+    func handleBackgroundRefresh(_ task: BGProcessingTask) async {
+        await handleRefresh(task: RealBGProcessingTask(task))
+    }
+
+    /// R12 (Wave 2.5): testable BGTask-shape. Accepts any conformer so unit tests
+    /// can pass a `FakeBGProcessingTask` that records `setTaskCompleted` calls and
+    /// lets the test trigger `expirationHandler()` manually. All the completion-
+    /// latch logic moved here from `handleBackgroundRefresh` verbatim.
+    ///
+    /// B2 fix (carried over): `task.expirationHandler` is invoked by BackgroundTasks
+    /// on an unspecified queue — it may fire *while* this actor is suspended at an
     /// `await`. Calling `task.setTaskCompleted(success:)` twice (once from the
     /// expiration handler, once from the actor's own resumed path) raises
     /// `NSInternalInconsistencyException` and crashes the app on the next
-    /// background-refresh fire.
-    ///
-    /// The `CompletionLatch` (backed by `OSAllocatedUnfairLock<Bool>`, shared
-    /// across the actor-vs-handler boundary) resolves this: whoever claims the
-    /// latch first wins the right to call `setTaskCompleted`; the loser
-    /// short-circuits. The actor's resumption path additionally checks
-    /// `latch.isClaimed` after each await so it exits the pipeline BEFORE doing
-    /// further work against a task that's already been marked complete.
-    func handleBackgroundRefresh(_ task: BGProcessingTask) async {
+    /// background-refresh fire. The `CompletionLatch` (backed by `OSAllocatedUnfairLock<Bool>`,
+    /// shared across the actor-vs-handler boundary) resolves this: whoever claims the
+    /// latch first wins the right to call `setTaskCompleted`; the loser short-circuits.
+    /// The actor's resumption path additionally checks `latch.isClaimed` after each
+    /// await so it exits the pipeline BEFORE doing further work against a task that's
+    /// already been marked complete.
+    func handleRefresh(task: some BGProcessingTaskLike) async {
         // Shared completion-state between the expiration handler (non-actor
         // queue) and the actor's own resumption path. Declared as a local
         // `let` because each handleBackgroundRefresh invocation owns its own
@@ -463,6 +479,37 @@ actor OvernightScheduler {
 
     private func logExpiration() {
         logger.warning("BGProcessingTask expired before completion")
+    }
+}
+
+/// R12 (Wave 2.5): minimal protocol exposing the BGProcessingTask surface the
+/// scheduler actually uses — `setTaskCompleted(success:)` and the
+/// `expirationHandler` settable property. Tests inject a `FakeBGProcessingTask`
+/// that records calls; production wraps the real `BGProcessingTask` via
+/// `RealBGProcessingTask`. iOS forbids constructing real `BGProcessingTask`
+/// instances from a unit test, so the adapter pattern is the only way to get
+/// automated coverage over the completion-latch logic.
+///
+/// `identifier` is a read-only `String` to match the real task's surface; tests
+/// don't assert on it today but keeping it available preserves forward flexibility.
+protocol BGProcessingTaskLike: AnyObject {
+    var identifier: String { get }
+    func setTaskCompleted(success: Bool)
+    var expirationHandler: (() -> Void)? { get set }
+}
+
+/// R12 (Wave 2.5): thin adapter wrapping the real `BGProcessingTask` so
+/// `handleRefresh(task:)` can accept `BGProcessingTaskLike`. The real
+/// `BGProcessingTask` already exposes `setTaskCompleted(success:)` and
+/// `expirationHandler` directly — this wrapper forwards both.
+final class RealBGProcessingTask: BGProcessingTaskLike {
+    private let task: BGProcessingTask
+    init(_ task: BGProcessingTask) { self.task = task }
+    var identifier: String { task.identifier }
+    func setTaskCompleted(success: Bool) { task.setTaskCompleted(success: success) }
+    var expirationHandler: (() -> Void)? {
+        get { task.expirationHandler }
+        set { task.expirationHandler = newValue }
     }
 }
 

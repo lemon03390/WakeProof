@@ -273,7 +273,12 @@ final class VisionVerifier {
             ) else { return }
             scheduler?.beginAntiSpoofPrompt(instruction: instruction)
         case .captured, .timeout, .unresolved:
-            // Unreachable — finalVerdict only ever resolves to verified/rejected/retry.
+            // Defensive branch; unreachable by current `VerificationResult.Verdict` cases
+            // (finalVerdict only ever resolves to verified/rejected/retry). Logger.fault
+            // ships as audit trail if VerdictEnum ever grows — the previous test
+            // `testUnexpectedVerdictFallbackReturnsToRinging` (deleted in Wave 2.5) was a
+            // strict subset of the REJECTED-path test and couldn't exercise this branch
+            // without inventing a new Verdict case. See VisionVerifierTests M9 comment.
             logger.fault("handleResult reached unreachable finalVerdict case: \(finalVerdict.rawValue, privacy: .public)")
             await finish(attempt: attempt, context: context, verdict: .rejected, reasoning: "Verification hit an unexpected state.")
         }

@@ -127,10 +127,14 @@ final class OvernightSchedulerTests: XCTestCase {
         ))
     }
 
-    private func makeScheduler(source: RecordingSource, memoryStore: MemoryStore? = nil) -> OvernightScheduler {
+    private func makeScheduler(
+        source: RecordingSource,
+        memoryStore: MemoryStore? = nil,
+        sleepReader: any SleepReading = FakeSleepReader()
+    ) -> OvernightScheduler {
         OvernightScheduler(
             source: source,
-            sleepReader: HealthKitSleepReader(),
+            sleepReader: sleepReader,
             memoryStore: memoryStore ?? makeMemoryStore(),
             modelContainer: container,
             defaults: suiteDefaults
@@ -151,31 +155,58 @@ final class OvernightSchedulerTests: XCTestCase {
         XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey), "session-alpha")
     }
 
+    /// R11 (Wave 2.5): previously this test relied on "simulator has no HealthKit
+    /// data → HealthKitSleepReader returns empty snapshot" — an implicit assumption
+    /// that would break on a future iOS change or a real-device CI run. Fixed by
+    /// swapping in a `FakeSleepReader` (see `FakeSleepReader.swift`) with a known
+    /// non-empty snapshot, then asserting the exact values flow through to the
+    /// agent session's seed message. Tests both the sleep-plumbing AND the memory-
+    /// plumbing in the same call.
     func testStartOvernightSessionPassesSleepAndMemoryCorrectly() async throws {
         // Seed the memory store with a profile so the scheduler forwards it.
         let uuid = UUID().uuidString
         let memoryStore = makeMemoryStore(uuid: uuid)
         try await memoryStore.rewriteProfile("## Observations\nUser sleeps best on weekends.")
+
+        // Seed a deterministic non-empty SleepSnapshot so we can assert exact values.
+        let windowStart = Date(timeIntervalSince1970: 1_745_500_000)
+        let windowEnd = windowStart.addingTimeInterval(12 * 3600)
+        let seededSleep = SleepSnapshot(
+            totalInBedMinutes: 465,
+            awakeMinutes: 12,
+            heartRateAvg: 58.5,
+            heartRateMin: 48.0,
+            heartRateMax: 74.0,
+            heartRateSampleCount: 88,
+            hasAppleWatchData: true,
+            windowStart: windowStart,
+            windowEnd: windowEnd
+        )
+        let fakeReader = FakeSleepReader(result: .success(seededSleep))
+
         let source = RecordingSource()
         await source.setNextHandle("session-beta")
-        let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
+        let scheduler = makeScheduler(source: source, memoryStore: memoryStore, sleepReader: fakeReader)
 
         await scheduler.startOvernightSession()
 
         let planCalls = await source.planCalls
         XCTAssertEqual(planCalls.count, 1)
-        // Sleep data on the test simulator has no authorised HealthKit access,
-        // so the reader returns an empty-metrics snapshot (zero minutes, zero
-        // samples) even though the window bounds are `Date.now - 12h` and
-        // `Date.now`. Assert the metric fields are zero rather than comparing
-        // to `SleepSnapshot.empty` (which carries 1970 window bounds).
-        XCTAssertNotNil(planCalls.first?.sleep, "planOvernight must be called with a SleepSnapshot, not nil")
-        XCTAssertEqual(planCalls.first?.sleep.totalInBedMinutes, 0,
-                       "no HealthKit data on simulator → totalInBedMinutes is zero")
-        XCTAssertEqual(planCalls.first?.sleep.heartRateSampleCount, 0,
-                       "no HealthKit data on simulator → no HR samples")
-        XCTAssertEqual(planCalls.first?.sleep.isEmpty, true,
-                       "empty metrics → isEmpty is true")
+
+        // Assert every seeded field flowed through untouched — no accidental
+        // re-shaping between `sleepReader.lastNightSleep()` and `source.planOvernight`.
+        let sleep = try XCTUnwrap(planCalls.first?.sleep, "planOvernight must be called with a SleepSnapshot, not nil")
+        XCTAssertEqual(sleep.totalInBedMinutes, 465)
+        XCTAssertEqual(sleep.awakeMinutes, 12)
+        XCTAssertEqual(sleep.heartRateAvg, 58.5)
+        XCTAssertEqual(sleep.heartRateMin, 48.0)
+        XCTAssertEqual(sleep.heartRateMax, 74.0)
+        XCTAssertEqual(sleep.heartRateSampleCount, 88)
+        XCTAssertEqual(sleep.hasAppleWatchData, true)
+        XCTAssertEqual(sleep.windowStart, windowStart)
+        XCTAssertEqual(sleep.windowEnd, windowEnd)
+        XCTAssertEqual(sleep.isEmpty, false, "seeded non-empty snapshot must not be flagged empty")
+
         XCTAssertEqual(planCalls.first?.memoryProfile?.contains("sleeps best on weekends"), true,
                        "memory profile must flow from MemoryStore into planOvernight")
     }
@@ -462,6 +493,92 @@ final class OvernightSchedulerTests: XCTestCase {
         XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey),
                        "pre-existing-handle",
                        "pre-existing handle must NOT be overwritten by a concurrent caller")
+    }
+
+    // MARK: - R12: BGProcessingTask completion-latch ordering
+
+    /// R12 (Wave 2.5): non-expired path — the handler pokes the source, completes
+    /// successfully, and iOS never fires the expirationHandler. Assert exactly one
+    /// `setTaskCompleted(true)` call.
+    ///
+    /// Previously `handleBackgroundRefresh` had zero automated coverage; the C.3/C.4
+    /// completion-latch ordering fixes lived in a code path exercised only via a
+    /// DEBUG button and manual on-device testing. Now the `BGProcessingTaskLike`
+    /// protocol (see OvernightScheduler.swift) lets us inject a `FakeBGProcessingTask`
+    /// and drive this deterministically.
+    func testBGRefreshNormalPathCallsSetTaskCompletedOnce() async throws {
+        suiteDefaults.set("bg-test-handle", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        let scheduler = makeScheduler(source: source)
+
+        let fakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: fakeTask)
+
+        XCTAssertEqual(fakeTask.completionCalls.count, 1,
+                       "non-expired path must call setTaskCompleted exactly once")
+        XCTAssertEqual(fakeTask.completionCalls.first, true,
+                       "non-expired success path records setTaskCompleted(true)")
+    }
+
+    /// R12 (Wave 2.5): early-expiration path — iOS fires the expirationHandler
+    /// synchronously before `handleRefresh` does any real work. The latch should
+    /// claim for the expiration handler; assert exactly one `setTaskCompleted(false)`
+    /// and zero double-completion crashes.
+    ///
+    /// Implementation note: we install a RecordingSource that blocks planOvernight
+    /// indefinitely (so handleRefresh is still running when we fire expiration),
+    /// but we don't actually need that here — the scheduler's handleRefresh no-session
+    /// branch handles the "no active handle" case and invokes setTaskCompleted(true)
+    /// immediately. To actually race the expiration we install an active handle
+    /// plus use the RecordingSource's pokeIfNeeded to block until we're ready.
+    ///
+    /// Simpler approach: fire expiration AFTER handleRefresh returns — this simulates
+    /// a "phantom" expiration the BackgroundTasks queue can deliver after the task is
+    /// already complete. The latch's `claim()` must return false so the handler's
+    /// setTaskCompleted never fires a second time.
+    func testBGRefreshPhantomExpirationDoesNotDoubleComplete() async throws {
+        suiteDefaults.set("bg-test-handle", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        let scheduler = makeScheduler(source: source)
+
+        let fakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: fakeTask)
+        // After handleRefresh returns, actor's path has claimed the latch.
+        XCTAssertEqual(fakeTask.completionCalls.count, 1)
+
+        // Simulate iOS queuing a late expirationHandler fire — this can happen because
+        // the handler runs on an unspecified queue and the BackgroundTasks framework
+        // doesn't guarantee it is cancelled cleanly after setTaskCompleted.
+        fakeTask.fireExpiration()
+
+        // The latch MUST prevent a second setTaskCompleted call. If this assertion
+        // fires, the completion-latch ordering regressed and the app would crash with
+        // NSInternalInconsistencyException on the next BG fire on device.
+        XCTAssertEqual(fakeTask.completionCalls.count, 1,
+                       "expiration after actor-path completion must NOT produce a second setTaskCompleted (latch guards against double-claim)")
+    }
+
+    /// R12 (Wave 2.5): "no active handle" path — the handler sees no session and
+    /// completes with success=true (signalling to iOS "nothing to do, succeed
+    /// cleanly"). The same completion-latch guarantee applies: exactly one call.
+    func testBGRefreshNoActiveHandleCompletesSuccessfullyOnce() async throws {
+        // NO handle pre-set → scheduler takes the "pipeline stopped" branch.
+        let source = RecordingSource()
+        let scheduler = makeScheduler(source: source)
+
+        let fakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: fakeTask)
+
+        XCTAssertEqual(fakeTask.completionCalls.count, 1,
+                       "no-handle branch must still call setTaskCompleted exactly once — the task must be released back to iOS")
+        XCTAssertEqual(fakeTask.completionCalls.first, true,
+                       "no-handle branch is a clean exit — records success=true so iOS doesn't flag it as a pipeline error")
+
+        // pokeIfNeeded must NOT have been called on the source — the "no handle"
+        // branch short-circuits before the work block.
+        let pokeCalls = await source.pokeCalls
+        XCTAssertTrue(pokeCalls.isEmpty,
+                      "no-handle branch must not spend Claude credits on poke")
     }
 
     // MARK: - cleanupStale

@@ -41,13 +41,23 @@ final class WeeklyCoach {
     /// and marking the static accessor `nonisolated` lets it cross the MainActor
     /// boundary of the default-argument evaluation context.
     ///
-    /// When `resourceURL` is the bundled default, the wrapper's `seedChecksum` is
-    /// validated against the live bundled seed. A mismatch (someone edited the
-    /// seed without re-running `scripts/generate-weekly-insight.py`) drops the
-    /// wrapper so the fallback UI surfaces the staleness. Tests pass a custom URL
-    /// and therefore skip the checksum check — the fixture-vs-bundled-seed
-    /// mismatch would otherwise break every test run.
-    init(resourceURL: URL? = WeeklyCoach.defaultResourceURL) {
+    /// B6.T15 (Wave 2.5): both `insightURL` and `seedURL` are now injectable,
+    /// and the checksum-skip toggle is an explicit `skipChecksumValidation` flag
+    /// instead of a hardcoded URL-equality comparison. This forces tests to be
+    /// explicit about intent — either they seed a matching checksum (default
+    /// behaviour now) or they opt out. Production boot in `WakeProofApp` relies
+    /// on the defaults, which keep checksum validation ON.
+    ///
+    /// Previously every test used a custom URL, which silently skipped validation —
+    /// meaning a regression flipping `if liveChecksum == parsed.seedChecksum`
+    /// inverted would ship with 0% coverage. The new tests
+    /// (`testChecksumMatchAcceptsInsight` / `testChecksumMismatchDropsInsight`)
+    /// exercise both branches.
+    init(
+        resourceURL: URL? = WeeklyCoach.defaultResourceURL,
+        seedURL: URL? = WeeklyCoach.defaultSeedURL,
+        skipChecksumValidation: Bool = false
+    ) {
         guard let resourceURL else {
             logger.info("WeeklyCoach: no resource URL, running without an insight")
             return
@@ -58,16 +68,16 @@ final class WeeklyCoach {
             decoder.dateDecodingStrategy = .iso8601
             let parsed = try decoder.decode(Wrapper.self, from: data)
 
-            // Only validate checksum when loading from the bundled default path.
-            // Custom URLs (tests, previews) skip validation — otherwise the fixture
-            // checksum would mismatch the live bundled seed and break the tests.
-            let isBundledDefault = resourceURL == WeeklyCoach.defaultResourceURL
-            if isBundledDefault,
-               let seedURL = Bundle.main.url(forResource: "mock-wake-history-seed", withExtension: "json"),
+            // Validate the insight's `seedChecksum` matches the live seed file
+            // unless the caller opted out. A mismatch means someone edited the
+            // seed without re-running `scripts/generate-weekly-insight.py`, and
+            // we drop the wrapper so fallback UI renders.
+            if !skipChecksumValidation,
+               let seedURL,
                let seedData = try? Data(contentsOf: seedURL) {
                 let liveChecksum = WeeklyCoach.sha256Prefix16(seedData)
                 if liveChecksum != parsed.seedChecksum {
-                    logger.fault("WeeklyCoach: seedChecksum mismatch — bundled seed=\(liveChecksum, privacy: .public) insight=\(parsed.seedChecksum, privacy: .public). Dropping insight to force regeneration.")
+                    logger.fault("WeeklyCoach: seedChecksum mismatch — live seed=\(liveChecksum, privacy: .public) insight=\(parsed.seedChecksum, privacy: .public). Dropping insight to force regeneration.")
                     return  // self.wrapper stays nil → fallback UI renders
                 }
             }
@@ -84,6 +94,13 @@ final class WeeklyCoach {
 
     nonisolated private static var defaultResourceURL: URL? {
         Bundle.main.url(forResource: "weekly-insight-seed", withExtension: "json")
+    }
+
+    /// B6.T15 (Wave 2.5): extracted from the previous inline bundle-lookup so tests
+    /// can swap in a fixture seed via `seedURL:`. Defaults to the live bundled
+    /// `mock-wake-history-seed.json` — production WakeProofApp uses the default.
+    nonisolated private static var defaultSeedURL: URL? {
+        Bundle.main.url(forResource: "mock-wake-history-seed", withExtension: "json")
     }
 
     /// SHA-256 hex digest, first 16 chars — mirrors

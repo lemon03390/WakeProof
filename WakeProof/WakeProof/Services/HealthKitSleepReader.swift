@@ -14,7 +14,20 @@ import Foundation
 import HealthKit
 import os
 
-actor HealthKitSleepReader {
+/// R11 (Wave 2.5): abstraction so tests can swap in a deterministic fake instead of
+/// relying on simulator quirks (the simulator's "no HealthKit data → empty snapshot"
+/// behavior is implicit and could break across iOS major versions). Sendable + actor
+/// conformance is required because `OvernightScheduler` is an actor that calls into
+/// this across the actor boundary.
+protocol SleepReading: Sendable {
+    /// Read last-N-hours sleep + HR data. Default window 12h back on the production
+    /// reader. Conformers may throw `HealthKitSleepReader.ReaderError` or a test-only
+    /// equivalent; callers (`OvernightScheduler.readSleepSafely`) already swallow
+    /// every error back to `.empty`.
+    func lastNightSleep() async throws -> SleepSnapshot
+}
+
+actor HealthKitSleepReader: SleepReading {
 
     enum ReaderError: LocalizedError {
         case healthKitUnavailable
@@ -35,6 +48,13 @@ actor HealthKitSleepReader {
 
     init(healthStore: HKHealthStore = HKHealthStore()) {
         self.healthStore = healthStore
+    }
+
+    /// SleepReading protocol conformance — forwards to the default 12h window.
+    /// Callers that need a different window still call `lastNightSleep(windowHours:)`
+    /// directly, which is not part of the protocol.
+    func lastNightSleep() async throws -> SleepSnapshot {
+        try await lastNightSleep(windowHours: 12)
     }
 
     /// Read last-N-hours sleep + HR data. Default window 12 h back.

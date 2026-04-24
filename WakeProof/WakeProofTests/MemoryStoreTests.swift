@@ -135,9 +135,22 @@ final class MemoryStoreTests: XCTestCase {
 
     // MARK: - Concurrency
 
+    /// B6.T4 (Wave 2.5): previously this test wrapped `await store.appendHistory(entry)`
+    /// in `try?`, silently swallowing any throw. If the actor ever failed to append
+    /// (disk full, protection-class attribute unavailable on a simulator quirk, etc.)
+    /// the `totalHistoryCount < 20` assertion would still fire but with no hint WHY.
+    /// The fix:
+    ///   (1) `try await` lets any throw surface with a diagnostic stack trace, not
+    ///       silently reducing the count.
+    ///   (2) after the TaskGroup drains, read the RAW JSONL bytes from the on-disk
+    ///       file (via `historyFileURLForTests` test-only accessor) and assert
+    ///       exactly 20 newline-terminated lines + each parses as valid JSON.
+    ///       `loadHistory`'s `compactMap` silently skips corrupt rows, so counting
+    ///       via `snapshot.recentHistory` alone would miss the case where one of
+    ///       the 20 appends wrote a mangled row.
     func testConcurrentAppendsProduceDistinctEntriesNoCorruption() async throws {
         let store = makeStore(historyLimit: 100)
-        await withTaskGroup(of: Void.self) { group in
+        try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<20 {
                 group.addTask {
                     let entry = MemoryEntry(
@@ -145,14 +158,51 @@ final class MemoryStoreTests: XCTestCase {
                         verdict: "VERIFIED", confidence: 0.8,
                         retryCount: 0, note: "concurrent-\(i)"
                     )
-                    try? await store.appendHistory(entry)
+                    // `try` (not `try?`) — any failure surfaces here with a diagnostic
+                    // rather than silently dropping and breaking the downstream count.
+                    try await store.appendHistory(entry)
                 }
             }
+            try await group.waitForAll()
         }
+
+        // (1) Snapshot assertions: the per-actor sort + read-limit path.
         let snap = try await store.read()
         XCTAssertEqual(snap.totalHistoryCount, 20)
         let notes = snap.recentHistory.compactMap(\.note)
         XCTAssertEqual(Set(notes).count, notes.count, "no duplicate notes — means all 20 lines survived")
+
+        // (2) Raw-bytes assertion: bypass `loadHistory`'s compactMap-silencing and
+        // prove that ALL 20 lines on disk are newline-terminated + decode as
+        // MemoryEntry JSON. If a future actor-refactor introduced a partial-write
+        // race that produced a half-truncated line, (1) would still pass while (2)
+        // would fail with specifics.
+        let historyURL = await store.historyFileURLForTests()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: historyURL.path),
+                      "history.jsonl must have landed on disk after 20 concurrent appends")
+        let rawData = try Data(contentsOf: historyURL)
+        // Each append writes exactly one JSONL row + trailing newline. 20 rows should
+        // produce 20 newline-terminated segments.
+        let rawString = try XCTUnwrap(String(data: rawData, encoding: .utf8),
+                                      "history.jsonl bytes must decode as UTF-8 — a broken UTF-8 boundary indicates partial-write corruption")
+        let lines = rawString.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(lines.count, 20,
+                       "raw-bytes check: expected exactly 20 newline-terminated JSONL lines, got \(lines.count)")
+        // Bypass compactMap: if ANY line fails to decode, XCTUnwrap / the force-try
+        // inside the loop will surface it with a decoding error.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for (idx, line) in lines.enumerated() {
+            let lineData = try XCTUnwrap(line.data(using: .utf8),
+                                         "line \(idx) must be UTF-8 encodable: \(line)")
+            _ = try decoder.decode(MemoryEntry.self, from: lineData)
+        }
+        // Final trailing-newline check: the last byte of the file should be \n so
+        // future appends start fresh without merging into an unterminated line.
+        XCTAssertEqual(rawData.last, UInt8(ascii: "\n"),
+                       "history.jsonl must end on a newline boundary — otherwise the next append merges into a half-written row")
     }
 
     // MARK: - Security
@@ -277,5 +327,16 @@ final class MemoryStoreTests: XCTestCase {
 extension MemoryStore {
     var configurationUUIDForTests: String {
         get async { configuration.userUUID }
+    }
+
+    /// B6.T4 (Wave 2.5): test-only accessor so the concurrent-append test can read
+    /// the raw JSONL bytes on disk (bypassing `loadHistory`'s compactMap-silencing
+    /// of malformed rows). Scoped here rather than in production MemoryStore so the
+    /// surface stays minimal — production code that needs the file path always
+    /// computes it locally inside the actor.
+    func historyFileURLForTests() async -> URL {
+        configuration.rootDirectory
+            .appendingPathComponent(configuration.userUUID, isDirectory: true)
+            .appendingPathComponent("history.jsonl", isDirectory: false)
     }
 }

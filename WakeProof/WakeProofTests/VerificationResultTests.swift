@@ -65,6 +65,26 @@ final class VerificationResultTests: XCTestCase {
         XCTAssertNil(VerificationResult.fromClaudeMessageBody(junk), "unknown verdict must fail decode — do not silently downgrade")
     }
 
+    /// L13 (Wave 2.5): the `Verdict` enum's raw values are all-uppercase. Because
+    /// `Codable` raw-value decode is case-sensitive by default, Claude drifting to
+    /// `"verified"` or `"Verified"` on a future model should fail the decode rather
+    /// than silently map to `.verified`. If we ever need case-insensitive matching
+    /// (e.g. Claude 5 emits mixed case), this test is the canary — a failure here
+    /// forces explicit review rather than a silent downgrade.
+    func testVerdictDecodingIsCaseSensitive() {
+        let lowercase = cleanJSON.replacingOccurrences(of: "\"VERIFIED\"", with: "\"verified\"")
+        XCTAssertNil(VerificationResult.fromClaudeMessageBody(lowercase),
+                     "lowercase 'verified' must fail decode — Verdict rawValue is 'VERIFIED', case-sensitive")
+
+        let mixedCase = cleanJSON.replacingOccurrences(of: "\"VERIFIED\"", with: "\"Verified\"")
+        XCTAssertNil(VerificationResult.fromClaudeMessageBody(mixedCase),
+                     "mixed-case 'Verified' must fail decode — prevents silent drift if Claude starts emitting title case")
+
+        // Round-trip: explicit uppercase must STILL succeed (the canonical shape).
+        XCTAssertNotNil(VerificationResult.fromClaudeMessageBody(cleanJSON),
+                        "canonical uppercase 'VERIFIED' must continue to decode — baseline round-trip")
+    }
+
     func testBracesInsideStringsDontFoolParser() throws {
         let tricky = """
         {

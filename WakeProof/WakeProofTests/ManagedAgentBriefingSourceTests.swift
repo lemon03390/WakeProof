@@ -105,4 +105,29 @@ final class ManagedAgentBriefingSourceTests: XCTestCase {
         XCTAssertEqual(text, "lowercase test")
         XCTAssertNil(memory)
     }
+
+    /// L11 (Wave 2.5): pins the parser's CURRENT behaviour when Claude emits the
+    /// markers in the wrong order (MEMORY_UPDATE: before BRIEFING:). The parser's
+    /// "both markers present" branch requires `briefingRange.upperBound <= memoryRange.lowerBound`
+    /// — when that ordering invariant is violated, the branch is skipped and the
+    /// code falls through to the "just BRIEFING:" branch, which then slices from
+    /// BRIEFING: to end-of-string (which includes the MEMORY_UPDATE: remnants as
+    /// part of the briefing text). That means the briefing text ends up containing
+    /// "X\nMEMORY_UPDATE: Y" verbatim; the memory update is lost.
+    ///
+    /// This is LLM-ordering-dependent behaviour — Claude is instructed to emit
+    /// BRIEFING: first, so reversed order is a drift signal. Pinning here so a
+    /// refactor that changes the fallback (e.g. adds proper two-marker-in-any-order
+    /// handling) forces human review by failing this assertion.
+    func testParseAgentReplyReversedMarkersProducesBestEffortBriefing() throws {
+        let raw = "MEMORY_UPDATE: X\nBRIEFING: Y"
+        let (text, memory) = try ManagedAgentBriefingSource.parseAgentReply(raw)
+        // Current behavior: "just BRIEFING:" branch matches; everything after the
+        // BRIEFING: marker (just "Y") becomes the briefing text. The MEMORY_UPDATE:
+        // content sits BEFORE the briefing marker so it's not in the sliced region.
+        XCTAssertEqual(text, "Y",
+                       "reversed-order markers: briefing text is everything after BRIEFING: (current behavior pin)")
+        XCTAssertNil(memory,
+                     "reversed-order markers: memory_update is lost because the reversed ordering falls outside the both-markers branch")
+    }
 }

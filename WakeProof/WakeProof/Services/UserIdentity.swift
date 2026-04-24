@@ -22,13 +22,23 @@ struct UserIdentity {
     private static let key = "com.wakeproof.user.uuid"
     private static let logger = Logger(subsystem: "com.wakeproof.memory", category: "identity")
 
+    /// R15 (Wave 2.5): injectable UserDefaults so tests use a per-run suite
+    /// (`UserDefaults(suiteName:)`) instead of mutating `.standard` — which
+    /// would otherwise leak a UUID into parallel tests or the next CI run.
+    /// Production `UserIdentity.shared` uses `.standard` via the default arg.
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
     /// The install's stable UUID. First access generates + persists.
     var uuid: String {
-        if let existing = UserDefaults.standard.string(forKey: Self.key) {
+        if let existing = defaults.string(forKey: Self.key) {
             return existing
         }
         let generated = UUID().uuidString
-        UserDefaults.standard.set(generated, forKey: Self.key)
+        defaults.set(generated, forKey: Self.key)
         Self.logger.info("Generated new user UUID (first launch)")
         return generated
     }
@@ -38,7 +48,7 @@ struct UserIdentity {
     /// Guarded `#if DEBUG` so release builds cannot accidentally lose user memory by
     /// calling this from a future refactor.
     func rotate() {
-        UserDefaults.standard.removeObject(forKey: Self.key)
+        defaults.removeObject(forKey: Self.key)
         Self.logger.warning("User UUID rotated (debug-only path)")
     }
     #endif

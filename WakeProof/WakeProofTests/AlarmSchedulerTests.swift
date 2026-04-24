@@ -15,17 +15,25 @@ final class AlarmSchedulerTests: XCTestCase {
 
     private var scheduler: AlarmScheduler!
 
+    /// R15 (Wave 2.5): per-run suite-scoped UserDefaults so tests don't bleed into
+    /// `.standard`. Unique UUID per test to avoid any cross-instance state (which
+    /// matters because suite removal is async on some iOS versions).
+    private var suiteDefaults: UserDefaults!
+    private var suiteName: String!
+
     override func setUp() async throws {
         try await super.setUp()
-        // Each test gets a fresh scheduler. Scheduler reads UserDefaults at init —
-        // tests run in app sandbox; clean stale lastFireAt to keep tests independent.
-        UserDefaults.standard.removeObject(forKey: "com.wakeproof.alarm.lastFireAt")
-        scheduler = AlarmScheduler()
+        suiteName = "com.wakeproof.tests.alarmscheduler.\(UUID().uuidString)"
+        suiteDefaults = UserDefaults(suiteName: suiteName)
+        suiteDefaults.removePersistentDomain(forName: suiteName)
+        scheduler = AlarmScheduler(defaults: suiteDefaults)
     }
 
     override func tearDown() async throws {
         scheduler.cancel()
-        UserDefaults.standard.removeObject(forKey: "com.wakeproof.alarm.lastFireAt")
+        suiteDefaults?.removePersistentDomain(forName: suiteName)
+        suiteDefaults = nil
+        suiteName = nil
         scheduler = nil
         try await super.tearDown()
     }
@@ -104,7 +112,7 @@ final class AlarmSchedulerTests: XCTestCase {
         // in-process triggers a UNUserNotificationCenter re-registration that the test host
         // doesn't tolerate gracefully — so we assert against the on-disk state instead. The
         // recovery PATH (init reading UserDefaults) is exercised by every fresh launch.
-        let storedDate = UserDefaults.standard.object(forKey: "com.wakeproof.alarm.lastFireAt") as? Date
+        let storedDate = suiteDefaults.object(forKey: "com.wakeproof.alarm.lastFireAt") as? Date
         let stored = try XCTUnwrap(storedDate, "fire() must persist lastFireAt to UserDefaults")
         XCTAssertEqual(stored.timeIntervalSince1970, firedAt.timeIntervalSince1970, accuracy: 1.0)
     }
@@ -112,7 +120,7 @@ final class AlarmSchedulerTests: XCTestCase {
     func testStopRingingClearsPersistedMarker() {
         scheduler.fireNow()
         scheduler.stopRinging()
-        let stored = UserDefaults.standard.object(forKey: "com.wakeproof.alarm.lastFireAt") as? Date
+        let stored = suiteDefaults.object(forKey: "com.wakeproof.alarm.lastFireAt") as? Date
         XCTAssertNil(stored, "stopRinging must clear the persisted marker")
     }
 
