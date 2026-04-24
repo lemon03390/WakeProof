@@ -85,6 +85,14 @@ struct AlarmSchedulerView: View {
     /// Layer 2 memory fidelity.
     @State private var droppedMemoryWrites: Int = 0
 
+    /// Wave 5 H5 (§12.3-H5): opt-in gate for the Share button on
+    /// MorningBriefingView. Default `false` — per HOOK_S4_5, forced sharing
+    /// is an autonomy violation that correlates with app-abandonment. The
+    /// toggle in the Form's "Sharing" section below binds to this.
+    /// @AppStorage key matches MorningBriefingView's matching @AppStorage so
+    /// both surfaces read the same UserDefaults bool without any plumbing.
+    @AppStorage("com.wakeproof.shareCardEnabled") private var shareCardEnabled: Bool = false
+
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "schedulerView")
 
     var body: some View {
@@ -185,6 +193,20 @@ struct AlarmSchedulerView: View {
                         Text(next.formatted(date: .abbreviated, time: .standard))
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
+                }
+
+                // Wave 5 H5: opt-in sharing toggle. Placed above DEBUG so it
+                // ships in release builds; the Weekly-insight card sits below
+                // this so Sharing doesn't split the two read-surfaces apart.
+                // Copy deliberately names "manual" to pre-empt the user's
+                // "does this auto-post?" question — per HOOK_S4_5, nothing
+                // is auto-posted and we want that to be unambiguous in the
+                // settings surface itself (not just the privacy policy).
+                Section("Sharing") {
+                    Toggle("Allow sharing wake cards", isOn: $shareCardEnabled)
+                    Text("Generate a minimalist image of your streak + Claude's observation to share manually. Nothing auto-posts.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 #if DEBUG

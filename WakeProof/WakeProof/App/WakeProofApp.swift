@@ -448,7 +448,16 @@ struct RootView: View {
             MorningBriefingView(
                 result: latestBriefingResult,
                 observation: verifiedAttempts.first?.observation,
-                commitmentNote: scheduler.window.commitmentNote
+                commitmentNote: scheduler.window.commitmentNote,
+                // Wave 5 H5: pipe the streak service's current-day count
+                // through so the opt-in Share button can gate on it AND the
+                // rendered card can use it as the hero number. Read from
+                // the @Environment service (same one driving the badge in
+                // AlarmSchedulerView) so both surfaces agree. The service is
+                // recomputed on the VERIFIED transition above — by the time
+                // the cover presents, the count reflects this morning's
+                // just-landed attempt.
+                currentStreak: streakService.currentStreak
             ) {
                 showBriefing = false
                 latestBriefingResult = nil

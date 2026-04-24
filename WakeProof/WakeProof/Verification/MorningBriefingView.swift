@@ -42,7 +42,24 @@ struct MorningBriefingView: View {
     /// snapshot is passed in rather than read from the WakeAttempt row because
     /// the note lives with the current wake intent, not the per-fire record.
     let commitmentNote: String?
+
+    /// Wave 5 H5 (§12.3-H5): the current streak count, piped in from
+    /// `StreakService.currentStreak` via WakeProofApp's RootView. Used only
+    /// to drive the opt-in Share button's visibility gate and the hero
+    /// number on the rendered share card. Zero / negative values suppress
+    /// the Share button entirely (see `ShareCardModel.shouldShowShareButton`).
+    let currentStreak: Int
+
     let onDismiss: () -> Void
+
+    /// Wave 5 H5: opt-in toggle read from UserDefaults via @AppStorage. Default
+    /// `false` — per HOOK_S4_5, the Share button must NOT appear until the
+    /// user explicitly enables it. The toggle lives in AlarmSchedulerView
+    /// under a "Sharing" section, not inside this view — the briefing cover
+    /// is a transient surface; settings belong in the long-lived scheduler
+    /// form. Key uses the reverse-DNS style matching the bundle identifier
+    /// so any future export/reset tooling can grep WakeProof keys cleanly.
+    @AppStorage("com.wakeproof.shareCardEnabled") private var shareCardEnabled: Bool = false
 
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
@@ -112,12 +129,83 @@ struct MorningBriefingView: View {
                 Spacer()
                 Button("Start your day", action: onDismiss)
                     .buttonStyle(.primaryWhite)
+                    .padding(.bottom, 8)
+
+                // Wave 5 H5: opt-in Share button. Gated by three AND-ed
+                // conditions via `ShareCardModel.shouldShowShareButton`:
+                //   1. User enabled sharing (default off — HOOK_S4_5).
+                //   2. Current streak >= 1 (zero-streak cards are awkward).
+                //   3. Verification this morning was a success — the briefing
+                //      card is a celebration surface; sharing a non-success
+                //      morning would feel off-tone.
+                // The ShareLink takes the rendered `Image` directly — no
+                // Photos permission needed, the system sandbox share sheet
+                // handles destination selection. Renderer runs on-demand per
+                // tap via `makeShareImage()`; it's not expensive enough to
+                // warrant caching, and a stale cache would be worse than a
+                // 50ms re-render on tap.
+                if ShareCardModel.shouldShowShareButton(
+                    enabled: shareCardEnabled,
+                    streak: currentStreak,
+                    observation: observation
+                ),
+                   case .success = result,
+                   let shareImage = makeShareImage()
+                {
+                    ShareLink(
+                        item: shareImage,
+                        preview: SharePreview(
+                            "WakeProof streak",
+                            image: shareImage
+                        )
+                    ) {
+                        Text(ShareCardModel.shareButtonCopy)
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.6))
+                            .underline()
+                    }
                     .padding(.bottom, 40)
+                } else {
+                    // Explicit placeholder spacer so the "Start your day"
+                    // button lifts off the bottom edge when the Share row is
+                    // absent. Using a fixed 32pt spacer rather than a
+                    // conditional padding modifier so the layout offset is
+                    // identical shape with/without the ShareLink (simpler
+                    // to eyeball in the preview grid).
+                    Color.clear.frame(height: 32)
+                }
             }
         }
         .onAppear {
             Self.logger.info("MorningBriefingView appeared resultTag=\(Self.tag(result), privacy: .public)")
         }
+    }
+
+    /// Wave 5 H5: render the share card offscreen into a SwiftUI `Image` so
+    /// `ShareLink` can hand it to the system share sheet. Uses the
+    /// `ImageRenderer.uiImage` path (returns `UIImage?`) then rewraps the
+    /// result as a SwiftUI `Image` — this yields a raster image that encodes
+    /// to PNG on share, which is what IG Story / WhatsApp ingest cleanly.
+    ///
+    /// Returns nil when:
+    ///  - `ImageRenderer.uiImage` returned nil (iOS 17 occasional quirk when
+    ///    the underlying render context fails). In that case the caller's
+    ///    `guard let` hides the ShareLink rather than presenting a broken
+    ///    button — consistent with the "no placeholder, just hide" rule in
+    ///    the scope doc.
+    @MainActor
+    private func makeShareImage() -> Image? {
+        let card = ShareCardView(streak: currentStreak, observation: observation)
+        let renderer = ImageRenderer(content: card)
+        // scale=1 because the canvas is already at native (1080x1920) pixel
+        // resolution. Setting scale=2 would produce a 2160x3840 image which
+        // IG Story would downscale anyway — wasted bytes on the share hop.
+        renderer.scale = 1
+        guard let uiImage = renderer.uiImage else {
+            Self.logger.error("ShareCard render: ImageRenderer.uiImage returned nil")
+            return nil
+        }
+        return Image(uiImage: uiImage)
     }
 
     @ViewBuilder
@@ -201,6 +289,7 @@ struct MorningBriefingView: View {
             result: .success(dto),
             observation: "window light 30 minutes earlier than last Tuesday",
             commitmentNote: "Call Mom back",
+            currentStreak: 7,
             onDismiss: {}
         )
     } else {
@@ -212,7 +301,13 @@ struct MorningBriefingView: View {
 }
 
 #Preview("No session") {
-    MorningBriefingView(result: .noSession, observation: nil, commitmentNote: nil, onDismiss: {})
+    MorningBriefingView(
+        result: .noSession,
+        observation: nil,
+        commitmentNote: nil,
+        currentStreak: 0,
+        onDismiss: {}
+    )
 }
 
 #Preview("Transport failure") {
@@ -221,10 +316,17 @@ struct MorningBriefingView: View {
                          message: "Couldn't reach Claude tonight — your alarm still verified. Try tomorrow."),
         observation: nil,
         commitmentNote: nil,
+        currentStreak: 3,
         onDismiss: {}
     )
 }
 
 #Preview("Nil result (defensive)") {
-    MorningBriefingView(result: nil, observation: nil, commitmentNote: nil, onDismiss: {})
+    MorningBriefingView(
+        result: nil,
+        observation: nil,
+        commitmentNote: nil,
+        currentStreak: 0,
+        onDismiss: {}
+    )
 }
