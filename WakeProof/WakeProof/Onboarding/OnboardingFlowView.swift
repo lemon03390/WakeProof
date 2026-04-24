@@ -34,7 +34,7 @@ struct OnboardingFlowView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.wpChar900.ignoresSafeArea()
             VStack {
                 switch step {
                 case .welcome:
@@ -89,8 +89,8 @@ struct OnboardingFlowView: View {
                         BaselinePhotoView(onCaptured: persistBaseline)
                         if let saveError {
                             Text(saveError)
-                                .font(.callout)
-                                .foregroundStyle(.orange)
+                                .wpFont(.callout)
+                                .foregroundStyle(Color.wpAttempted)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal)
                         }
@@ -99,8 +99,8 @@ struct OnboardingFlowView: View {
                     DoneStep()
                 }
             }
-            .padding()
-            .foregroundStyle(.white)
+            .padding(WPSpacing.xl2)
+            .foregroundStyle(Color.wpCream50)
         }
     }
 
@@ -141,18 +141,20 @@ struct OnboardingFlowView: View {
 private struct WelcomeStep: View {
     let advance: () -> Void
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: WPSpacing.xl) {
             Spacer()
             Text("WakeProof")
-                .font(.system(size: 42, weight: .bold))
+                .wpFont(.display)
+                .foregroundStyle(LinearGradient.wpPrimary)
             Text("An alarm your future self can't cheat.")
-                .font(.title3)
-                .foregroundStyle(.white.opacity(0.8))
+                .wpFont(.body)
+                .foregroundStyle(Color.wpCream50.opacity(0.75))
                 .multilineTextAlignment(.center)
             Spacer()
             Text("You'll set a contract with yourself: tomorrow morning, you will be out of bed at your designated wake-location. The only way to silence the alarm is to prove it. Claude Opus 4.7 is the witness.")
+                .wpFont(.body)
+                .foregroundStyle(Color.wpCream50.opacity(0.75))
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.75))
             Button("Begin", action: advance)
                 .buttonStyle(.primaryWhite)
         }
@@ -178,23 +180,24 @@ private struct PermissionStep: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: WPSpacing.xl) {
             Spacer()
             Text(title)
-                .font(.system(size: 34, weight: .bold))
+                .wpFont(.title1)
+                .foregroundStyle(Color.wpCream50)
                 .multilineTextAlignment(.center)
             Text(message)
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.8))
+                .wpFont(.body)
+                .foregroundStyle(Color.wpCream50.opacity(0.75))
                 .multilineTextAlignment(.center)
             if let deniedNotice {
                 Text(deniedNotice)
-                    .font(.callout)
-                    .foregroundStyle(.orange)
+                    .wpFont(.callout)
+                    .foregroundStyle(Color.wpAttempted)
                     .multilineTextAlignment(.center)
             }
             Spacer()
-            VStack(spacing: 12) {
+            VStack(spacing: WPSpacing.sm) {
                 Button(action: tap) {
                     Text(isWorking ? "Working..." : action)
                 }
@@ -203,12 +206,12 @@ private struct PermissionStep: View {
 
                 if deniedNotice != nil, let url = URL(string: UIApplication.openSettingsURLString) {
                     Link("Open Settings", destination: url)
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(Color.wpCream50.opacity(0.85))
                 }
 
                 if let secondary, let secondaryHandler {
                     Button(secondary, action: secondaryHandler)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(Color.wpCream50.opacity(0.6))
                 }
             }
         }
@@ -259,12 +262,14 @@ private struct PermissionStep: View {
 
 private struct DoneStep: View {
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: WPSpacing.xl) {
             Text("You're set.")
-                .font(.system(size: 34, weight: .bold))
+                .wpFont(.title1)
+                .foregroundStyle(Color.wpCream50)
             Text("Tomorrow morning, meet yourself at your wake-location.")
+                .wpFont(.body)
+                .foregroundStyle(Color.wpCream50.opacity(0.75))
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.8))
         }
     }
 }
