@@ -294,6 +294,16 @@ final class VisionVerifier {
             }
         }
 
+        // Wave 5 H1 (§12.3-H1): persist Claude's optional observation onto the
+        // WakeAttempt row, but ONLY on VERIFIED. REJECTED/RETRY rows drop it —
+        // the verdict says "not awake yet" and layering an insight onto that
+        // row would produce contradictory UX. Writing before the switch below
+        // lets the same SwiftData save that the verdict update performs include
+        // the observation field — no extra save cycle.
+        if finalVerdict == .verified {
+            attempt.observation = result.observation
+        }
+
         switch finalVerdict {
         case .verified:
             await finish(attempt: attempt, context: context, verdict: .verified, reasoning: result.reasoning)

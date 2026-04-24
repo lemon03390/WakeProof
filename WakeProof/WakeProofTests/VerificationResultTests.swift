@@ -181,6 +181,65 @@ final class VerificationResultTests: XCTestCase {
         XCTAssertEqual(result.memoryUpdate?.historyNote, "just note")
     }
 
+    // MARK: - Wave 5 H1 observation field
+
+    /// H1: Claude may emit an optional `observation` string — a 30–60 char noticed
+    /// detail visible to the user on VERIFIED. This test locks the round-trip so a
+    /// future CodingKeys drift (e.g. someone renames the field to `notice`) surfaces
+    /// as a decode miss rather than silently shipping nil observations to the UI.
+    func testDecodesObservationField() throws {
+        let json = #"""
+        {
+          "same_location": true,
+          "person_upright": true,
+          "eyes_open": true,
+          "appears_alert": true,
+          "lighting_suggests_room_lit": true,
+          "confidence": 0.9,
+          "reasoning": "clear morning",
+          "verdict": "VERIFIED",
+          "observation": "fake 33-char observation string here."
+        }
+        """#
+        let result = try decode(json)
+        XCTAssertEqual(result.observation, "fake 33-char observation string here.",
+                       "observation field must round-trip byte-exact through the Codable boundary")
+    }
+
+    /// H1: explicit JSON null must decode to Swift nil — distinguishes "Claude \
+    /// emitted null" (sees the key but has nothing) from "Claude omitted the key" \
+    /// (pre-H1 response). Both collapse to nil on the Swift side but the decoder \
+    /// must not trip on either.
+    func testDecodesNullObservationAsNil() throws {
+        let json = #"""
+        {
+          "same_location": true,
+          "person_upright": true,
+          "eyes_open": true,
+          "appears_alert": true,
+          "lighting_suggests_room_lit": true,
+          "confidence": 0.9,
+          "reasoning": "x",
+          "verdict": "VERIFIED",
+          "observation": null
+        }
+        """#
+        let result = try decode(json)
+        XCTAssertNil(result.observation, "explicit null must decode as Swift nil")
+    }
+
+    /// H1: v1 / v2 / early-v3 responses have no `observation` key at all. Synthesised
+    /// Decodable conformance must `decodeIfPresent` so absent-key inputs decode to
+    /// nil rather than throwing `.keyNotFound`. Critical for backwards compatibility
+    /// during deploy — on-the-fly rollback to v2 shouldn't break the client.
+    func testDecodesAbsentObservationAsNil() throws {
+        let json = #"""
+        {"same_location":true,"person_upright":true,"eyes_open":true,"appears_alert":true,"lighting_suggests_room_lit":true,"confidence":0.9,"reasoning":"x","verdict":"VERIFIED"}
+        """#
+        let result = try decode(json)
+        XCTAssertNil(result.observation, "absent observation key must decode as nil — v2 / pre-H1 response compat")
+    }
+
     // MARK: - M3 throwing variant
 
     /// M3 (Wave 2.6): `fromClaudeMessageBodyDetailed` throws instead of

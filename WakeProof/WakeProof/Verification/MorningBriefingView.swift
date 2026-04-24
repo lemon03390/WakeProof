@@ -23,6 +23,15 @@ struct MorningBriefingView: View {
     /// received a finalize outcome yet (defensive — rarely visible because the
     /// cover isn't presented until the result is set).
     let result: BriefingResult?
+
+    /// Wave 5 H1 (§12.3-H1): Claude Opus 4.7's observation from this morning's
+    /// verification. Nil when (a) the verify was REJECTED / RETRY (observation
+    /// is only persisted on VERIFIED), (b) Claude emitted no observation on
+    /// this call, or (c) we're on a pre-H1 attempt row. Hidden entirely when
+    /// nil so the view doesn't grow a dead block — rendered below the main
+    /// content under a "Claude noticed" label to deliver HOOK_S4_2 /
+    /// HOOK_S7_5 variable-reward insight.
+    let observation: String?
     let onDismiss: () -> Void
 
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
@@ -40,6 +49,26 @@ struct MorningBriefingView: View {
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer()
                 content
+                // Wave 5 H1: optional observation block below the briefing content.
+                // Hidden when nil (most paths — REJECTED/RETRY never sets it, and
+                // Claude may omit it on a given VERIFIED). When present, labelled
+                // "Claude noticed" with the observation itself in italic, dimmer
+                // opacity so it reads as a secondary note rather than competing
+                // with the briefing's headline prose.
+                if let observation, !observation.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("Claude noticed")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.65))
+                        Text(observation)
+                            .font(.footnote)
+                            .italic()
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white.opacity(0.65))
+                            .padding(.horizontal, 28)
+                    }
+                    .padding(.top, 16)
+                }
                 #if DEBUG
                 // Diagnostic surface for demo prep: the reason code lets you
                 // tell at a glance whether the pipeline rendered real prose
@@ -140,7 +169,11 @@ struct MorningBriefingView: View {
         sourceSessionID: "sesn_preview",
         memoryUpdateApplied: false
     ) {
-        MorningBriefingView(result: .success(dto), onDismiss: {})
+        MorningBriefingView(
+            result: .success(dto),
+            observation: "window light 30 minutes earlier than last Tuesday",
+            onDismiss: {}
+        )
     } else {
         // Deliberately visible — if the preview text is ever emptied, the
         // missing view surfaces the typo rather than silently passing a nil
@@ -150,17 +183,18 @@ struct MorningBriefingView: View {
 }
 
 #Preview("No session") {
-    MorningBriefingView(result: .noSession, onDismiss: {})
+    MorningBriefingView(result: .noSession, observation: nil, onDismiss: {})
 }
 
 #Preview("Transport failure") {
     MorningBriefingView(
         result: .failure(reason: .fetchTransportFailed,
                          message: "Couldn't reach Claude tonight — your alarm still verified. Try tomorrow."),
+        observation: nil,
         onDismiss: {}
     )
 }
 
 #Preview("Nil result (defensive)") {
-    MorningBriefingView(result: nil, onDismiss: {})
+    MorningBriefingView(result: nil, observation: nil, onDismiss: {})
 }

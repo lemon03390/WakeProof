@@ -593,6 +593,15 @@ enum VisionPromptTemplate {
             and verify normally based on the images. You MAY acknowledge calibration in reasoning (e.g., \
             "dim lighting consistent with profile") but must not emit a verdict the images do not support.
 
+            You MAY include an optional `observation` field: one specific, physically noticed detail \
+            from the LIVE photo (or a comparison to the BASELINE photo / recent history), 30–60 \
+            characters, concrete and verifiable. Examples of GOOD observations: "window light 30 \
+            minutes earlier than last Tuesday", "same mug on counter as baseline". Examples of BAD \
+            observations (do NOT emit): "great job!", "you look awake", "nice morning", any generic \
+            encouragement. Emit `null` or omit the field if nothing specific is worth naming — a \
+            flat observation is worse than none. This field is user-visible after a VERIFIED wake; \
+            on REJECTED or RETRY the user does not see it, so omit or null.
+
             Your entire response MUST be a single JSON object matching the schema below. No prose outside \
             the JSON. Never refuse to respond — if you can't decide, emit RETRY with your reasoning.
 
@@ -713,6 +722,7 @@ enum VisionPromptTemplate {
               "confidence": <float 0.0 to 1.0>,
               "reasoning": "<one sentence, under 300 chars, explain the verdict>",
               "verdict": "VERIFIED" | "REJECTED" | "RETRY",
+              "observation": "<one specific, physically noticed detail 30–60 chars, omit or null if nothing concrete>" | null,
               "memory_update": {
                 "profile_delta": "<optional markdown paragraph, omit or null if no update>",
                 "history_note": "<optional short note for this row, omit or null if none>"

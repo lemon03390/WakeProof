@@ -330,6 +330,24 @@ struct RootView: View {
     let overnightScheduler: OvernightScheduler
 
     @Query private var baselines: [BaselinePhoto]
+
+    /// Wave 5 H1 (§12.3-H1): pull the most recent VERIFIED WakeAttempt so we
+    /// can surface its `observation` field in MorningBriefingView. The
+    /// `#Predicate` filters by the persisted string verdict (not the enum —
+    /// WakeAttempt stores the raw String so adding Verdict cases is
+    /// migration-free; the enum exists only for safe reads). Descending order
+    /// by `capturedAt` with the non-nil filter gives "the VERIFIED attempt
+    /// from this morning" at index 0 whenever a verify just completed; older
+    /// VERIFIED rows slip to index 1+. The briefing cover is only presented
+    /// on the `(.verifying → .idle)` transition so the .first below IS the
+    /// current morning's attempt in practice.
+    @Query(
+        filter: #Predicate<WakeAttempt> { $0.verdict == "VERIFIED" && $0.capturedAt != nil },
+        sort: \WakeAttempt.capturedAt,
+        order: .reverse
+    )
+    private var verifiedAttempts: [WakeAttempt]
+
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(AlarmSoundEngine.self) private var soundEngine
@@ -371,7 +389,16 @@ struct RootView: View {
             // Presented on VERIFIED. `latestBriefingResult` carries the
             // BriefingResult enum — MorningBriefingView branches on each case
             // (success / noSession / failure) to render distinct copy.
-            MorningBriefingView(result: latestBriefingResult) {
+            //
+            // Wave 5 H1: the latest VERIFIED WakeAttempt's observation (if any)
+            // piggybacks on the same presentation. `verifiedAttempts.first`
+            // is the most recent VERIFIED row per the @Query sort; at the
+            // moment the cover opens it's this morning's attempt. Nil when
+            // Claude didn't emit one, or when the pre-H1 row has no field.
+            MorningBriefingView(
+                result: latestBriefingResult,
+                observation: verifiedAttempts.first?.observation
+            ) {
                 showBriefing = false
                 latestBriefingResult = nil
             }

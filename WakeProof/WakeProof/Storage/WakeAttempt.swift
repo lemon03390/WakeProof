@@ -29,6 +29,15 @@ final class WakeAttempt {
     var triggeredWindowStart: Date?
     var triggeredWindowEnd: Date?
 
+    /// Wave 5 H1 (§12.3-H1): variable-reward observation emitted by Claude Opus
+    /// 4.7 in the same vision call as the verdict. Only populated when
+    /// finalVerdict == .verified — REJECTED/RETRY rows stay nil so the verdict
+    /// narrative ("not awake") doesn't conflict with a user-visible insight.
+    /// Rendered in MorningBriefingView under a "Claude noticed" label so
+    /// HOOK_S4_2 / HOOK_S7_5 (informational variable reward) lands post-wake.
+    /// Optional — so lightweight migration applies per the pattern above.
+    var observation: String?
+
     init(scheduledAt: Date) {
         self.scheduledAt = scheduledAt
         self.retryCount = 0

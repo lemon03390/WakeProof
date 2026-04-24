@@ -70,6 +70,18 @@ struct VerificationResult: Codable, Equatable {
     /// below gives it a default of `nil` at construction sites so existing
     /// Day 3 call sites (e.g. VisionVerifier tests) keep compiling.
     let memoryUpdate: MemoryUpdate?
+    /// Wave 5 H1 (§12.3-H1): optional variable-reward observation. Claude Opus 4.7
+    /// emits one specific, physically noticed detail (30–60 chars) from the LIVE
+    /// photo or a comparison to baseline / recent history. Rendered post-VERIFIED
+    /// in MorningBriefingView under a "Claude noticed" label to deliver the
+    /// HOOK_S4_2 / HOOK_S7_5 informational reward. Absent or null when Claude has
+    /// nothing concrete to call out (a flat observation is worse than none — see
+    /// v3 systemPrompt paragraph). Only persisted on WakeAttempt when
+    /// finalVerdict == .verified (REJECTED/RETRY rows drop it so the verdict
+    /// narrative stays consistent). Declared without `= nil` default so synthesized
+    /// Decodable conformance actually reads it from JSON; memberwise init below
+    /// gives it a `nil` default so pre-H1 call sites keep compiling.
+    let observation: String?
 
     /// Convenience forwarder so callers can write `result.mapped` without drilling
     /// through `verdict.mapped`. The mapping itself lives on the enum above.
@@ -85,12 +97,13 @@ struct VerificationResult: Codable, Equatable {
         case reasoning
         case spoofingRuledOut = "spoofing_ruled_out"
         case verdict
+        case observation
         case memoryUpdate = "memory_update"
     }
 
-    /// Explicit memberwise init so `memoryUpdate` can default to `nil` without
-    /// breaking the synthesized `Decodable` conformance (which `let = nil`
-    /// silently does — see comment on the property).
+    /// Explicit memberwise init so `memoryUpdate` and `observation` can default
+    /// to `nil` without breaking the synthesized `Decodable` conformance (which
+    /// `let = nil` silently does — see comment on the properties).
     init(
         sameLocation: Bool,
         personUpright: Bool,
@@ -101,6 +114,7 @@ struct VerificationResult: Codable, Equatable {
         reasoning: String,
         spoofingRuledOut: [String]?,
         verdict: Verdict,
+        observation: String? = nil,
         memoryUpdate: MemoryUpdate? = nil
     ) {
         self.sameLocation = sameLocation
@@ -112,6 +126,7 @@ struct VerificationResult: Codable, Equatable {
         self.reasoning = reasoning
         self.spoofingRuledOut = spoofingRuledOut
         self.verdict = verdict
+        self.observation = observation
         self.memoryUpdate = memoryUpdate
     }
 

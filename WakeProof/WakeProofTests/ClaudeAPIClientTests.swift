@@ -339,6 +339,33 @@ final class ClaudeAPIClientTests: XCTestCase {
         XCTAssertTrue(system.contains("memory_update"), "v3 system prompt must mention the optional memory_update output")
     }
 
+    /// Wave 5 H1 (§12.3-H1): the v3 system prompt must instruct Claude about the
+    /// optional `observation` output and its length constraint. Two-part grep so a
+    /// future edit that keeps the field name but drops the 30–60 bound (or vice
+    /// versa) still fails at least one assertion. String-grep is a cheap smoke
+    /// signal — the byte-exact SHA256 test below is the real pin.
+    func testV3SystemPromptMentionsObservation() {
+        let system = VisionPromptTemplate.v3.systemPrompt().lowercased()
+        XCTAssertTrue(system.contains("observation"),
+                      "v3 system prompt must mention the optional observation output")
+        XCTAssertTrue(system.contains("60"),
+                      "v3 system prompt must state the 30–60 character length constraint — if removed, Claude will free-form")
+    }
+
+    /// H1: the v3 user prompt's JSON schema block must list `observation` as a
+    /// named key so Claude knows the shape it's completing. Keyed off `"observation":`
+    /// rather than just `observation` so we assert it's part of the JSON shape
+    /// rather than leaking from elsewhere (e.g. a system prompt echo).
+    func testV3UserPromptSchemaIncludesObservation() {
+        let user = VisionPromptTemplate.v3.userPrompt(
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil,
+            memoryContext: nil
+        )
+        XCTAssertTrue(user.contains("\"observation\":"),
+                      "v3 user prompt JSON schema must include \"observation\" as a named field — otherwise Claude has no shape to return it in")
+    }
+
     func testV3UserPromptIncludesMemoryBlockWhenProvided() {
         let text = VisionPromptTemplate.v3.userPrompt(
             baselineLocation: "kitchen",
@@ -392,7 +419,7 @@ final class ClaudeAPIClientTests: XCTestCase {
     /// Additive to the string-grep tests (which stay as fast early-warning signals);
     /// this is the final verdict for "has the prompt actually changed."
     func testV3SystemPromptSHA256IsStable() {
-        let expectedV3SystemPromptSHA256 = "642d35a38d48be867629caf8c1761e5704e79db2874ff0229a75e6d8ca651d6a"
+        let expectedV3SystemPromptSHA256 = "0351feb8c1fcda2c33699067fcc4c0854dc9df3ec76ff8e7c9db53a7a12e448b"
         let prompt = VisionPromptTemplate.v3.systemPrompt()
         let data = Data(prompt.utf8)
         let hash = SHA256.hash(data: data)

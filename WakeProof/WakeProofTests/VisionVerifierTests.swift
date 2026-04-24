@@ -66,6 +66,10 @@ final class VisionVerifierTests: XCTestCase {
     /// overrides only the fields it actually cares about. Previously every test
     /// inlined the 9-argument constructor with near-identical values, obscuring
     /// intent.
+    ///
+    /// Wave 5 H1: `observation` added with nil default so existing test call
+    /// sites keep compiling. H1 tests pass a specific observation to assert
+    /// persist-on-VERIFIED / skip-on-REJECTED-and-RETRY behavior.
     private func makeResult(
         verdict: VerificationResult.Verdict,
         confidence: Double = 0.9,
@@ -74,7 +78,8 @@ final class VisionVerifierTests: XCTestCase {
         personUpright: Bool = true,
         eyesOpen: Bool = true,
         appearsAlert: Bool = true,
-        lightingSuggestsRoomLit: Bool = true
+        lightingSuggestsRoomLit: Bool = true,
+        observation: String? = nil
     ) -> VerificationResult {
         VerificationResult(
             sameLocation: sameLocation,
@@ -85,7 +90,8 @@ final class VisionVerifierTests: XCTestCase {
             confidence: confidence,
             reasoning: reasoning,
             spoofingRuledOut: nil,
-            verdict: verdict
+            verdict: verdict,
+            observation: observation
         )
     }
 
@@ -361,6 +367,85 @@ final class VisionVerifierTests: XCTestCase {
         XCTAssertEqual(spy.capturedInstructions.count, 2, "second Claude call must have fired")
         XCTAssertEqual(spy.capturedInstructions.last ?? nil, chosenInstruction,
                        "second call's instruction must match the instruction chosen at RETRY time — this is the load-bearing anti-spoof invariant")
+    }
+
+    // MARK: - Wave 5 H1: observation persistence on WakeAttempt
+
+    /// H1 (§12.3-H1): when Claude returns a VERIFIED verdict with an `observation`,
+    /// the verifier must copy it onto `attempt.observation` so the morning
+    /// briefing surface can read it. Load-bearing for the "Opus 4.7 does three
+    /// jobs in one call" positioning — a VERIFIED wake with no observation
+    /// wired through defeats the feature.
+    func testVerifiedVerdictPersistsObservationOnWakeAttempt() async {
+        let observation = "window light is brighter than baseline today"
+        let client = FakeClient(result: .success(makeResult(
+            verdict: .verified,
+            reasoning: "All good.",
+            observation: observation
+        )))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterVerifyingState()
+        let attempt = makeAttempt()
+
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(attempt.verdictEnum, .verified)
+        XCTAssertEqual(attempt.observation, observation,
+                       "VERIFIED attempt must carry Claude's observation onto the SwiftData row — this is the source for MorningBriefingView")
+    }
+
+    /// H1: REJECTED rows stay nil for observation. The verdict narrative is
+    /// "you're not awake yet" — layering a Claude insight onto that would
+    /// produce contradictory UX ("REJECTED, but nice window light!"). Locks
+    /// the behaviour so a refactor that blindly copies the field on every
+    /// verdict gets caught.
+    func testRejectedVerdictDoesNotPersistObservation() async {
+        let client = FakeClient(result: .success(makeResult(
+            verdict: .rejected,
+            confidence: 0.3,
+            reasoning: "Different location.",
+            sameLocation: false,
+            observation: "something Claude noticed"
+        )))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterVerifyingState()
+        let attempt = makeAttempt()
+
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+
+        XCTAssertEqual(attempt.verdictEnum, .rejected)
+        XCTAssertNil(attempt.observation,
+                     "REJECTED attempt must NOT record observation — would contradict the 'not awake' verdict")
+    }
+
+    /// H1: RETRY transitions to antiSpoofPrompt; the row stays RETRY and the
+    /// observation must stay nil. The user is about to re-capture; they
+    /// shouldn't see "Claude noticed" for a verdict they haven't yet
+    /// resolved. The second verify (next fire path) carries its own
+    /// observation if it lands as VERIFIED.
+    func testRetryVerdictDoesNotPersistObservation() async {
+        let client = FakeClient(result: .success(makeResult(
+            verdict: .retry,
+            confidence: 0.62,
+            reasoning: "Unclear posture.",
+            personUpright: false,
+            appearsAlert: false,
+            observation: "something"
+        )))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterVerifyingState()
+        let attempt = makeAttempt()
+
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+
+        // After first RETRY, attempt is persisted with verdict=RETRY (see
+        // testRetryVerdictTransitionsToAntiSpoofPrompt above), not REJECTED.
+        XCTAssertEqual(attempt.verdictEnum, .retry)
+        XCTAssertNil(attempt.observation,
+                     "RETRY attempt must NOT record observation — the user hasn't resolved verification yet")
     }
 
     // MARK: - Layer 2 memory integration
