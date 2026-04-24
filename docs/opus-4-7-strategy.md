@@ -34,6 +34,14 @@ The judging criterion scores "creative use of Opus 4.7" — not "use of any visi
 **Demo narrative:**
 > "We require high-resolution vision because 4.6-level resolution cannot distinguish 'eyes-open-but-drowsy' from 'eyes-open-alert'. 4.7 makes this mechanic possible."
 
+**Wave 5 extension — H1 Variable Insight (landed 2026-04-24, commit `14a758e`):**
+
+Layer 1's single vision call now returns FOUR things instead of two: `verdict`, `confidence`, `reasoning`, AND an optional `observation` — a 30–60-character specific, physically-verifiable noticed detail (e.g. *"window light 30 minutes earlier than last Tuesday"*, *"same mug on counter as baseline"*). Constraint: must reference something visible in the frame OR a comparison to baseline / recent history. Never generic comfort. Null or omitted when nothing concrete is worth naming.
+
+This is the "Opus 4.7 does three jobs in one call" proof point — vision (is this the same kitchen?) + reasoning (do those eyes look awake?) + **insight** (what specifically stands out about this morning?) — all in a single `POST /v1/messages`. A 4.6-era stack would stitch three narrower calls. Live smoke 2026-04-24 confirmed the schema round-trips cleanly (Claude correctly emits `null` on REJECTED, strings on VERIFIED).
+
+Source: `docs/self-sabotage-defense-analysis.md` §12.3-H1. Hooked citations: HOOK_S4_2 (variable reward as informational hunt), HOOK_S7_5 (unpredictable insight per session). Surfaced user-side on the success screen (MorningBriefingView) and serialised into the Wave 5 H5 share card.
+
 ---
 
 ### Layer 2 — Persistent user memory (cross-session personalization)

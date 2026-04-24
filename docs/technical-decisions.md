@@ -247,6 +247,37 @@ The demo video's Layer 2 frame no longer says "Claude uses its memory tool"; it 
 
 ---
 
+## Decision 9: H2 absorbs G6 — commitment note as personal artifact
+
+### Why this decision exists
+
+`docs/self-sabotage-defense-analysis.md` originally listed two separate before-ring defenses that both aim at the same psychology — raising the user's commitment cost close in time to the temptation event:
+- **M14 / G6 — Bedtime contract re-sign** (§3.2-M14): a nightly *"Your alarm is set for 6:30. Confirm? [Confirm] [Skip]"* notification.
+- **H2 — Pre-sleep commitment note + morning reveal** (§12.3-H2): an optional ≤60-char text field at alarm-set time ("What's the first thing tomorrow-you needs to do?"); reveal in large type on verified wake.
+
+Wave 5 plan (§12.2) ordered H2 before G6 and then discovered they're the same psychological move with different surface area. G6 ships a yes/no click. H2 ships a personal artefact the user wrote about themselves. **H2 dominates.**
+
+### What this locks
+
+- **G6 is retired, not deferred.** Wave 5 does NOT ship a separate bedtime confirmation screen. The §12.5 "items deferred" list names G6 as absorbed-into-H2, not post-hackathon.
+- **Any future "bedtime confirmation" proposal** must justify why the note-at-setup-time + morning-reveal mechanic is insufficient. The note is closer to the user's real intention ("call Mom back") than a generic timestamp confirmation; forcing both would feel redundant.
+- **If notifications-at-bedtime UX returns later** (e.g., a soft reminder *"you set your note 4 hours ago — still on?"*), it would be a NEW decision, scoped around engagement cadence, not a revival of G6's confirmation-click frame.
+
+### Implementation note (shipped 2026-04-24, commit `d048476`)
+
+- `WakeWindow.commitmentNote: String?` (UserDefaults codable, backwards-compatible with pre-H2 payloads via `decodeIfPresent`).
+- `WakeWindow.commitmentNoteMaxLength = 60` — single source of truth for the char limit; both the TextField truncation and the test invariant reference it.
+- UI: `TextField` + char counter in a new Form section on `AlarmSchedulerView`. Empty string (trimmed) persists as `nil`.
+- Reveal: 28pt semibold, centered, between "Good morning" and briefing content on `MorningBriefingView`. Observation (H1) renders below in smaller italic.
+
+### Rejected alternative
+
+| Alternative | Why rejected |
+|---|---|
+| Ship G6 AND H2 in parallel (two consent points) | Redundant; users interpret second confirmation as harassment. Note-as-artifact is stronger psychology on a single surface. |
+
+---
+
 ## Open Questions (resolve during build)
 
 - [ ] Does Vincent have an Apple Watch with recent sleep data to demo HealthKit integration? If no, drop sleep summary from MVP.

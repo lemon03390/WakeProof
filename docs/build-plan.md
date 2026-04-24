@@ -134,6 +134,33 @@ The previous "pick one of Option A/B/C" branching has been pre-empted. Day 2's r
 
 ---
 
+### Wave 5 — Apr 24–25 (Thu–Fri HKT) — Hooked-derived engagement + final defense pass
+
+Ran concurrent with the Day 4 Layer 2/3/4 work, scoped + tracked via `docs/self-sabotage-defense-analysis.md` §12. 8 commits (`14a758e` → `e67fda7`, Wave 5 items + Stage 8 review fixes). All 7 items in §12.2 processing order shipped; tests 366/0 at end of Stage 8.
+
+**Why this wave exists:** §§1–11 of the self-sabotage doc framed WakeProof purely through defense (remove escape hatches). Hooked supplies the dual — build the *pull* so evening-self wants the contract, not just tolerates it. A contract the user dreads is brittle; one they look forward to is a habit.
+
+**What shipped:**
+
+| # | Item | Commit | Substance |
+|---|------|--------|-----------|
+| 1 | H1 — Variable Insight | `14a758e` | Opus 4.7 vision call now returns an optional `observation` string (30–60 char, specific). Layer 1 extension — see `docs/opus-4-7-strategy.md`. |
+| 2 | H2 — Commitment note + reveal | `d048476` | Optional ≤60-char pre-sleep note; revealed in large type on MorningBriefingView. Absorbs G6 — see `docs/technical-decisions.md` Decision 9. |
+| 3 | G3 — Chained backups | `b7645f5` | Backup notifications at +0/+90/+180s with distinct body copy. Hardens force-quit narrative. |
+| 4 | H3 — Streak + calendar | `5c91a9f` | `StreakService` derived from WakeAttempt rows; badge + month grid. No new @Model. |
+| 5 | H4 — Investment dashboard | `e7c301d` | "Your commitment" surface — baseline age, verified wakes, Opus insights count, framing line. Pure SwiftData query. |
+| 6 | H5 — Share card | `65b01ea` | 1080×1920 `ImageRenderer` card with streak + observation, `ShareLink` export. Opt-in via settings toggle. |
+| 7 | G1 — Disable gating | `c9ab7b3` | New `.disableChallenge` phase. Toggling alarm OFF post-grace requires the same Claude-verified photo as morning dismissal. 24h grace for new users + DEBUG bypass for demo recording. |
+| 8 | Stage 8 review fixes | `e67fda7` | 7 findings from parallel code-reviewer + silent-failure-hunter (2 CRITICAL + 3 IMPORTANT + 2 MEDIUM) — all addressed. Round 2 sanity pass: 0 regressions. |
+
+**Scoped out in Wave 5 (§12.5):** G6 absorbed into H2; G7 (memory integrity HMAC), G10 (Live Activity), G4 (full-screen blocker), G8 (uninstall friction) — post-hackathon.
+
+**Demo value:** Layer 1's H1 observation + the H2 commitment reveal are now the emotional climax of the morning flow. G1 is the feature a reviewer will remember ("can you just disable it? — the app asks you to prove you're awake to stop the proof requirement"). H3/H4 surface the invisible switching cost that makes H1/H2/H5 load-bearing.
+
+**Tests:** 366 passing / 0 failing at end of Wave 5 + Stage 8 (baseline was 296 at wave start — Δ+70 net).
+
+---
+
 ### Day 5 — Apr 26 (Sun HKT) — Demo & Submission
 **Effective hours: ~14h, hard deadline at 8:00 AM Apr 27 HKT**
 
