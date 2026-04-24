@@ -257,40 +257,49 @@ struct AlarmSchedulerView: View {
                         }
                     }
 
-                    // MARK: — Streak navigation (calendar + investment dashboard)
-                    // Wave 5 H3: secondary surfaces that read (not write) state.
-                    // Rendered unconditionally so the user discovers the calendar
-                    // before their first fire; an empty grid with all gray days
-                    // is still an accurate reflection of state.
-                    WPSection("Streak") {
-                        WPCard(padding: WPSpacing.md) {
-                            VStack(spacing: 0) {
-                                NavigationLink {
-                                    StreakCalendarView(attempts: wakeAttempts)
-                                } label: {
-                                    HStack {
-                                        Text("View streak calendar").wpFont(.body)
-                                        Spacer()
-                                        Image(systemName: "chevron.right")
-                                            .wpFont(.footnote)
-                                            .foregroundStyle(Color.wpChar500)
-                                    }
-                                }
-
-                                Divider().padding(.vertical, WPSpacing.xs2)
-
-                                NavigationLink {
-                                    InvestmentDashboardView()
-                                } label: {
-                                    HStack {
-                                        Text("Your commitment").wpFont(.body)
-                                        Spacer()
-                                        Image(systemName: "chevron.right")
+                    // MARK: — Your contract (calendar + investment dashboard)
+                    // Wave 5 H3 + H4: secondary surfaces that READ state. Promoted
+                    // from buried Form list-rows to side-by-side WPCards so the
+                    // "Your commitment" (H4 dashboard) is a first-class entry —
+                    // the user sees baseline-age / verified-mornings / insights
+                    // counts within a tap. Section title "Your contract" frames
+                    // both cards as artifacts of the user's signed wake-up
+                    // contract rather than gamification stats.
+                    WPSection("Your contract") {
+                        HStack(spacing: WPSpacing.md) {
+                            NavigationLink {
+                                InvestmentDashboardView()
+                            } label: {
+                                WPCard(padding: WPSpacing.md) {
+                                    VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+                                        Image(systemName: "book.closed")
+                                            .wpFont(.title3)
+                                            .foregroundStyle(Color.wpCoral)
+                                        Text("Your commitment").wpFont(.headline)
+                                        Text("Baseline age, mornings, insights")
                                             .wpFont(.footnote)
                                             .foregroundStyle(Color.wpChar500)
                                     }
                                 }
                             }
+                            .buttonStyle(.plain)
+
+                            NavigationLink {
+                                StreakCalendarView(attempts: wakeAttempts)
+                            } label: {
+                                WPCard(padding: WPSpacing.md) {
+                                    VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+                                        Image(systemName: "calendar")
+                                            .wpFont(.title3)
+                                            .foregroundStyle(Color.wpVerified)
+                                        Text("Streak calendar").wpFont(.headline)
+                                        Text("Every verified morning")
+                                            .wpFont(.footnote)
+                                            .foregroundStyle(Color.wpChar500)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
