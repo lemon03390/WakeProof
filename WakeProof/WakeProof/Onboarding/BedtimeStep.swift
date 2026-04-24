@@ -18,22 +18,36 @@ struct BedtimeStep: View {
     /// sees an inline warning instead of advancing past a silent persistence failure.
     /// Cleared on each tap of Save & continue — a successful retry dismisses it.
     @State private var saveFailureMessage: String? = nil
+    /// Set to true when save succeeds — shows the contract-active card for ~2s
+    /// before handing off to the next onboarding step.
+    @State private var contractConfirmed: Bool = false
 
     var body: some View {
-        VStack(spacing: 24) {
+        if contractConfirmed {
+            contractConfirmationCard
+        } else {
+            bedtimePickerContent
+        }
+    }
+
+    // MARK: - Bedtime picker
+
+    private var bedtimePickerContent: some View {
+        VStack(spacing: WPSpacing.xl) {
             Spacer()
             Text("When do you sleep?")
-                .font(.system(size: 34, weight: .bold))
+                .wpFont(.title1)
+                .foregroundStyle(Color.wpCream50)
                 .multilineTextAlignment(.center)
             Text("Claude will prepare your morning briefing overnight — analyzing sleep patterns and adjusting for what it has learned about your wake-ups. Skip if you'd rather not.")
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.8))
+                .wpFont(.body)
+                .foregroundStyle(Color.wpCream50.opacity(0.75))
                 .multilineTextAlignment(.center)
             Spacer()
 
             Toggle(isOn: $isEnabled) { Text("Turn on overnight briefings") }
-                .foregroundStyle(.white)
-                .tint(.white)
+                .foregroundStyle(Color.wpCream50)
+                .tint(Color.wpCream50)
 
             if isEnabled {
                 DatePicker(
@@ -50,27 +64,31 @@ struct BedtimeStep: View {
                     ),
                     displayedComponents: .hourAndMinute
                 )
-                .foregroundStyle(.white)
-                .tint(.white)
+                .foregroundStyle(Color.wpCream50)
+                .tint(Color.wpCream50)
             }
 
             if let saveFailureMessage {
                 Text(saveFailureMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.yellow)
+                    .wpFont(.footnote)
+                    .foregroundStyle(Color.wpAttempted)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
             }
 
-            VStack(spacing: 12) {
+            VStack(spacing: WPSpacing.sm) {
                 Button("Save & continue") {
+                    saveFailureMessage = nil
                     settings.isEnabled = isEnabled
                     // M5: act on the Bool. If save fails (encode error / defaults
                     // write rejected), surface an inline warning rather than
                     // letting the user proceed thinking bedtime was persisted.
                     if settings.save() {
-                        saveFailureMessage = nil
-                        onAdvance()
+                        contractConfirmed = true
+                        Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            onAdvance()
+                        }
                     } else {
                         saveFailureMessage = "Couldn't save bedtime — try once more."
                     }
@@ -78,8 +96,39 @@ struct BedtimeStep: View {
                 .buttonStyle(.primaryWhite)
 
                 Button("Skip — use default 23:00", action: onAdvance)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(Color.wpCream50.opacity(0.6))
             }
         }
+    }
+
+    // MARK: - Contract-active confirmation
+
+    private var contractConfirmationCard: some View {
+        VStack(spacing: WPSpacing.xl) {
+            Spacer()
+            WPCard(padding: WPSpacing.xl) {
+                VStack(spacing: WPSpacing.md) {
+                    Text("Your contract is active — tomorrow at \(formattedBedtime), Claude will be waiting.")
+                        .wpFont(.body)
+                        .foregroundStyle(Color.wpCream50.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .environment(\.colorScheme, .dark)
+            Spacer()
+        }
+    }
+
+    /// Formats the saved bedtime hour/minute as a locale-appropriate time string.
+    private var formattedBedtime: String {
+        guard let date = Calendar.current.date(
+            from: DateComponents(hour: settings.hour, minute: settings.minute)
+        ) else {
+            return "\(settings.hour):\(String(format: "%02d", settings.minute))"
+        }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date)
     }
 }
