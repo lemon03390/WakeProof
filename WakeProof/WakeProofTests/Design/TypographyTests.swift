@@ -18,4 +18,13 @@ final class TypographyTests: XCTestCase {
             _ = role.font  // just verify property access doesn't trap
         }
     }
+
+    /// Catches "added a WPFont case but forgot to add it to the
+    /// testAllRolesResolveToFont roles array" — the only real failure mode
+    /// the first test can't cover on its own. Uses CaseIterable so the
+    /// check stays in sync with the enum without a manually maintained list.
+    func testAllRolesCoveredByFontSwitch() {
+        XCTAssertEqual(WPFont.allCases.count, 12,
+            "WPFont has \(WPFont.allCases.count) cases — update testAllRolesResolveToFont roles array and this test's expected count together when adding or removing a role.")
+    }
 }

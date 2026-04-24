@@ -14,7 +14,11 @@
 
 import SwiftUI
 
-enum WPFont {
+// Access pattern: WPFont cases are accessed as instances — `WPFont.body.font`
+// or the `.wpFont(.body)` view modifier. Contrast WPSpacing, which exposes
+// static-let constants (WPSpacing.xl) because scalar values have no behavior
+// to switch on. Inconsistency is deliberate — follow each file's pattern.
+enum WPFont: CaseIterable {
     case heroXL   // 88pt rounded — AlarmRingingView time
     case hero     // 64pt rounded — MorningBriefing H1
     case display  // 42pt rounded — Welcome title, large streak digit
@@ -26,7 +30,7 @@ enum WPFont {
     case callout  // 16pt
     case subhead  // 15pt
     case footnote // 13pt
-    case caption  // 12pt uppercase tracking
+    case caption  // 12pt medium — caller adds .textCase(.uppercase) + .tracking(1.5) if the caps-role rendering is needed. The Font itself carries only size/weight so non-caps caption uses (e.g. metadata rows) are free to apply their own casing.
 
     var font: Font {
         switch self {
