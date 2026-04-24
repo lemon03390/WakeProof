@@ -50,6 +50,11 @@ final class ComponentSmokeTests: XCTestCase {
     /// Cross-check: the new shouldRender static must agree with the shipped
     /// StreakBadgeView.shouldRender for every test case. Phase 6 will delete
     /// StreakBadgeView once call sites migrate; until then both must agree.
+    ///
+    /// NOTE: This validates only the `shouldRender(...)` static function.
+    /// Render-branch parity (the body's 3-way ladder: active → dormant →
+    /// nothing) is not covered here; visual inspection via #Preview and
+    /// Phase 3 UAT serve as that gate.
     func testShouldRender_agreesWithShippedStreakBadgeView() {
         let cases: [(Int, Int)] = [
             (0, 0), (1, 1), (3, 5), (0, 5), (-1, -1),

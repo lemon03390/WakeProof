@@ -32,19 +32,32 @@ struct WPStreakBadge: View {
         currentStreak > 0 || bestStreak > 0
     }
 
+    /// Three-way render ladder mirrors the shipped StreakBadgeView.body
+    /// exactly:
+    ///   - currentStreak > 0          → active capsule + (optional) "Best" line
+    ///   - currentStreak == 0, best > 0 → dormant "Streak reset" capsule (no "Best" line)
+    ///   - both zero (or negative)    → render nothing (defensive — shouldRender
+    ///     guards the call site, but the view is also safe if called directly)
     var body: some View {
-        HStack(spacing: WPSpacing.sm) {
-            if currentStreak > 0 {
+        if currentStreak > 0 {
+            HStack(spacing: WPSpacing.sm) {
                 activeBadge
-            } else {
-                dormantBadge
+                if bestStreak > currentStreak {
+                    // Active state only: "Best: N days" line. Shipped
+                    // StreakBadgeView deliberately suppresses this in the
+                    // dormant state so the "Streak reset" message reads
+                    // clean — keeping that behavior here.
+                    Text("Best: \(bestStreak) day\(bestStreak == 1 ? "" : "s")")
+                        .wpFont(.footnote)
+                        .foregroundStyle(Color.wpChar500)
+                }
             }
-            if bestStreak > currentStreak {
-                Text("Best: \(bestStreak) day\(bestStreak == 1 ? "" : "s")")
-                    .wpFont(.footnote)
-                    .foregroundStyle(Color.wpChar500)
-            }
+        } else if bestStreak > 0 {
+            dormantBadge
         }
+        // (0, 0) or negatives: render nothing. shouldRender returns false
+        // for these inputs, so the caller's guard hides the section entirely
+        // — but the body stays safe if WPStreakBadge is called directly.
     }
 
     private var activeBadge: some View {
