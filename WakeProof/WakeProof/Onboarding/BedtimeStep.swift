@@ -14,6 +14,10 @@ struct BedtimeStep: View {
 
     @State private var settings: BedtimeSettings = BedtimeSettings.load()
     @State private var isEnabled: Bool = BedtimeSettings.load().isEnabled
+    /// M5 (Wave 2.6): set when `BedtimeSettings.save` returns false, so the user
+    /// sees an inline warning instead of advancing past a silent persistence failure.
+    /// Cleared on each tap of Save & continue — a successful retry dismisses it.
+    @State private var saveFailureMessage: String? = nil
 
     var body: some View {
         VStack(spacing: 24) {
@@ -50,11 +54,26 @@ struct BedtimeStep: View {
                 .tint(.white)
             }
 
+            if let saveFailureMessage {
+                Text(saveFailureMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.yellow)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+
             VStack(spacing: 12) {
                 Button("Save & continue") {
                     settings.isEnabled = isEnabled
-                    settings.save()
-                    onAdvance()
+                    // M5: act on the Bool. If save fails (encode error / defaults
+                    // write rejected), surface an inline warning rather than
+                    // letting the user proceed thinking bedtime was persisted.
+                    if settings.save() {
+                        saveFailureMessage = nil
+                        onAdvance()
+                    } else {
+                        saveFailureMessage = "Couldn't save bedtime — try once more."
+                    }
                 }
                 .buttonStyle(.primaryWhite)
 

@@ -19,20 +19,38 @@ struct BedtimeSettings: Codable, Equatable {
     private static let key = "com.wakeproof.alarm.bedtimeSettings"
     private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "bedtime")
 
+    /// M4 (Wave 2.6): split the guard into a do/catch so a decode failure emits
+    /// a `logger.error` (visible in sysdiagnose) instead of silently reverting to
+    /// defaults. Before, a user whose UserDefaults payload drifted shape (e.g.
+    /// app upgrade with a schema change, disk corruption) would see their
+    /// configured bedtime silently reset to 23:00 with no trace — making the
+    /// overnight agent start at the wrong time and no way to diagnose why.
+    /// Mirrors sibling `WakeWindow.load` exactly.
     static func load(from defaults: UserDefaults = .standard) -> BedtimeSettings {
-        guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(BedtimeSettings.self, from: data) else {
+        guard let data = defaults.data(forKey: key) else { return .defaultSettings }
+        do {
+            return try JSONDecoder().decode(BedtimeSettings.self, from: data)
+        } catch {
+            logger.error("BedtimeSettings decode failed: \(error.localizedDescription, privacy: .public) — reverting to defaults")
             return .defaultSettings
         }
-        return decoded
     }
 
-    func save(to defaults: UserDefaults = .standard) {
-        if let data = try? JSONEncoder().encode(self) {
+    /// M5 (Wave 2.6): returns `true` on success, `false` on encode failure.
+    /// Before, `save()` returned Void and callers (notably `BedtimeStep`'s
+    /// "Save & continue" button) had no signal that persistence failed —
+    /// the user would tap through onboarding, think bedtime was saved, and
+    /// find the overnight briefing never ran. Mirrors sibling `WakeWindow.save`.
+    @discardableResult
+    func save(to defaults: UserDefaults = .standard) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(self)
             defaults.set(data, forKey: Self.key)
             Self.logger.info("BedtimeSettings saved: \(self.hour, privacy: .public):\(self.minute, privacy: .public) enabled=\(self.isEnabled, privacy: .public)")
-        } else {
-            Self.logger.error("BedtimeSettings save failed: JSON encode returned nil (should be unreachable for Codable struct)")
+            return true
+        } catch {
+            Self.logger.error("BedtimeSettings save failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

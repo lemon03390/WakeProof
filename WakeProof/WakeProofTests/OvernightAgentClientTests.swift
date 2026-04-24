@@ -317,7 +317,15 @@ final class OvernightAgentClientTests: XCTestCase {
         XCTAssertTrue(get.path.hasSuffix("/v1/sessions/sesn_42/events"), "got path \(get.path)")
     }
 
-    func testFetchLatestAgentMessageReturnsNilWhenNoAgentMessages() async throws {
+    /// M7 (Wave 2.6): renamed from `...ReturnsNilWhenNoAgentMessages` because
+    /// the method no longer returns `String?` — it throws `noAgentResponse`.
+    /// Before, the caller got nil → "" → `parseAgentReply` threw
+    /// `emptyBriefingResponse`, which finalizeBriefing mapped to
+    /// `.agentEmptyResponse` — user-facing outcome was right, but the
+    /// underlying signal ("no agent message found at all") was indistinct
+    /// from "agent emitted an empty BRIEFING: marker". Throwing explicitly
+    /// preserves the distinction in logs / metrics.
+    func testFetchLatestAgentMessageThrowsWhenNoAgentMessages() async throws {
         suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
         suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
         StubProtocol.handler = { request in
@@ -331,8 +339,46 @@ final class OvernightAgentClientTests: XCTestCase {
             return (response, body)
         }
         let client = makeClient()
-        let text = try await client.fetchLatestAgentMessage(sessionID: "sesn_42")
-        XCTAssertNil(text)
+        do {
+            _ = try await client.fetchLatestAgentMessage(sessionID: "sesn_42")
+            XCTFail("expected .noAgentResponse")
+        } catch OvernightAgentError.noAgentResponse {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// M7 (Wave 2.6): agent.message exists, but its content array has only
+    /// tool_use blocks and no text block. Previously the nil-return path ran
+    /// for this case too; the new code throws `agentMessageMissingTextBlock`
+    /// so the caller can tell "agent is mid-tool-call" apart from "agent
+    /// hadn't produced anything". Both collapse to `.agentEmptyResponse` in
+    /// the scheduler's UI-copy classification today, but the distinction
+    /// stays visible in `errorDescription` and logs for post-mortem.
+    func testFetchLatestAgentMessageThrowsWhenAgentEmitsOnlyToolUse() async throws {
+        suiteDefaults.set("agent_preset", forKey: OvernightAgentClient.agentIDKey)
+        suiteDefaults.set("env_preset", forKey: OvernightAgentClient.environmentIDKey)
+        StubProtocol.handler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let payload: [String: Any] = [
+                "data": [
+                    // Agent IS producing events — just not a text block yet.
+                    ["type": "agent.message", "content": [["type": "tool_use", "id": "x", "name": "python", "input": ["code": "1+1"]]]]
+                ]
+            ]
+            let body = try! JSONSerialization.data(withJSONObject: payload)
+            return (response, body)
+        }
+        let client = makeClient()
+        do {
+            _ = try await client.fetchLatestAgentMessage(sessionID: "sesn_42")
+            XCTFail("expected .agentMessageMissingTextBlock")
+        } catch OvernightAgentError.agentMessageMissingTextBlock {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
     }
 
     // MARK: - terminateSession

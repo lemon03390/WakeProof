@@ -121,10 +121,39 @@ struct VerificationResult: Codable, Equatable {
     ///   2. A fenced block: ```json\n{ ... }\n```
     ///   3. Prose + a JSON object embedded in it.
     /// Returns `nil` if no `{ ... }` balanced substring parses as `VerificationResult`.
+    ///
+    /// Convenience wrapper retained for test call sites that prefer a
+    /// nil-returning shape. Production code inside `ClaudeAPIClient` routes
+    /// through `fromClaudeMessageBodyDetailed(_:)` so a DecodingError surfaces
+    /// the specific field / context that failed decode (M3 fix).
     static func fromClaudeMessageBody(_ body: String) -> VerificationResult? {
-        let candidate = extractJSONObject(from: body) ?? body
-        guard let data = candidate.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(VerificationResult.self, from: data)
+        try? fromClaudeMessageBodyDetailed(body)
+    }
+
+    /// M3 (Wave 2.6): throwing variant. When Claude's response shape drifts
+    /// (e.g. Opus renames `verdict` or omits `confidence` on a model bump),
+    /// the caller gets a `DecodingError` with `.keyNotFound` / `.typeMismatch`
+    /// identifying WHICH field failed, instead of a bare nil. `ClaudeAPIClient`
+    /// catches this and surfaces the specific field name in logs + wraps it as
+    /// `ClaudeAPIError.decodingFailed(underlying:)` for the user-facing path.
+    ///
+    /// Error cases:
+    ///   - `VerificationParseError.noJSONObjectFound` — neither pure JSON nor
+    ///     a balanced `{...}` substring was found; the body was pure prose
+    ///     (e.g. Claude emitted "I can't comply" instead of a verdict).
+    ///   - `VerificationParseError.invalidUTF8` — the extracted candidate
+    ///     couldn't be encoded as UTF-8 (unreachable in practice because Swift
+    ///     Strings are UTF-8; kept as defense-in-depth for surface stability).
+    ///   - `DecodingError` — propagated verbatim from `JSONDecoder`. Callers
+    ///     should log `.localizedDescription` plus the redacted body snippet.
+    static func fromClaudeMessageBodyDetailed(_ body: String) throws -> VerificationResult {
+        guard let candidate = extractJSONObject(from: body) else {
+            throw VerificationParseError.noJSONObjectFound
+        }
+        guard let data = candidate.data(using: .utf8) else {
+            throw VerificationParseError.invalidUTF8
+        }
+        return try JSONDecoder().decode(VerificationResult.self, from: data)
     }
 
     /// Find the first balanced `{ ... }` substring. Handles nested braces but not
@@ -157,5 +186,26 @@ struct VerificationResult: Codable, Equatable {
             i = text.index(after: i)
         }
         return nil
+    }
+}
+
+/// M3 (Wave 2.6): distinguishes "no JSON at all" and "non-UTF8" from a
+/// `DecodingError` thrown by `JSONDecoder` itself. `ClaudeAPIClient` switches
+/// on the thrown error: `DecodingError` carries `.keyNotFound(_, context)` /
+/// `.typeMismatch(_, context)` with a `codingPath` pointing at the exact
+/// field (e.g. `CodingKeys.verdict`), which we surface in log lines so a
+/// field triage of a Claude shape drift can tell at a glance whether the
+/// model renamed `verdict`, changed `confidence`'s type, etc.
+enum VerificationParseError: LocalizedError {
+    case noJSONObjectFound
+    case invalidUTF8
+
+    var errorDescription: String? {
+        switch self {
+        case .noJSONObjectFound:
+            return "Claude's response contained no JSON object to parse."
+        case .invalidUTF8:
+            return "Claude's response wasn't valid UTF-8."
+        }
     }
 }

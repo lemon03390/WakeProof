@@ -295,24 +295,93 @@ struct ClaudeAPIClient: ClaudeVisionClient {
             throw ClaudeAPIError.httpError(status: http.statusCode, snippet: snippet)
         }
 
-        let text: String
+        // M2 (Wave 2.6): for response bodies ≥4 KB, detach decode +
+        // VerificationResult parsing to a userInitiated background task so the
+        // JSON decode and brace-scan don't block the MainActor mid-animation
+        // (same reasoning as the request-build detach at lines 169-182 above).
+        // Small bodies (<4 KB — typical Anthropic success response is ~2.5 KB
+        // for our prompt) stay on the calling path because detach overhead
+        // exceeds the decode cost at that size.
+        let result: VerificationResult
         do {
-            text = try extractTextBlock(from: data)
+            result = try await Self.decodeVerificationBody(data)
+        } catch let decodingError as DecodingError {
+            // M3: DecodingError carries a `codingPath` pointing at the exact field
+            // that failed (e.g. `[CodingKeys.verdict]`). Surface it in logs so a
+            // model-shape drift ("verdict" renamed to "decision") is diagnosable
+            // from field triage without re-running. Body snippet stays `.private`
+            // because it can echo request content (base64 fragments, memory context).
+            let fieldPath = Self.describeDecodingErrorField(decodingError)
+            logger.error("Claude response decode failed at field \(fieldPath, privacy: .public): \(decodingError.localizedDescription, privacy: .public) body-snippet=\(Self.snippet(from: data), privacy: .private)")
+            throw ClaudeAPIError.decodingFailed(underlying: decodingError)
         } catch {
-            logger.error("Claude response body didn't match expected shape: \(error.localizedDescription, privacy: .public)")
+            // Covers VerificationParseError (no JSON found / invalid UTF-8) and
+            // the extractTextBlock `emptyResponse` path. Same log shape but no
+            // DecodingError field to name.
+            logger.error("Claude response parse failed: \(error.localizedDescription, privacy: .public) body-snippet=\(Self.snippet(from: data), privacy: .private)")
             throw ClaudeAPIError.decodingFailed(underlying: error)
-        }
-
-        guard let result = VerificationResult.fromClaudeMessageBody(text) else {
-            // R4 fix: body fragments can echo request content (base64 images, memory
-            // context text) and session-specific phrasing from Claude — both routes
-            // to PII if a sysdiagnose submission ships with these lines unredacted.
-            logger.error("VerificationResult parser returned nil on body: \(text.prefix(300), privacy: .private)")
-            throw ClaudeAPIError.decodingFailed(underlying: ClaudeAPIError.emptyResponse)
         }
 
         logger.info("Claude verdict \(result.verdict.rawValue, privacy: .public) confidence=\(result.confidence, privacy: .public) in \(elapsed, privacy: .public)s")
         return result
+    }
+
+    /// M2 (Wave 2.6): helper that decodes the Messages-API body into a
+    /// `VerificationResult`. For ≥4 KB payloads the work runs on a detached
+    /// task so the MainActor doesn't stall on a deep brace-scan of an error
+    /// response. For small payloads the work stays on the caller's executor
+    /// because detach / actor-hop costs exceed the decode work at that size.
+    ///
+    /// Broken out as a nonisolated static so the detached Task doesn't pull
+    /// actor context (we don't touch instance state here). The decode step uses
+    /// `VerificationResult.fromClaudeMessageBodyDetailed` so a shape drift in
+    /// Claude's output throws a `DecodingError` the caller can describe.
+    static func decodeVerificationBody(_ data: Data) async throws -> VerificationResult {
+        // 4 KB split chosen from the request-build detach comment (R4 fix): at
+        // that size, JSONDecoder + brace-scan cost on A15-class chips is in
+        // the 5-10 ms range, below the ~16 ms frame budget. Below 4 KB, detach
+        // overhead (task alloc + hop) costs more than the decode itself.
+        if data.count < 4096 {
+            let text = try extractTextBlock(from: data)
+            return try VerificationResult.fromClaudeMessageBodyDetailed(text)
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            let text = try extractTextBlock(from: data)
+            return try VerificationResult.fromClaudeMessageBodyDetailed(text)
+        }.value
+    }
+
+    /// M3 (Wave 2.6): render a short field-path string from a DecodingError for
+    /// the `.error` log line. Uses the coding-keys `stringValue` (which maps to
+    /// the JSON field name via the custom CodingKeys enum) so the log says
+    /// "verdict" / "confidence" / "memory_update.profile_delta" rather than
+    /// Swift property names.
+    private static func describeDecodingErrorField(_ error: DecodingError) -> String {
+        let context: DecodingError.Context
+        switch error {
+        case .typeMismatch(_, let ctx),
+             .valueNotFound(_, let ctx),
+             .keyNotFound(_, let ctx),
+             .dataCorrupted(let ctx):
+            context = ctx
+        @unknown default:
+            return "unknown"
+        }
+        let path = context.codingPath
+            .map { $0.stringValue.isEmpty ? "[\($0.intValue ?? -1)]" : $0.stringValue }
+            .joined(separator: ".")
+        if case .keyNotFound(let key, _) = error {
+            // `keyNotFound`'s codingPath points at the PARENT — append the missing key.
+            return path.isEmpty ? key.stringValue : "\(path).\(key.stringValue)"
+        }
+        return path.isEmpty ? "<root>" : path
+    }
+
+    /// Small helper so the 200-char body-snippet construction doesn't repeat in
+    /// every catch branch. `.private` marking still needs to happen at the call
+    /// site (Logger's privacy is per-interpolation, not per-value).
+    private static func snippet(from data: Data) -> String {
+        String(data: data.prefix(200), encoding: .utf8) ?? "<non-utf8>"
     }
 
     /// R4 fix: moved to a nonisolated static so `Task.detached` can call it without
@@ -435,7 +504,9 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     #endif
 
     /// Extract `response["content"][0]["text"]` — the only shape we act on today.
-    private func extractTextBlock(from data: Data) throws -> String {
+    /// M2 (Wave 2.6): converted to `nonisolated static` so `decodeVerificationBody`
+    /// can call it from a detached Task without pulling actor context.
+    private static func extractTextBlock(from data: Data) throws -> String {
         struct Body: Decodable {
             struct Block: Decodable { let type: String; let text: String? }
             let content: [Block]?

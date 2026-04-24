@@ -20,6 +20,12 @@ The token is intentionally read from env — never commit it to the repo.
 A known-good token lives in the gitignored Secrets.swift; grep it out to populate:
     WAKEPROOF_TOKEN=$(grep -oE '"[a-f0-9]{64}"' WakeProof/WakeProof/Services/Secrets.swift | tr -d '"')
 
+SECURITY — do NOT pipe this script's stdout into a committed file. Error bodies
+can echo the token verbatim (e.g. when the proxy reflects the header back in a
+401 JSON payload). If you need to save output, redirect into /tmp/ or use the
+opt-in .githooks/pre-commit hook (see README) to catch accidental hex-token
+commits.
+
 Cost: ~$0.013 per run (Opus 4.7 input 5/MTok + output 25/MTok).
 
 Expected result on solid-color input:

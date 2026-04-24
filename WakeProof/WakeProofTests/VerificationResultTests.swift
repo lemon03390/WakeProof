@@ -181,6 +181,85 @@ final class VerificationResultTests: XCTestCase {
         XCTAssertEqual(result.memoryUpdate?.historyNote, "just note")
     }
 
+    // MARK: - M3 throwing variant
+
+    /// M3 (Wave 2.6): `fromClaudeMessageBodyDetailed` throws instead of
+    /// returning nil so callers (notably `ClaudeAPIClient`) can surface the
+    /// specific field that failed decode. This is the key regression test: a
+    /// body with a well-formed JSON object missing the `verdict` field must
+    /// throw `DecodingError.keyNotFound` carrying a codingPath including the
+    /// field name. Previously `try?` swallowed this and the user saw a
+    /// generic "couldn't read response" with no trace.
+    func testDetailedDecodeThrowsKeyNotFoundWithFieldInPath() {
+        let missingVerdict = """
+        {
+          "same_location": true,
+          "person_upright": true,
+          "eyes_open": true,
+          "appears_alert": true,
+          "lighting_suggests_room_lit": true,
+          "confidence": 0.9,
+          "reasoning": "x"
+        }
+        """
+        do {
+            _ = try VerificationResult.fromClaudeMessageBodyDetailed(missingVerdict)
+            XCTFail("expected DecodingError for missing verdict field")
+        } catch let DecodingError.keyNotFound(key, _) {
+            XCTAssertEqual(key.stringValue, "verdict",
+                           "keyNotFound must name the missing field so log lines can point at it")
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+    }
+
+    /// M3: no JSON object anywhere in the body → custom `noJSONObjectFound`
+    /// rather than a DecodingError (since JSONDecoder never got invoked).
+    /// Caller distinguishes this from a field-drift case.
+    func testDetailedDecodeThrowsNoJSONObjectWhenBodyIsPlainProse() {
+        do {
+            _ = try VerificationResult.fromClaudeMessageBodyDetailed("I can't comply with that request.")
+            XCTFail("expected noJSONObjectFound")
+        } catch VerificationParseError.noJSONObjectFound {
+            // expected
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// M3: type mismatch — confidence declared as String. DecodingError.typeMismatch
+    /// carries a codingPath we expose via ClaudeAPIClient's log-formatting helper.
+    func testDetailedDecodeThrowsTypeMismatchWhenFieldHasWrongType() {
+        let wrongType = """
+        {
+          "same_location": true,
+          "person_upright": true,
+          "eyes_open": true,
+          "appears_alert": true,
+          "lighting_suggests_room_lit": true,
+          "confidence": "high",
+          "reasoning": "x",
+          "verdict": "VERIFIED"
+        }
+        """
+        do {
+            _ = try VerificationResult.fromClaudeMessageBodyDetailed(wrongType)
+            XCTFail("expected typeMismatch")
+        } catch DecodingError.typeMismatch(_, let context) {
+            XCTAssertTrue(context.codingPath.contains { $0.stringValue == "confidence" },
+                          "typeMismatch codingPath must include the offending field")
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
+    }
+
+    /// M3: shortcut preservation — nil-returning `fromClaudeMessageBody` is
+    /// retained as a test convenience. Confirm it still returns nil on the
+    /// exact same malformed input the detailed variant throws on.
+    func testNilReturningShortcutSurvives() {
+        XCTAssertNil(VerificationResult.fromClaudeMessageBody("I can't comply"))
+    }
+
     // Helper used by the Layer 2 section above.
     private func decode(_ json: String) throws -> VerificationResult {
         guard let result = VerificationResult.fromClaudeMessageBody(json) else {

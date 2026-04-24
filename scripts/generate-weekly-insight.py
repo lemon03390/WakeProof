@@ -7,6 +7,11 @@ WakeProof/WakeProof/Resources/weekly-insight-seed.json.
 
 Run once per seed change. Expects ANTHROPIC_API_KEY in the environment. Refuses
 to run without it.
+
+SECURITY — do NOT pipe this script's stdout into a committed file. If the proxy
+path is used (WAKEPROOF_TOKEN), error bodies can echo the token verbatim. Save
+debug output to /tmp/ or enable the opt-in .githooks/pre-commit hook (see
+README) to catch accidental hex-token commits.
 """
 from __future__ import annotations
 

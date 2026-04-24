@@ -50,6 +50,19 @@ A single Opus 4.7 call does the work that would otherwise need three specialized
 
 All Swift in this repo was generated and refined through Claude Code sessions guided by `CLAUDE.md`. See that file for project context if you're exploring with Claude Code yourself.
 
+## Secret-scanning pre-commit hook (opt-in)
+
+This repo ships an opt-in pre-commit hook at `.githooks/pre-commit` that blocks commits containing what looks like a 64-char hex proxy token. It's opt-in because Git's default hooks directory is `.git/hooks/` and we don't want to surprise contributors by enabling it silently.
+
+Enable once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+The hook skips known-safe paths (`/Fixtures/`, `.gitignore`, `Secrets.swift`). To allowlist additional paths (e.g. a SHA-256 test fixture outside `/Fixtures/`), add one path substring per line to `.githooks/pre-commit-allowlist`. The `scripts/layer2-smoke.py` + `scripts/generate-weekly-insight.py` helpers instruct devs to grep the proxy token out of gitignored `Secrets.swift` and pipe it to env vars or stdout — both common vectors for accidentally capturing the token in a committed debug file, which is what the hook is meant to catch.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).

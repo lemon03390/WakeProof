@@ -61,7 +61,21 @@ enum NightlyPromptTemplate {
     // MARK: - Private
 
     private func render(_ snapshot: SleepSnapshot) -> String {
+        // M6 (Wave 2.6): if HealthKit queries threw during collection, say so
+        // explicitly so Claude distinguishes "user has no data" (isEmpty) from
+        // "one or more sub-queries failed" (non-empty queryErrors). Two signals
+        // can be present simultaneously — a successful sleep query and a failed
+        // HR query both land here; Claude needs to see both facts.
+        let partialLine: String = snapshot.queryErrors.isEmpty
+            ? ""
+            : "\nSleep data partial — queries that failed: \(snapshot.queryErrors.joined(separator: ", ")). Do not treat absences as zero."
+
         guard !snapshot.isEmpty else {
+            // Even in the "empty" branch, a query error is useful — it tells
+            // Claude the empty state is likely an error, not a data-absent user.
+            if !snapshot.queryErrors.isEmpty {
+                return "<sleep>No sleep data for this window.\(partialLine)</sleep>"
+            }
             return "<sleep>No sleep data available for this window.</sleep>"
         }
         let hrLine: String = {
@@ -73,7 +87,7 @@ enum NightlyPromptTemplate {
         Window: \(snapshot.windowStart.ISO8601Format()) → \(snapshot.windowEnd.ISO8601Format()).
         Time in bed: \(snapshot.totalInBedMinutes) minutes. Awake: \(snapshot.awakeMinutes) minutes.
         \(hrLine).
-        Source includes Apple Watch: \(snapshot.hasAppleWatchData ? "yes" : "no").
+        Source includes Apple Watch: \(snapshot.hasAppleWatchData ? "yes" : "no").\(partialLine)
         </sleep>
         """
     }

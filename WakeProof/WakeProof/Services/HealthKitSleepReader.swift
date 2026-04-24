@@ -79,12 +79,21 @@ actor HealthKitSleepReader: SleepReading {
         let start = end.addingTimeInterval(-Double(windowHours) * 3600)
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: .strictEndDate)
 
+        // M6 (Wave 2.6): track which queries threw so the downstream prompt can
+        // say "Sleep data partial — queries that failed: [...]" instead of
+        // emitting an empty-HR line that reads as "user has no heart data"
+        // when the actual failure was a query-level authorization or transport
+        // error. The overnight agent reasons from this — a false "no HR" signal
+        // would mislead its synthesis.
+        var queryErrors: [String] = []
+
         let sleepSamples: [HKCategorySample]
         do {
             sleepSamples = try await querySamples(type: sleepType, predicate: predicate)
         } catch {
             logger.error("HealthKit sleep query failed: \(error.localizedDescription, privacy: .public); continuing with empty sleep samples")
             sleepSamples = []
+            queryErrors.append("sleep")
         }
 
         let hrSamples: [HKQuantitySample]
@@ -93,21 +102,27 @@ actor HealthKitSleepReader: SleepReading {
         } catch {
             logger.error("HealthKit HR query failed: \(error.localizedDescription, privacy: .public); continuing with empty HR samples")
             hrSamples = []
+            queryErrors.append("heartRate")
         }
 
         // Log counts only — NEVER raw sample bodies (privacy).
-        logger.info("Fetched \(sleepSamples.count, privacy: .public) sleep samples, \(hrSamples.count, privacy: .public) HR samples")
+        logger.info("Fetched \(sleepSamples.count, privacy: .public) sleep samples, \(hrSamples.count, privacy: .public) HR samples, queryErrors=\(queryErrors.joined(separator: ","), privacy: .public)")
 
-        return aggregate(sleepSamples: sleepSamples, hrSamples: hrSamples, windowStart: start, windowEnd: end)
+        return aggregate(sleepSamples: sleepSamples, hrSamples: hrSamples, windowStart: start, windowEnd: end, queryErrors: queryErrors)
     }
 
     /// Pure aggregation. Exposed `internal` so tests can drive it with synthetic samples
     /// — the underlying HKHealthStore query is hard to stub without a bigger harness.
+    ///
+    /// M6 (Wave 2.6): accepts a default-empty `queryErrors` so existing tests that
+    /// don't pass the argument continue to compile. Production `lastNightSleep(...)`
+    /// always passes a concrete list (possibly empty).
     nonisolated func aggregate(
         sleepSamples: [HKCategorySample],
         hrSamples: [HKQuantitySample],
         windowStart: Date,
-        windowEnd: Date
+        windowEnd: Date,
+        queryErrors: [String] = []
     ) -> SleepSnapshot {
         let (inBed, awake) = Self.summariseSleepCategory(samples: sleepSamples)
 
@@ -136,7 +151,8 @@ actor HealthKitSleepReader: SleepReading {
             heartRateSampleCount: hrSamples.count,
             hasAppleWatchData: hasAW,
             windowStart: windowStart,
-            windowEnd: windowEnd
+            windowEnd: windowEnd,
+            queryErrors: queryErrors
         )
     }
 

@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# M8 (Wave 2.6): block accidental commits of 64-char hex strings that look
+# like a WakeProof proxy token. The hackathon's docs/scripts instruct devs to
+# grep the token out of Secrets.swift (which is gitignored) and pipe it into
+# env vars or script stdout — both of which are easy to accidentally capture
+# in a committed file (debug dump, test fixture, error-log paste).
+#
+# This hook is OPT-IN — enable with:
+#   git config core.hooksPath .githooks && chmod +x .githooks/pre-commit
+# (see README section "Secret-scanning pre-commit hook" for details).
+#
+# False positives: SHA-256 hashes in test fixtures are 64-char hex. Allowlist
+# those paths via .githooks/pre-commit-allowlist (one path substring per line;
+# empty lines + lines starting with # are ignored).
+#
+# Allowlisted-by-default paths (substring match):
+#   - /Fixtures/          — any test fixture directory
+#   - .gitignore          — legitimate references to *.hex patterns, etc.
+#   - Secrets.swift       — gitignored itself; if someone tries to override via
+#                           -f it's better the hook still blocks rather than
+#                           relying on gitignore alone.
+#
+# Exit 0 = allow commit. Exit 1 = block.
+
+set -e
+
+ALLOWLIST_FILE=".githooks/pre-commit-allowlist"
+# Built-in skip patterns (substrings in file path). Expand via ALLOWLIST_FILE.
+DEFAULT_SKIP_PATTERNS=(
+    "/Fixtures/"
+    ".gitignore"
+    "Secrets.swift"
+)
+
+# Read user-extended allowlist if present.
+USER_SKIPS=()
+if [ -f "$ALLOWLIST_FILE" ]; then
+    while IFS= read -r line; do
+        # Skip comments + empty lines.
+        [ -z "$line" ] && continue
+        case "$line" in \#*) continue;; esac
+        USER_SKIPS+=("$line")
+    done < "$ALLOWLIST_FILE"
+fi
+
+should_skip() {
+    local path="$1"
+    for pattern in "${DEFAULT_SKIP_PATTERNS[@]}" "${USER_SKIPS[@]}"; do
+        case "$path" in *"$pattern"*) return 0;; esac
+    done
+    return 1
+}
+
+blocked=0
+
+# Iterate staged files. Using -z + while read to handle spaces in paths.
+while IFS= read -r -d '' file; do
+    # Only scan regular files that still exist (deletions produce no diff).
+    [ -f "$file" ] || continue
+    if should_skip "$file"; then
+        continue
+    fi
+
+    # Extract only the added lines from the staged diff. `-U0` trims context so
+    # we don't false-positive on unchanged lines that happen to contain hex.
+    added_lines=$(git diff --cached -U0 -- "$file" 2>/dev/null | grep -E '^\+[^+]' || true)
+    [ -z "$added_lines" ] && continue
+
+    # Match a contiguous 64-hex-char run. Case-insensitive because some tokens
+    # ship as lowercase and some hex test data as uppercase. Word-boundary
+    # anchors avoid catching 128-char SHA-512 digests or longer sequences
+    # (which aren't our token shape).
+    if echo "$added_lines" | grep -iqE '(^|[^0-9a-f])[0-9a-f]{64}([^0-9a-f]|$)'; then
+        echo "BLOCKED: $file staged with what looks like a 64-char hex secret."
+        echo "        If this is a legitimate SHA-256 test fixture or other"
+        echo "        non-secret, add a path substring to .githooks/pre-commit-allowlist"
+        echo "        (one entry per line)."
+        blocked=1
+    fi
+done < <(git diff --cached --name-only -z)
+
+if [ "$blocked" -eq 1 ]; then
+    echo
+    echo "Pre-commit hook blocked this commit. See .githooks/pre-commit for details."
+    exit 1
+fi
+
+exit 0

@@ -374,7 +374,17 @@ actor OvernightScheduler {
             case .httpError(let status, _):
                 return (.fetchHTTPError,
                         "Claude had a hiccup (HTTP \(status)). Your alarm verified fine.")
-            case .emptyBriefingResponse:
+            case .emptyBriefingResponse,
+                 // M7 (Wave 2.6): Both "no agent.message in events" and
+                 // "agent.message existed but had no text block" collapse to
+                 // the same user-perceived outcome ("Claude didn't produce a
+                 // briefing") even though the internal distinction helps the
+                 // log/metrics layer tell "agent didn't respond" from "agent
+                 // responded with tool_use only". Grouping here keeps the UI
+                 // copy simple; the log line one level up already carries the
+                 // specific agentError.localizedDescription for post-mortem.
+                 .noAgentResponse,
+                 .agentMessageMissingTextBlock:
                 return (.agentEmptyResponse,
                         "Claude's briefing came back empty. Your alarm verified fine.")
             case .missingResourceID, .decodingFailed:

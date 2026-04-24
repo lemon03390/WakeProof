@@ -44,6 +44,19 @@ enum OvernightAgentError: LocalizedError {
     /// error lets finalizeBriefing route to `.failure(.agentEmptyResponse)`
     /// with a distinct user-facing message.
     case emptyBriefingResponse
+    /// M7 (Wave 2.6): the events list contained zero `agent.message` events.
+    /// Caller previously got `nil` and downstream mapped that to empty string
+    /// → parseAgentReply saw "" → `emptyBriefingResponse`. The two conditions
+    /// deserve distinct codes because the first means Claude hadn't produced
+    /// any response at all (agent might still be thinking; retry has value),
+    /// while the second means Claude DID respond but emitted only a marker
+    /// header. Separating the two lets future UI copy distinguish.
+    case noAgentResponse
+    /// M7 (Wave 2.6): an `agent.message` event exists but its `content` array
+    /// has no `{"type": "text"}` block (e.g. tool_use-only). Means the agent
+    /// is mid-tool-call rather than done — a retry or a "check back later"
+    /// surface is more useful than rendering an empty briefing.
+    case agentMessageMissingTextBlock
 
     var errorDescription: String? {
         switch self {
@@ -55,6 +68,8 @@ enum OvernightAgentError: LocalizedError {
         case .missingResourceID(let name): return "Overnight agent: expected \(name) not found in response."
         case .decodingFailed: return "Overnight agent: response parse failed."
         case .emptyBriefingResponse: return "Overnight agent: briefing content was empty."
+        case .noAgentResponse: return "Overnight agent: no agent message found in session events."
+        case .agentMessageMissingTextBlock: return "Overnight agent: agent message had no text block (tool-use only)."
         }
     }
 }
@@ -211,12 +226,27 @@ actor OvernightAgentClient {
         logger.info("Appended event to session \(sessionID.prefix(12), privacy: .private) (bytes=\(text.utf8.count, privacy: .public))")
     }
 
-    /// Fetch events and return the latest agent.message content (if any).
+    /// Fetch events and return the latest agent.message content.
     ///
     /// Response shape is `{"data": [<event>, ...]}` — the top-level key is
     /// `data`, not `events`. Each event has `type`, and `agent.message`
     /// events carry `content: [{"type": "text", "text": "..."}]`.
-    func fetchLatestAgentMessage(sessionID: String) async throws -> String? {
+    ///
+    /// M7 (Wave 2.6): no longer returns `String?`. Instead:
+    ///   - Throws `.noAgentResponse` when the events list contains zero
+    ///     `agent.message` entries. Previously the caller got `nil` → empty
+    ///     string → `parseAgentReply` threw `.emptyBriefingResponse`, which
+    ///     mapped to `.agentEmptyResponse`. Correct outcome at the *final*
+    ///     classification but hostile to debugging — the error propagated up
+    ///     as "briefing was empty" when the truth was "no briefing block at
+    ///     all". Separating the two lets logs, metrics, and future UI copy
+    ///     distinguish "agent hadn't responded yet" from "agent responded but
+    ///     emitted a blank briefing".
+    ///   - Throws `.agentMessageMissingTextBlock` when an agent.message event
+    ///     exists but has no `text` content block (e.g. tool_use-only during
+    ///     mid-session reasoning). This is distinct from the first case: the
+    ///     agent IS producing output, just not a user-visible text yet.
+    func fetchLatestAgentMessage(sessionID: String) async throws -> String {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)/events")
         let data = try await getJSON(url: url)
         struct EventsResponse: Decodable {
@@ -235,9 +265,20 @@ actor OvernightAgentClient {
             throw OvernightAgentError.decodingFailed(underlying: error)
         }
         let agentMessages = parsed.data?.filter { $0.type == "agent.message" } ?? []
-        let lastText = agentMessages.last?.content?.first(where: { $0.type == "text" })?.text
-        logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) foundAgentMessages=\(agentMessages.count, privacy: .public) lastTextBytes=\(lastText?.utf8.count ?? 0, privacy: .public)")
-        return lastText
+        guard let latest = agentMessages.last else {
+            // No agent.message events yet. Distinct from "the text inside one
+            // was empty" — the agent may simply not have produced anything.
+            logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) no agent.message events found (data count=\(parsed.data?.count ?? 0, privacy: .public))")
+            throw OvernightAgentError.noAgentResponse
+        }
+        guard let text = latest.content?.first(where: { $0.type == "text" })?.text else {
+            // Agent message exists but no text block — likely tool_use only.
+            let blockTypes = (latest.content ?? []).map { $0.type }.joined(separator: ",")
+            logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) agent.message had no text block; types=\(blockTypes, privacy: .public)")
+            throw OvernightAgentError.agentMessageMissingTextBlock
+        }
+        logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) foundAgentMessages=\(agentMessages.count, privacy: .public) lastTextBytes=\(text.utf8.count, privacy: .public)")
+        return text
     }
 
     /// Terminate the session so its running-time billing stops accruing.

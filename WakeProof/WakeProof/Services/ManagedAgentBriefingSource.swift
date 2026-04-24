@@ -45,11 +45,12 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
 
     func fetchBriefing(handle: String) async throws -> (text: String, memoryUpdate: String?) {
         logger.info("fetchBriefing: session=\(handle.prefix(12), privacy: .private)")
-        let rawText = try await client.fetchLatestAgentMessage(sessionID: handle) ?? ""
-        // parseAgentReply throws `emptyBriefingResponse` when the agent's reply
-        // has a marker with no content after it — catch surface is the same as
-        // a transport error so finalizeBriefing can map to `.failure(...)`
-        // uniformly. B5.3 fix.
+        // M7 (Wave 2.6): `fetchLatestAgentMessage` now throws `noAgentResponse`
+        // or `agentMessageMissingTextBlock` instead of returning nil → "". The
+        // errors propagate up for `finalizeBriefing`'s `classify(fetchError:)`
+        // to route. B5.3's `emptyBriefingResponse` still applies for the
+        // "text was present but BRIEFING: had blank content" case.
+        let rawText = try await client.fetchLatestAgentMessage(sessionID: handle)
         let parsed = try Self.parseAgentReply(rawText)
         logger.info("fetchBriefing: briefingChars=\(parsed.text.count, privacy: .public) memoryUpdate=\(parsed.memoryUpdate != nil, privacy: .public)")
         return parsed
@@ -90,7 +91,20 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
     }
 
     private static func renderSleep(_ s: SleepSnapshot) -> String {
-        guard !s.isEmpty else { return "(no sleep data available)" }
+        // M6 (Wave 2.6): same reasoning as NightlyPromptTemplate.render —
+        // distinguish "user has no data" from "query failed" so the agent
+        // doesn't infer zero-HR means low cardiovascular activity when the
+        // truth is we couldn't read the HR store at all.
+        let partialLine: String = s.queryErrors.isEmpty
+            ? ""
+            : "\nSleep data partial — queries that failed: \(s.queryErrors.joined(separator: ", ")). Do not treat absences as zero."
+
+        guard !s.isEmpty else {
+            if !s.queryErrors.isEmpty {
+                return "(no sleep data for this window)\(partialLine)"
+            }
+            return "(no sleep data available)"
+        }
         let hr: String
         if let avg = s.heartRateAvg {
             hr = "HR avg \(Int(avg))bpm, range \(Int(s.heartRateMin ?? avg))-\(Int(s.heartRateMax ?? avg)) across \(s.heartRateSampleCount) samples"
@@ -101,7 +115,7 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
         window: \(s.windowStart.ISO8601Format()) → \(s.windowEnd.ISO8601Format())
         time in bed: \(s.totalInBedMinutes) min, awake: \(s.awakeMinutes) min
         \(hr)
-        Apple Watch data: \(s.hasAppleWatchData)
+        Apple Watch data: \(s.hasAppleWatchData)\(partialLine)
         """
     }
 
