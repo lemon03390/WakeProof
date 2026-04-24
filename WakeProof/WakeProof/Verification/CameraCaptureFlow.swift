@@ -21,11 +21,48 @@ struct CameraCaptureFlow: View {
 
     let onSuccess: (WakeAttempt) -> Void
 
+    /// R8 fix: watchdog against "camera callbacks never fire". Previously the
+    /// `CameraHostController` callback defaults were `Logger.fault(...)`; if the
+    /// picker ever failed to deliver a terminal outcome (iOS bug, stuck
+    /// controller, permission race) the alarm stayed in `.capturing` forever
+    /// and the user's only escape was force-quit — which produced an
+    /// UNRESOLVED WakeAttempt row with no user-visible explanation. The
+    /// watchdog fires after `watchdogTimeout` seconds and reverse-transitions
+    /// back to `.ringing` with a user-visible error, exactly as if the user
+    /// had cancelled the picker themselves.
+    ///
+    /// 30s is conservative: a real capture (tap record, 1–2s video, tap stop,
+    /// frame extraction) completes in < 10s on a 3-year-old device. 30s
+    /// leaves plenty of headroom for cold-start camera init while still
+    /// cutting off genuinely stuck sessions before the user thinks they need
+    /// to force-quit.
+    let watchdogTimeout: TimeInterval
+
+    init(watchdogTimeout: TimeInterval = 30, onSuccess: @escaping (WakeAttempt) -> Void) {
+        self.watchdogTimeout = watchdogTimeout
+        self.onSuccess = onSuccess
+    }
+
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "captureFlow")
+
+    /// Holds the watchdog task + a flag that a terminal callback has already
+    /// fired. Using a class so multiple nested closures can share mutable
+    /// state on the main actor without fighting SwiftUI's value-type `@State`.
+    /// Stored in a `@State` wrapper below because the instance must survive
+    /// re-renders for the duration of the capture flow.
+    @State private var watchdog = WatchdogBox()
 
     var body: some View {
         CameraCaptureView(
             onCaptured: { result in
+                // Watchdog cancel BEFORE touching scheduler state — if cancel
+                // misorders with the async persist, a late watchdog fire
+                // could double-transition. Claiming also prevents the
+                // persist's own failure path from double-reporting.
+                guard watchdog.claim() else {
+                    logger.warning("onCaptured fired after watchdog already claimed — dropping (scheduler already returned to ringing)")
+                    return
+                }
                 Task { @MainActor in
                     do {
                         let persistedAttempt = try await persist(result)
@@ -40,13 +77,54 @@ struct CameraCaptureFlow: View {
                 }
             },
             onCancelled: {
+                guard watchdog.claim() else {
+                    logger.warning("onCancelled fired after watchdog already claimed — dropping")
+                    return
+                }
                 scheduler.returnToRingingWith(error: "Canceled. Tap \"Prove you're awake\" to retry.")
             },
             onFailed: { error in
+                guard watchdog.claim() else {
+                    logger.warning("onFailed fired after watchdog already claimed — dropping")
+                    return
+                }
                 logger.error("Capture failed: \(String(describing: error), privacy: .public)")
                 scheduler.returnToRingingWith(error: error.errorDescription ?? "Capture failed. Try again.")
             }
         )
+        .onAppear { armWatchdog() }
+        .onDisappear { watchdog.cancelTimer() }
+    }
+
+    /// Arm the watchdog timer. Called on view appear. If a terminal callback
+    /// claims the latch first, the timer's closure body short-circuits. If
+    /// the timer wins, it reverse-transitions to ringing with the user-visible
+    /// "camera didn't respond" message.
+    ///
+    /// Timer is a detached Task.sleep rather than a Timer — keeps everything
+    /// in the Swift-Concurrency lane so cancellation is structured and the
+    /// body can hop to MainActor cleanly.
+    @MainActor
+    private func armWatchdog() {
+        // Defensive: cancel any prior timer. SwiftUI can re-invoke `onAppear`
+        // on identity churn (e.g., environment object change) — we don't want
+        // two timers racing.
+        watchdog.cancelTimer()
+        let timeout = watchdogTimeout
+        let box = watchdog
+        let boundLogger = logger
+        let boundScheduler = scheduler
+        let task = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch {
+                return // cancelled — a terminal callback already claimed.
+            }
+            guard box.claim() else { return }
+            boundLogger.fault("Camera watchdog fired — no terminal callback in \(timeout, privacy: .public)s; reverse-transitioning to ringing")
+            boundScheduler.returnToRingingWith(error: "Camera didn't respond — please try again.")
+        }
+        watchdog.installTimer(task)
     }
 
     /// Reasons we may reject a capture before counting it as a verification attempt. Surfaces
@@ -173,4 +251,57 @@ struct CameraCaptureFlow: View {
         return dest
     }
 
+}
+
+// MARK: - Watchdog helper
+
+/// R8 fix: single-use latch + timer box that coordinates the camera-capture
+/// watchdog with the three terminal callbacks (captured / cancelled / failed).
+/// Whichever side calls `claim()` first owns the right to drive the scheduler
+/// transition; the loser short-circuits. The timer task is retained so the
+/// successful-callback paths can cancel it cleanly.
+///
+/// Reference type because multiple closures (onCaptured / onCancelled /
+/// onFailed / the timer task) share this state. MainActor-confined because
+/// SwiftUI `@State` reads happen on the main actor and the watchdog is
+/// scoped to a single view's lifetime — no need for lock-based synchronisation.
+///
+/// Split from `CompletionLatch` (BackgroundTasks) because that one has to be
+/// Sendable + `OSAllocatedUnfairLock`-guarded (called from an unspecified
+/// BackgroundTasks queue). This one only runs on MainActor, so the lighter
+/// shape is appropriate.
+@MainActor
+final class WatchdogBox {
+    private var claimed = false
+    private var timer: Task<Void, Never>?
+
+    init() {}
+
+    /// Claim the latch. Returns true on first call, false thereafter. Safe to
+    /// call from all the terminal-callback paths and from the timer itself.
+    func claim() -> Bool {
+        guard !claimed else { return false }
+        claimed = true
+        timer?.cancel()
+        timer = nil
+        return true
+    }
+
+    /// Install the watchdog timer task. Stored so `claim()` + `cancelTimer()`
+    /// can both cancel it deterministically.
+    func installTimer(_ task: Task<Void, Never>) {
+        timer = task
+    }
+
+    /// Cancel the timer without claiming the latch. Called from
+    /// `onDisappear` — if the view is torn down while still waiting for a
+    /// callback, we don't want the timer to outlive its context.
+    func cancelTimer() {
+        timer?.cancel()
+        timer = nil
+    }
+
+    /// Read-only view of whether anyone has claimed. Used by tests to assert
+    /// the latch's final state.
+    var isClaimed: Bool { claimed }
 }

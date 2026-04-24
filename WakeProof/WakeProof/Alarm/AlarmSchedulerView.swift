@@ -24,6 +24,13 @@ struct AlarmSchedulerView: View {
     @State private var startTime: Date = .now
     @State private var isEnabled: Bool = false
 
+    /// R9 fix: mirrors the actor-local error from OvernightScheduler so the
+    /// banner can surface "overnight analysis couldn't start tonight — we'll
+    /// retry next launch". Refreshed on view appear. A successful
+    /// `startOvernightSession` clears the actor's copy; we refresh on next
+    /// app-active bounce so the banner clears without a manual reload.
+    @State private var overnightStartError: String?
+
     private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "schedulerView")
 
     var body: some View {
@@ -66,12 +73,20 @@ struct AlarmSchedulerView: View {
                     }
                     Button("Finalize briefing now") {
                         Task {
-                            // R5: finalizeBriefing now returns a Sendable DTO
-                            // rather than a SwiftData @Model — the DEBUG flow
-                            // only needs to log the text, so no main-actor hop
-                            // is required here.
-                            let dto = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
-                            logger.info("Debug finalize: briefingText=\(dto?.briefingText ?? "nil", privacy: .public)")
+                            // B5: finalizeBriefing now returns a `BriefingResult`
+                            // enum rather than `BriefingDTO?`. DEBUG logging
+                            // mirrors the three cases so you can tell at a
+                            // glance whether the pipeline succeeded, had no
+                            // session, or hit a failure path.
+                            let result = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
+                            switch result {
+                            case .success(let dto):
+                                logger.info("Debug finalize: success briefingText=\(dto.briefingText, privacy: .public)")
+                            case .noSession:
+                                logger.info("Debug finalize: noSession (no active handle)")
+                            case .failure(let reason, let message):
+                                logger.info("Debug finalize: failure reason=\(reason.rawValue, privacy: .public) message=\(message, privacy: .public)")
+                            }
                         }
                     }
                 }
@@ -88,13 +103,34 @@ struct AlarmSchedulerView: View {
             }
             .navigationTitle("WakeProof")
             .onAppear(perform: loadFromScheduler)
+            // R9: refresh the overnight error banner snapshot whenever the
+            // view comes back into focus. Quick one-shot poll of the actor;
+            // the property is actor-local so we have to hop.
+            .task { await refreshOvernightStartError() }
         }
+    }
+
+    /// R9 helper: pull the latest overnight-start error from the scheduler
+    /// actor. Called on `.task` so it runs once per view appearance, covering
+    /// both "just came back from background" and "just navigated to this
+    /// tab". Extracted as its own method so tests can exercise it without
+    /// reaching into `body`.
+    private func refreshOvernightStartError() async {
+        overnightStartError = await overnightScheduler.lastSessionStartError()
     }
 
     /// Composite "the alarm contract is partially broken" banner. Surfaces the highest-impact
     /// problem first so the user knows what to fix; without this, denied notifications and
     /// dead audio sessions silently pretended the alarm was armed. Optional permissions land
     /// at the bottom — they degrade features but don't break the wake-up contract.
+    ///
+    /// Priority order: alarm-breaking conditions first (notifications / audio),
+    /// then HealthKit (disables summary), then the overnight pipeline (Layer 3
+    /// analysis feature — failure is visible to the user only via the morning
+    /// briefing card, which is less immediate than the alarm itself). The
+    /// overnight error is surfaced so users know why the briefing card will
+    /// say "unavailable" — without this banner the failure is invisible until
+    /// the next wake.
     private var systemBanner: String? {
         if permissions.notifications == .denied {
             return "Notifications are off — WakeProof can't reliably wake you. Open Settings → WakeProof → Notifications."
@@ -107,6 +143,14 @@ struct AlarmSchedulerView: View {
         // is more actionable than `.denied` (user chose no).
         if permissions.healthKit == .failed {
             return "Apple Health unavailable — last-night summary won't appear."
+        }
+        // R9: overnight session kickoff failed. Surfaces below the core-alarm
+        // banners because a broken briefing doesn't prevent wake-up — the
+        // alarm still fires, the user still verifies, they just don't get
+        // Claude's morning prose. Message ends with the retry hint so the
+        // user knows no manual action is required.
+        if let overnightErr = overnightStartError {
+            return "Overnight analysis couldn't start tonight: \(overnightErr). We'll retry next launch."
         }
         return nil
     }

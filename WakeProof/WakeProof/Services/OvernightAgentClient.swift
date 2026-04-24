@@ -36,6 +36,14 @@ enum OvernightAgentError: LocalizedError {
     case timeout
     case missingResourceID(String)
     case decodingFailed(underlying: Error)
+    /// B5.3 fix: parseAgentReply found the BRIEFING: marker but no prose
+    /// followed (empty or whitespace-only). Previously the function returned
+    /// `("", nil)` which caused an empty MorningBriefing SwiftData row to be
+    /// written and the session to be cleaned up — judges / users saw "No
+    /// briefing this morning" as if Layer 3 had never run. Throwing this
+    /// error lets finalizeBriefing route to `.failure(.agentEmptyResponse)`
+    /// with a distinct user-facing message.
+    case emptyBriefingResponse
 
     var errorDescription: String? {
         switch self {
@@ -46,6 +54,7 @@ enum OvernightAgentError: LocalizedError {
         case .timeout: return "Overnight agent: timed out."
         case .missingResourceID(let name): return "Overnight agent: expected \(name) not found in response."
         case .decodingFailed: return "Overnight agent: response parse failed."
+        case .emptyBriefingResponse: return "Overnight agent: briefing content was empty."
         }
     }
 }

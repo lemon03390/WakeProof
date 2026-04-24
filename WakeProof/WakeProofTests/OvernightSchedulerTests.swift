@@ -182,21 +182,35 @@ final class OvernightSchedulerTests: XCTestCase {
 
     // MARK: - finalizeBriefing
 
+    /// Helper: assert a `BriefingResult` is `.success` and return the DTO. Fails
+    /// the test with a descriptive message on any other case so tests don't
+    /// silently pass on `.failure` when they expected `.success`.
+    private func unwrapSuccess(_ result: BriefingResult, file: StaticString = #filePath, line: UInt = #line) -> BriefingDTO? {
+        switch result {
+        case .success(let dto): return dto
+        case .noSession:
+            XCTFail("Expected .success but got .noSession", file: file, line: line)
+            return nil
+        case .failure(let reason, let message):
+            XCTFail("Expected .success but got .failure(reason=\(reason.rawValue), message=\(message))", file: file, line: line)
+            return nil
+        }
+    }
+
     func testFinalizeBriefingReturnsDTOAndClearsHandle() async throws {
-        // R5 fix: finalizeBriefing returns a `BriefingDTO` (Sendable value type)
-        // rather than a `MorningBriefing @Model` instance. The main actor is the
-        // one that materialises the model into mainContext — the scheduler no
-        // longer owns a ModelContext. Assert on the DTO shape; the SwiftData
-        // row is the main actor's responsibility (exercised in WakeProofApp).
+        // B5 fix: finalizeBriefing returns a `BriefingResult` enum with a
+        // `.success(BriefingDTO)` case on the happy path. Enum lets the UI
+        // distinguish three outcomes (success / noSession / failure) that the
+        // previous `BriefingDTO?` conflated into one "no briefing" bucket.
         suiteDefaults.set("active-handle-xyz", forKey: OvernightScheduler.activeHandleKey)
         let source = RecordingSource()
         await source.setFetchResult((text: "Good morning — you logged 7.5h.", memoryUpdate: nil))
         let scheduler = makeScheduler(source: source)
 
         let wakeDate = Date(timeIntervalSince1970: 1_745_550_000)
-        let dto = await scheduler.finalizeBriefing(forWakeDate: wakeDate)
+        let result = await scheduler.finalizeBriefing(forWakeDate: wakeDate)
 
-        XCTAssertNotNil(dto)
+        let dto = unwrapSuccess(result)
         XCTAssertEqual(dto?.briefingText, "Good morning — you logged 7.5h.")
         XCTAssertEqual(dto?.forWakeDate, wakeDate)
         XCTAssertEqual(dto?.sourceSessionID, "active-handle-xyz")
@@ -210,14 +224,21 @@ final class OvernightSchedulerTests: XCTestCase {
         XCTAssertEqual(cleanupCalls, ["active-handle-xyz"])
     }
 
-    func testFinalizeBriefingReturnsNilWhenNoHandle() async throws {
+    func testFinalizeBriefingReturnsNoSessionWhenNoHandle() async throws {
+        // B5 fix: the "no active handle" case now returns `.noSession`
+        // explicitly rather than nil — the UI renders distinct copy for this
+        // vs. an actual failure.
         let source = RecordingSource()
         let scheduler = makeScheduler(source: source)
 
         // No handle pre-set in suiteDefaults.
-        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNil(dto)
+        switch result {
+        case .noSession: break // expected
+        case .success, .failure:
+            XCTFail("Expected .noSession, got \(result)")
+        }
 
         // No source methods should have been touched.
         let fetchCalls = await source.fetchCalls
@@ -231,7 +252,7 @@ final class OvernightSchedulerTests: XCTestCase {
         // via a non-UUID-shaped userUUID (the path-traversal guard in userDirectoryURL).
         // The C.3 fix wrapped rewriteProfile in do/catch; previously `try?` swallowed the
         // error and `memoryUpdateApplied = true` ran unconditionally, making the flag lie.
-        // Invariant: the briefing DTO itself is still returned (it's the user-facing
+        // Invariant: the briefing is still returned as `.success` (it's the user-facing
         // artefact and memory is ancillary), but the flag reflects the actual memory
         // write outcome.
         suiteDefaults.set("active-handle-delta", forKey: OvernightScheduler.activeHandleKey)
@@ -240,9 +261,9 @@ final class OvernightSchedulerTests: XCTestCase {
         await source.setFetchResult((text: "Briefing prose.", memoryUpdate: "## New profile\nSomething."))
         let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
 
-        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNotNil(dto, "briefing DTO must still be returned even if memory rewrite fails")
+        let dto = unwrapSuccess(result)
         XCTAssertEqual(dto?.briefingText, "Briefing prose.")
         XCTAssertFalse(dto?.memoryUpdateApplied ?? true,
                        "rewriteProfile threw → flag must stay false (no silent lies)")
@@ -264,14 +285,156 @@ final class OvernightSchedulerTests: XCTestCase {
         await source.setFetchResult((text: "Today's briefing.", memoryUpdate: newProfile))
         let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
 
-        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNotNil(dto)
+        let dto = unwrapSuccess(result)
         XCTAssertTrue(dto?.memoryUpdateApplied ?? false, "memoryUpdate present → flag should be true")
 
         let snap = try await memoryStore.read()
         XCTAssertEqual(snap.profile, newProfile, "MemoryStore must now hold the new profile")
     }
+
+    // MARK: - B5: fetch failure cleanup + classification
+
+    /// B5.2 fix: every failure path in finalizeBriefing must call
+    /// `source.cleanup(handle:)` AND clear the UserDefaults handle. Previously
+    /// the `catch { return nil }` branch left the session running at $0.08/hr
+    /// until next app launch. Test: seed a fetch-throwing source, assert
+    /// handle is cleared + cleanup was called with the correct handle.
+    func testFinalizeBriefingTransportFailureCleansUpSession() async throws {
+        suiteDefaults.set("session-transport-fail", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setFetchThrows(OvernightAgentError.transportFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        switch result {
+        case .failure(let reason, _):
+            XCTAssertEqual(reason, .fetchTransportFailed,
+                           "transportFailed must classify as .fetchTransportFailed for UI copy routing")
+        case .success, .noSession:
+            XCTFail("Expected .failure, got \(result)")
+        }
+
+        // Cost-containment invariant: session must be terminated + handle cleared.
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey),
+                     "failure path must clear handle — leaving it strands next launch on stale-cleanup")
+        let cleanupCalls = await source.cleanupCalls
+        XCTAssertEqual(cleanupCalls, ["session-transport-fail"],
+                       "failure path must cleanup the session or it runs at $0.08/hr for hours")
+    }
+
+    func testFinalizeBriefingHTTPErrorClassifiesCorrectly() async throws {
+        suiteDefaults.set("session-http-fail", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setFetchThrows(OvernightAgentError.httpError(status: 503, snippet: "upstream unavailable"))
+        let scheduler = makeScheduler(source: source)
+
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        switch result {
+        case .failure(let reason, let message):
+            XCTAssertEqual(reason, .fetchHTTPError)
+            XCTAssertTrue(message.contains("503"),
+                          "HTTP-error UI copy must include the status code so users can screenshot support requests")
+        case .success, .noSession:
+            XCTFail("Expected .failure, got \(result)")
+        }
+
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
+    }
+
+    func testFinalizeBriefingEmptyResponseClassifiesCorrectly() async throws {
+        // B5.3: parseAgentReply throws emptyBriefingResponse on whitespace-only
+        // content. Scheduler must map to .agentEmptyResponse and cleanup.
+        suiteDefaults.set("session-empty", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setFetchThrows(OvernightAgentError.emptyBriefingResponse)
+        let scheduler = makeScheduler(source: source)
+
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        switch result {
+        case .failure(let reason, _):
+            XCTAssertEqual(reason, .agentEmptyResponse)
+        case .success, .noSession:
+            XCTFail("Expected .failure, got \(result)")
+        }
+
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
+        let cleanupCalls = await source.cleanupCalls
+        XCTAssertEqual(cleanupCalls, ["session-empty"])
+    }
+
+    func testFinalizeBriefingDecodingFailureClassifiesAsParseFailed() async throws {
+        suiteDefaults.set("session-parse-fail", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setFetchThrows(OvernightAgentError.decodingFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        switch result {
+        case .failure(let reason, _):
+            XCTAssertEqual(reason, .parseFailed)
+        case .success, .noSession:
+            XCTFail("Expected .failure, got \(result)")
+        }
+
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
+    }
+
+    // MARK: - R9: lastSessionStartError surfacing
+
+    /// R9 fix: startOvernightSession's catch branch was `logger.error(...)` and
+    /// no UI surface — a silently-dying Layer 3 pipeline was indistinguishable
+    /// from a healthy one. Now the scheduler retains the most recent start
+    /// error and exposes it via `lastSessionStartError()`; AlarmSchedulerView
+    /// reads and surfaces in its systemBanner.
+    func testLastSessionStartErrorInitiallyNil() async throws {
+        let source = RecordingSource()
+        let scheduler = makeScheduler(source: source)
+
+        let err = await scheduler.lastSessionStartError()
+        XCTAssertNil(err, "no start attempt made yet → no error should be surfaced")
+    }
+
+    func testLastSessionStartErrorSurfacesPlanFailure() async throws {
+        let source = RecordingSource()
+        await source.setPlanThrows(OvernightAgentError.transportFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+
+        await scheduler.startOvernightSession()
+
+        let err = await scheduler.lastSessionStartError()
+        XCTAssertNotNil(err,
+                        "plan failure must surface via lastSessionStartError so UI can banner it")
+    }
+
+    func testLastSessionStartErrorClearedAfterSuccessfulRetry() async throws {
+        // First attempt: force planOvernight to throw.
+        let source = RecordingSource()
+        await source.setPlanThrows(OvernightAgentError.transportFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+        await scheduler.startOvernightSession()
+        let firstErr = await scheduler.lastSessionStartError()
+        XCTAssertNotNil(firstErr)
+
+        // Reset: remove the thrown error so the next call succeeds.
+        await source.setPlanThrows(nil)
+        await source.setNextHandle("recovered-session-handle")
+        await scheduler.startOvernightSession()
+
+        let err = await scheduler.lastSessionStartError()
+        XCTAssertNil(err,
+                     "successful retry must clear the banner error — otherwise stale banners linger after recovery")
+    }
+
+    /// Named error type for forcing throws in tests. Deliberately not
+    /// generic — the cleanup-verification assertions care about the scheduler's
+    /// handling, not the wrapped error's type.
+    private enum SampleError: Error { case boom }
 
     // MARK: - B3: re-entrancy guard in startOvernightSession
 

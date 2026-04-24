@@ -4,8 +4,13 @@
 //
 //  Shown right after the alarm VERIFIED transition. Displays the overnight
 //  agent / synthesis-client briefing that was pre-computed during sleep.
-//  Falls back to a "no briefing yet" card when the scheduler wasn't armed
-//  or when the source hasn't produced content yet (first install).
+//
+//  B5 refactor: the view now takes a `BriefingResult?` rather than a raw
+//  `MorningBriefing?`. The three outcomes (success / noSession / failure)
+//  render distinct copy so users / demo judges can distinguish "you never
+//  armed bedtime" from "Claude hiccuped tonight" — previously both showed the
+//  same "Sleep well tonight — Claude will prepare one" encouragement, which
+//  made a network hiccup indistinguishable from a never-configured pipeline.
 //
 
 import SwiftUI
@@ -13,19 +18,14 @@ import os
 
 struct MorningBriefingView: View {
 
-    let briefing: MorningBriefing?
+    /// B5: the scheduler returns a `BriefingResult`; the result is latched in
+    /// WakeProofApp's RootView and passed down here. Nil means the view hasn't
+    /// received a finalize outcome yet (defensive — rarely visible because the
+    /// cover isn't presented until the result is set).
+    let result: BriefingResult?
     let onDismiss: () -> Void
 
     private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "briefing-view")
-
-    /// True when there's something useful to show — briefing exists AND
-    /// its text isn't empty/whitespace. The empty-text branch exists
-    /// because parseAgentReply can return "" when the agent's reply
-    /// contains the BRIEFING: marker but no content after it.
-    private var hasContent: Bool {
-        guard let briefing else { return false }
-        return !briefing.briefingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
 
     var body: some View {
         ZStack {
@@ -39,22 +39,19 @@ struct MorningBriefingView: View {
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer()
-                if hasContent, let briefing {
-                    Text(briefing.briefingText)
-                        .font(.title3)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 28)
-                } else {
-                    VStack(spacing: 8) {
-                        Text("No briefing this morning")
-                            .font(.title3)
-                            .foregroundStyle(.white.opacity(0.7))
-                        Text("Sleep well tonight — Claude will prepare one.")
-                            .font(.callout)
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
+                content
+                #if DEBUG
+                // Diagnostic surface for demo prep: the reason code lets you
+                // tell at a glance whether the pipeline rendered real prose
+                // or fell through to a failure branch. Hidden in release so
+                // users never see "reason:" text.
+                if let reasonTag {
+                    Text(reasonTag)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.white.opacity(0.35))
+                        .padding(.top, 4)
                 }
+                #endif
                 Spacer()
                 Button("Start your day", action: onDismiss)
                     .buttonStyle(.primaryWhite)
@@ -62,21 +59,98 @@ struct MorningBriefingView: View {
             }
         }
         .onAppear {
-            Self.logger.info("MorningBriefingView appeared hasContent=\(hasContent, privacy: .public) generatedAt=\(briefing?.generatedAt.ISO8601Format() ?? "nil", privacy: .public)")
+            Self.logger.info("MorningBriefingView appeared resultTag=\(Self.tag(result), privacy: .public)")
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch result {
+        case .success(let dto):
+            // Happy path: render the prose. `briefingText` is guaranteed
+            // non-empty by B5.3's parseAgentReply validation.
+            Text(dto.briefingText)
+                .font(.title3)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 28)
+        case .noSession, .none:
+            // Fresh install / bedtime never armed. The encouragement copy is
+            // intentional: we're telling the user how to get tomorrow's
+            // briefing, not apologising for tonight's absence.
+            VStack(spacing: 8) {
+                Text("No briefing this morning")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.7))
+                Text("Sleep well tonight — Claude will prepare one.")
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+        case .failure(_, let message):
+            // Pipeline wired, something went wrong. `message` is copy from
+            // `OvernightScheduler.classify(fetchError:)` which already speaks
+            // in second-person to the user.
+            VStack(spacing: 8) {
+                Text("Briefing unavailable")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.7))
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
+        }
+    }
+
+    #if DEBUG
+    private var reasonTag: String? {
+        switch result {
+        case .success: return "reason: success"
+        case .noSession: return "reason: noSession"
+        case .failure(let reason, _): return "reason: failure.\(reason.rawValue)"
+        case .none: return "reason: nil"
+        }
+    }
+    #endif
+
+    /// One-liner tag for logs; mirrors the DEBUG overlay but does NOT include
+    /// the user-visible failure message (which may carry PII-adjacent content
+    /// from the OvernightAgentError chain).
+    private static func tag(_ result: BriefingResult?) -> String {
+        switch result {
+        case .success: return "success"
+        case .noSession: return "noSession"
+        case .failure(let reason, _): return "failure.\(reason.rawValue)"
+        case .none: return "nil"
         }
     }
 }
 
-#Preview("With briefing") {
+#Preview("Success") {
     MorningBriefingView(
-        briefing: MorningBriefing(
+        result: .success(BriefingDTO(
+            briefingText: "You slept 7h 15m — steady HR overnight. Expect a smooth verification today. Hydrate early; you were lighter on water yesterday evening.",
             forWakeDate: .now,
-            briefingText: "You slept 7h 15m — steady HR overnight. Expect a smooth verification today. Hydrate early; you were lighter on water yesterday evening."
-        ),
+            sourceSessionID: "sesn_preview",
+            memoryUpdateApplied: false
+        )),
         onDismiss: {}
     )
 }
 
-#Preview("No briefing") {
-    MorningBriefingView(briefing: nil, onDismiss: {})
+#Preview("No session") {
+    MorningBriefingView(result: .noSession, onDismiss: {})
+}
+
+#Preview("Transport failure") {
+    MorningBriefingView(
+        result: .failure(reason: .fetchTransportFailed,
+                         message: "Couldn't reach Claude tonight — your alarm still verified. Try tomorrow."),
+        onDismiss: {}
+    )
+}
+
+#Preview("Nil result (defensive)") {
+    MorningBriefingView(result: nil, onDismiss: {})
 }

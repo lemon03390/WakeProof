@@ -46,7 +46,11 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
     func fetchBriefing(handle: String) async throws -> (text: String, memoryUpdate: String?) {
         logger.info("fetchBriefing: session=\(handle.prefix(12), privacy: .private)")
         let rawText = try await client.fetchLatestAgentMessage(sessionID: handle) ?? ""
-        let parsed = Self.parseAgentReply(rawText)
+        // parseAgentReply throws `emptyBriefingResponse` when the agent's reply
+        // has a marker with no content after it — catch surface is the same as
+        // a transport error so finalizeBriefing can map to `.failure(...)`
+        // uniformly. B5.3 fix.
+        let parsed = try Self.parseAgentReply(rawText)
         logger.info("fetchBriefing: briefingChars=\(parsed.text.count, privacy: .public) memoryUpdate=\(parsed.memoryUpdate != nil, privacy: .public)")
         return parsed
     }
@@ -106,9 +110,17 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
     ///   MEMORY_UPDATE: <text or NONE>
     /// Tolerates missing markers: if neither shows up, treat the whole text as
     /// the briefing with no memory update.
-    static func parseAgentReply(_ raw: String) -> (text: String, memoryUpdate: String?) {
+    ///
+    /// B5.3: throws `OvernightAgentError.emptyBriefingResponse` if the raw
+    /// input is empty OR the BRIEFING: marker is present with no prose after
+    /// it (whitespace-only content). Previously returned `("", nil)` — which
+    /// silently produced empty MorningBriefing rows and hid the pipeline
+    /// failure from the user under the same "No briefing" fallback the
+    /// fresh-install path uses. Throwing here lets the caller map to
+    /// `BriefingResult.failure(.agentEmptyResponse, ...)`.
+    static func parseAgentReply(_ raw: String) throws -> (text: String, memoryUpdate: String?) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return ("", nil) }
+        guard !trimmed.isEmpty else { throw OvernightAgentError.emptyBriefingResponse }
 
         // Case: both markers present
         if let briefingRange = trimmed.range(of: "BRIEFING:", options: .caseInsensitive),
@@ -118,6 +130,7 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let memoryText = String(trimmed[memoryRange.upperBound...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !briefingText.isEmpty else { throw OvernightAgentError.emptyBriefingResponse }
             let memoryUpdate: String? = (memoryText.uppercased() == "NONE" || memoryText.isEmpty) ? nil : memoryText
             return (briefingText, memoryUpdate)
         }
@@ -126,10 +139,12 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
         if let briefingRange = trimmed.range(of: "BRIEFING:", options: .caseInsensitive) {
             let briefingText = String(trimmed[briefingRange.upperBound...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !briefingText.isEmpty else { throw OvernightAgentError.emptyBriefingResponse }
             return (briefingText, nil)
         }
 
-        // Case: no markers — treat the whole text as the briefing
+        // Case: no markers — treat the whole text as the briefing (already
+        // guaranteed non-empty by the early-return above).
         return (trimmed, nil)
     }
 }

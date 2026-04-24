@@ -69,6 +69,14 @@ actor OvernightScheduler {
     /// at $0.08/hr each.
     private var sessionCreationInFlight: Bool = false
 
+    /// R9 fix: surfaces the error from the most recent failed
+    /// `startOvernightSession` call so the UI (AlarmSchedulerView banner) can
+    /// tell the user "tonight's overnight analysis couldn't start — we'll
+    /// retry". Previously the catch branch only logged, so a pipeline that
+    /// silently stopped working looked identical to a correctly-armed one.
+    /// Cleared on the next successful start.
+    private var _lastSessionStartError: String?
+
     init(
         source: any OvernightBriefingSource,
         sleepReader: HealthKitSleepReader,
@@ -143,11 +151,28 @@ actor OvernightScheduler {
                 return
             }
             defaults.set(handle, forKey: Self.activeHandleKey)
+            // R9 fix: successful start clears any previous failure banner. A
+            // stale error on the UI after a successful retry would be worse
+            // than no banner at all — users would still think the pipeline
+            // was broken.
+            _lastSessionStartError = nil
             logger.info("startOvernightSession: session open handle=\(handle.prefix(8), privacy: .private)")
             scheduleNextBackgroundRefresh()
         } catch {
+            // R9 fix: expose the failure for banner surfacing. The error
+            // description is user-visible — OvernightAgentError.errorDescription
+            // values are already written as short user-friendly strings.
+            _lastSessionStartError = error.localizedDescription
             logger.error("startOvernightSession failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// R9 fix: surfaced as an async read (actor-local property) so MainActor
+    /// callers can read it via `await`. AlarmSchedulerView polls this on view
+    /// appear / on each state change; a more elaborate push-based observer is
+    /// unwarranted when the banner only refreshes on user-visible boundaries.
+    func lastSessionStartError() async -> String? {
+        _lastSessionStartError
     }
 
     /// BGProcessingTask handler. **Order is load-bearing** (R1 in plan review):
@@ -243,60 +268,108 @@ actor OvernightScheduler {
 
     /// Called at wake time after VERIFIED. Pulls the briefing from the source,
     /// applies any memoryUpdate, tears down the source (terminates Managed Agent
-    /// session), clears the active-handle flag, and returns a Sendable DTO for
-    /// the main actor to materialise into a `MorningBriefing` SwiftData row.
+    /// session), clears the active-handle flag, and returns a `BriefingResult`
+    /// that distinguishes success / no-session / failure for the UI layer.
     ///
-    /// Returns nil when there is no active session (fresh install, previously
-    /// finalized, or prior bedtime wasn't reached). The UI gracefully handles
-    /// nil — `MorningBriefingView` shows nothing rather than a placeholder.
+    /// B5.2 fix: EVERY failure path below calls `source.cleanup(handle:)` and
+    /// clears the active-handle UserDefaults key. Previously the top-level
+    /// `catch { return nil }` left the session running at $0.08/hr until the
+    /// next app launch's `cleanupStaleOvernightSessionIfNeeded` caught it —
+    /// effectively up to 24h of cost-leak per failed fetch.
     ///
-    /// R5 fix: previously this method constructed `ModelContext(modelContainer)`
-    /// *inside* the scheduler actor (non-MainActor executor), inserted a
-    /// `@Model` instance, saved, and returned the model across the actor
-    /// boundary to the MainActor caller who then read `briefing.briefingText`
-    /// from SwiftUI. SwiftData `@Model` instances are tied to the executor that
-    /// owns their `ModelContext`; reading them from a different executor
-    /// produces release-mode store-corruption assertions. The DTO shape
-    /// decouples the on-actor work (fetch + memory update) from the main-actor
-    /// work (materialise into `mainContext`). See WakeProofApp RootView's
-    /// onChange handler for the main-actor side of the pair.
-    func finalizeBriefing(forWakeDate wakeDate: Date) async -> BriefingDTO? {
+    /// B5 fix: returns `BriefingResult` (enum) rather than `BriefingDTO?`. The
+    /// nil vs. DTO distinction previously collapsed "no session" + "fetch
+    /// threw" + "agent returned empty" into one bucket the UI rendered as a
+    /// fresh-install card. Each branch now carries a distinct failure reason
+    /// and user-visible message so MorningBriefingView can explain what went
+    /// wrong rather than pretending the pipeline was never wired.
+    ///
+    /// R5 fix (carried over): the DTO shape decouples on-actor work (fetch +
+    /// memory update) from main-actor work (materialise into `mainContext`).
+    /// See WakeProofApp RootView's onChange handler for the main-actor side.
+    func finalizeBriefing(forWakeDate wakeDate: Date) async -> BriefingResult {
         guard let handle = defaults.string(forKey: Self.activeHandleKey) else {
             logger.info("finalizeBriefing: no active handle, nothing to finalize")
-            return nil
+            return .noSession
         }
+        let text: String
+        let memoryUpdate: String?
         do {
-            let (text, memoryUpdate) = try await source.fetchBriefing(handle: handle)
+            let fetched = try await source.fetchBriefing(handle: handle)
+            text = fetched.text
+            memoryUpdate = fetched.memoryUpdate
             logger.info("finalizeBriefing: briefing fetched chars=\(text.count, privacy: .public)")
-            var memoryUpdateApplied = false
-            if let memoryUpdate {
-                // Previously `try?` swallowed rewrite failures then unconditionally set
-                // the flag — so `memoryUpdateApplied` lied when a disk-full or invalid-
-                // UUID error hit. CLAUDE.md promoted rule #2 forbids silent catch; wrap
-                // in do/catch so the flag reflects reality and a failure logs visibly.
-                // The DTO (and thus the briefing) is still returned — it's the
-                // user-facing artefact and memory is ancillary, so a memory-store
-                // hiccup must not mask the briefing on the morning cover.
-                do {
-                    try await memoryStore.rewriteProfile(memoryUpdate)
-                    memoryUpdateApplied = true
-                    logger.info("finalizeBriefing: memory update applied chars=\(memoryUpdate.count, privacy: .public)")
-                } catch {
-                    logger.warning("finalizeBriefing: memory rewrite failed; briefing kept, flag stays false: \(error.localizedDescription, privacy: .public)")
-                }
-            }
+        } catch {
+            // B5.2 cleanup invariant: release the session on every failure
+            // path. `source.cleanup` is best-effort and its own errors are
+            // already swallowed + logged inside ManagedAgentBriefingSource.
             await source.cleanup(handle: handle)
             defaults.removeObject(forKey: Self.activeHandleKey)
-            return BriefingDTO(
-                briefingText: text,
-                forWakeDate: wakeDate,
-                sourceSessionID: handle,
-                memoryUpdateApplied: memoryUpdateApplied
-            )
-        } catch {
-            logger.error("finalizeBriefing failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            let (reason, message) = Self.classify(fetchError: error)
+            logger.error("finalizeBriefing failed: reason=\(reason.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+            return .failure(reason: reason, message: message)
         }
+
+        var memoryUpdateApplied = false
+        if let memoryUpdate {
+            // Previously `try?` swallowed rewrite failures then unconditionally set
+            // the flag — so `memoryUpdateApplied` lied when a disk-full or invalid-
+            // UUID error hit. CLAUDE.md promoted rule #2 forbids silent catch; wrap
+            // in do/catch so the flag reflects reality and a failure logs visibly.
+            // The DTO (and thus the briefing) is still returned — it's the
+            // user-facing artefact and memory is ancillary, so a memory-store
+            // hiccup must not mask the briefing on the morning cover.
+            do {
+                try await memoryStore.rewriteProfile(memoryUpdate)
+                memoryUpdateApplied = true
+                logger.info("finalizeBriefing: memory update applied chars=\(memoryUpdate.count, privacy: .public)")
+            } catch {
+                logger.warning("finalizeBriefing: memory rewrite failed; briefing kept, flag stays false: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        await source.cleanup(handle: handle)
+        defaults.removeObject(forKey: Self.activeHandleKey)
+        return .success(BriefingDTO(
+            briefingText: text,
+            forWakeDate: wakeDate,
+            sourceSessionID: handle,
+            memoryUpdateApplied: memoryUpdateApplied
+        ))
+    }
+
+    /// B5.2 helper: map a `fetchBriefing` error to a `BriefingFailureReason` +
+    /// user-visible message. The specific OvernightAgentError cases the
+    /// ManagedAgentBriefingSource surfaces fall into three user-perceived
+    /// buckets: transport (couldn't reach Claude at all), HTTP (reached the
+    /// proxy but got a non-2xx), and content (reached Claude but the reply
+    /// was empty or malformed). Anything else defaults to `.parseFailed` with
+    /// a generic message — callers should never lose the underlying
+    /// localizedDescription, which gets logged one line above.
+    ///
+    /// Keeping this map inside the scheduler (rather than on OvernightAgentError
+    /// itself) isolates the UI-copy decisions here — the client library stays
+    /// free of end-user language concerns.
+    private static func classify(fetchError error: Error) -> (BriefingFailureReason, String) {
+        if let agentError = error as? OvernightAgentError {
+            switch agentError {
+            case .transportFailed, .timeout, .missingProxyToken, .invalidURL:
+                return (.fetchTransportFailed,
+                        "Couldn't reach Claude tonight — your alarm still verified. Try tomorrow.")
+            case .httpError(let status, _):
+                return (.fetchHTTPError,
+                        "Claude had a hiccup (HTTP \(status)). Your alarm verified fine.")
+            case .emptyBriefingResponse:
+                return (.agentEmptyResponse,
+                        "Claude's briefing came back empty. Your alarm verified fine.")
+            case .missingResourceID, .decodingFailed:
+                return (.parseFailed,
+                        "Claude's briefing didn't parse cleanly. Your alarm verified fine.")
+            }
+        }
+        // Unknown error type: classify as parseFailed — generic enough to be
+        // safe, distinct enough from the transport/HTTP buckets that logs stay
+        // useful for post-mortem.
+        return (.parseFailed, "Claude's briefing couldn't be retrieved. Your alarm verified fine.")
     }
 
     /// Launch-time cleanup — if UserDefaults holds a stale handle from a

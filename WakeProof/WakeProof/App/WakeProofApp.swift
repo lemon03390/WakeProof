@@ -308,9 +308,13 @@ struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
 
-    /// Briefing finalized on the (.verifying → .idle) transition. Latched here so the
-    /// fullScreenCover reads a stable reference even after its background Task resolves.
-    @State private var latestBriefing: MorningBriefing?
+    /// B5: briefing finalized on the (.verifying → .idle) transition. Latched
+    /// here so the fullScreenCover reads a stable reference even after its
+    /// background Task resolves. The `BriefingResult` enum carries all three
+    /// outcomes (success / noSession / failure) — the View branches to render
+    /// distinct copy per reason. `MorningBriefing` SwiftData rows are still
+    /// written on the success branch for audit trail / weekly-coach consumption.
+    @State private var latestBriefingResult: BriefingResult?
     @State private var showBriefing = false
 
     private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "briefing-view")
@@ -335,13 +339,12 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: scheduler.phase)
         .fullScreenCover(isPresented: $showBriefing) {
-            // Presented on VERIFIED. `latestBriefing` can be nil when the scheduler
-            // had no active session (fresh install, no bedtime set, or the Noop source
-            // returned an error at fetchBriefing) — MorningBriefingView handles nil
-            // by rendering a fallback "no briefing yet" card.
-            MorningBriefingView(briefing: latestBriefing) {
+            // Presented on VERIFIED. `latestBriefingResult` carries the
+            // BriefingResult enum — MorningBriefingView branches on each case
+            // (success / noSession / failure) to render distinct copy.
+            MorningBriefingView(result: latestBriefingResult) {
                 showBriefing = false
-                latestBriefing = nil
+                latestBriefingResult = nil
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -361,42 +364,54 @@ struct RootView: View {
                 // Surface the overnight briefing right after a successful verify. The
                 // fetch runs in a detached Task so the scheduler's isolation boundary
                 // is honoured; the main-actor hop afterwards drives the cover binding.
-                // The whole thing is ancillary — any error here just means no briefing
-                // appears, which is the same UX as no bedtime being set (handled by
-                // MorningBriefingView's nil-briefing fallback).
+                // The whole thing is ancillary — a failure here surfaces a distinct
+                // error card in MorningBriefingView (B5 fix) rather than the
+                // misleading "no briefing" placeholder the previous code used.
                 //
-                // R5 fix: the scheduler now returns a Sendable `BriefingDTO` rather
-                // than a `@Model MorningBriefing` instance — SwiftData `@Model`s are
-                // tied to the executor that owns their `ModelContext`, so a model
-                // constructed inside the scheduler actor can't be safely read from
-                // SwiftUI on the main actor. The DTO carries the plain-data payload
-                // across the boundary; below we materialise it into `mainContext`
-                // (the container's main-actor-owned context) and persist it.
+                // B5 fix: `BriefingResult` replaces `BriefingDTO?`. The enum carries
+                // three outcomes (success / noSession / failure) so each case renders
+                // distinct UI — a network hiccup no longer looks like a fresh
+                // install.
+                //
+                // R5 fix (carried over): we materialise the SwiftData `@Model` from
+                // the DTO on the main actor (container.mainContext) — the scheduler
+                // actor only produces Sendable values across the isolation boundary.
                 let scheduler = overnightScheduler
                 let container = modelContext.container
                 Task { @MainActor in
-                    guard let dto = await scheduler.finalizeBriefing(forWakeDate: .now) else {
+                    let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+                    switch result {
+                    case .success(let dto):
+                        // Success: persist a `MorningBriefing` row for audit /
+                        // weekly-coach consumption, then show the cover. Persist
+                        // failure is non-fatal — the in-memory latched DTO is
+                        // enough to render this morning's cover; we just lose
+                        // the historical row.
+                        let briefing = MorningBriefing(
+                            forWakeDate: dto.forWakeDate,
+                            briefingText: dto.briefingText,
+                            sourceSessionID: dto.sourceSessionID,
+                            memoryUpdateApplied: dto.memoryUpdateApplied
+                        )
+                        let mainContext = container.mainContext
+                        mainContext.insert(briefing)
+                        do {
+                            try mainContext.save()
+                            Self.logger.info("VERIFIED transition: briefing inserted chars=\(dto.briefingText.count, privacy: .public)")
+                        } catch {
+                            Self.logger.error("VERIFIED transition: briefing persist failed: \(error.localizedDescription, privacy: .public)")
+                            mainContext.rollback()
+                        }
+                    case .noSession:
                         Self.logger.info("VERIFIED transition: no briefing (no active session)")
-                        latestBriefing = nil
-                        showBriefing = true
-                        return
+                    case .failure(let reason, _):
+                        // Preserve the failure for UI rendering. Intentionally do
+                        // NOT persist a MorningBriefing row — the SwiftData table is
+                        // reserved for real briefings the weekly coach can consume.
+                        // The audit trail for failures lives in the Logger stream.
+                        Self.logger.warning("VERIFIED transition: briefing failure reason=\(reason.rawValue, privacy: .public)")
                     }
-                    let briefing = MorningBriefing(
-                        forWakeDate: dto.forWakeDate,
-                        briefingText: dto.briefingText,
-                        sourceSessionID: dto.sourceSessionID,
-                        memoryUpdateApplied: dto.memoryUpdateApplied
-                    )
-                    let mainContext = container.mainContext
-                    mainContext.insert(briefing)
-                    do {
-                        try mainContext.save()
-                        Self.logger.info("VERIFIED transition: briefing inserted chars=\(dto.briefingText.count, privacy: .public)")
-                    } catch {
-                        Self.logger.error("VERIFIED transition: briefing persist failed: \(error.localizedDescription, privacy: .public)")
-                        mainContext.rollback()
-                    }
-                    latestBriefing = briefing
+                    latestBriefingResult = result
                     showBriefing = true
                 }
             case (_, .verifying):

@@ -25,6 +25,43 @@ struct BriefingDTO: Sendable {
     let memoryUpdateApplied: Bool
 }
 
+/// B5 fix: Why the scheduler's return type expanded from `BriefingDTO?` to
+/// `BriefingResult`.
+///
+/// The prior shape (`BriefingDTO?`) conflated three very different outcomes:
+///   1. bedtime never enabled → nil (fresh-install / unarmed case)
+///   2. fetchBriefing threw    → nil (transport error, session still burning $)
+///   3. agent returned empty   → DTO with `briefingText = ""` (parseFailed)
+///
+/// In every case the UI showed "No briefing this morning — sleep well tonight"
+/// which (a) looked like a fresh-install screen for a network hiccup, and (b)
+/// masked the cost-leak: the fetch-failure catch branch did NOT cleanup the
+/// Managed Agent session, so the meter ran at $0.08/hr until next app launch.
+///
+/// The enum forces the caller to handle each case and lets the View render a
+/// distinct message per failure mode. The `failure` payload carries a
+/// user-visible message and a machine-readable reason code for DEBUG overlays.
+enum BriefingFailureReason: String, Sendable {
+    case noSessionConfigured
+    case fetchTransportFailed
+    case fetchHTTPError
+    case agentEmptyResponse
+    case parseFailed
+}
+
+enum BriefingResult: Sendable {
+    /// Agent produced a briefing; materialise the DTO into SwiftData.
+    case success(BriefingDTO)
+    /// Finalize attempted but failed (fetch threw, agent empty, parse broken).
+    /// `message` is user-visible; `reason` is machine-readable for logs.
+    case failure(reason: BriefingFailureReason, message: String)
+    /// No active overnight session exists — bedtime never armed tonight, a
+    /// prior finalize already cleared the handle, or this is a fresh install.
+    /// Distinct from `.failure` because the UI should display the "Sleep well
+    /// tonight — Claude will prepare one" encouragement rather than an error.
+    case noSession
+}
+
 @Model
 final class MorningBriefing {
     var generatedAt: Date
