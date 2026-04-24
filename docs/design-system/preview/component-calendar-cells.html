@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="_shared.css" />
+</head>
+<body>
+  <div class="card" style="padding: 24px;">
+    <div style="display:flex; flex-direction:column; gap: 14px;">
+      <!-- Calendar cells demo -->
+      <div style="display:grid; grid-template-columns: repeat(7, 1fr); gap: 8px; padding: 14px 18px; background: var(--wp-cream-50); border-radius: 18px;">
+        <!-- Row with various states -->
+        <div style="aspect-ratio:1; border-radius:50%; background: var(--wp-verified-500); display:flex; align-items:center; justify-content:center; color: var(--wp-cream-50); font-weight: 700; font-size: 13px;">✓</div>
+        <div style="aspect-ratio:1; border-radius:50%; background: var(--wp-verified-500); display:flex; align-items:center; justify-content:center; color: var(--wp-cream-50); font-weight: 700; font-size: 13px;">✓</div>
+        <div style="aspect-ratio:1; border-radius:50%; background: var(--wp-verified-500); display:flex; align-items:center; justify-content:center; color: var(--wp-cream-50); font-weight: 700; font-size: 13px;">✓</div>
+        <div style="aspect-ratio:1; border-radius:50%; border: 2px solid var(--wp-attempted-500); display:flex; align-items:center; justify-content:center; color: var(--wp-attempted-500); font-weight: 600; font-size: 13px; box-sizing:border-box;">14</div>
+        <div style="aspect-ratio:1; border-radius:50%; background: var(--wp-verified-500); display:flex; align-items:center; justify-content:center; color: var(--wp-cream-50); font-weight: 700; font-size: 13px;">✓</div>
+        <div style="aspect-ratio:1; border-radius:50%; background: var(--wp-verified-500); display:flex; align-items:center; justify-content:center; color: var(--wp-cream-50); font-weight: 700; font-size: 13px; outline: 2px solid var(--wp-coral-500); outline-offset: 2px;">✓</div>
+        <div style="aspect-ratio:1; border-radius:50%; background: rgba(138,107,85,0.2); display:flex; align-items:center; justify-content:center; color: var(--wp-fg-secondary); font-weight: 500; font-size: 13px;">18</div>
+      </div>
+      <div style="display:flex; gap: 20px; flex-wrap: wrap; padding: 0 6px;">
+        <div style="display:flex; align-items:center; gap: 8px;"><div style="width:12px; height:12px; border-radius:50%; background: var(--wp-verified-500);"></div><span class="note" style="font-size:12px;">Verified — you got up</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><div style="width:12px; height:12px; border-radius:50%; border: 2px solid var(--wp-attempted-500); box-sizing:border-box;"></div><span class="note" style="font-size:12px;">Alarm fired, not verified</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><div style="width:12px; height:12px; border-radius:50%; background: rgba(138,107,85,0.2);"></div><span class="note" style="font-size:12px;">No attempt</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

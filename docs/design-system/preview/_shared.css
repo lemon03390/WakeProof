@@ -1,0 +1,101 @@
+/* Shared styles for Design System preview cards.
+   Each card is a 700×~var px frame with no chrome — the asset name renders
+   outside the card, so we focus on the content directly. */
+
+@import url("../colors_and_type.css");
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--wp-cream-100);
+  color: var(--wp-fg-primary);
+  font-family: var(--wp-font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  box-sizing: border-box;
+  width: 700px;
+  padding: 28px 32px;
+  background: var(--wp-cream-100);
+}
+
+.card--dark {
+  background: var(--wp-char-900);
+  color: var(--wp-cream-50);
+}
+
+.card--dark .label,
+.card--dark .hex,
+.card--dark .note {
+  color: rgba(251, 238, 219, 0.65);
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--wp-char-500);
+}
+
+.hex {
+  font-family: var(--wp-font-mono);
+  font-size: 11px;
+  color: var(--wp-char-500);
+  letter-spacing: 0.02em;
+}
+
+.note {
+  font-size: 13px;
+  color: var(--wp-char-500);
+  line-height: 1.45;
+}
+
+.swatch {
+  border-radius: var(--wp-radius-md);
+  box-shadow: 0 0 0 1px rgba(43, 31, 23, 0.06) inset;
+}
+
+.stack > * + * { margin-top: 10px; }
+.row { display: flex; align-items: center; gap: 16px; }
+
+/* Pill (primary button) shared styles, used across component cards. */
+.wp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 52px;
+  padding: 0 24px;
+  border: none;
+  border-radius: 14px;
+  font-family: var(--wp-font-body);
+  font-weight: 600;
+  font-size: 17px;
+  cursor: pointer;
+  transition: opacity 120ms var(--wp-ease-standard),
+              transform 120ms var(--wp-ease-standard);
+}
+.wp-btn--alarm {
+  height: 60px;
+  border-radius: 999px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--wp-cream-50);
+  background: var(--wp-gradient-primary);
+  box-shadow: var(--wp-shadow-accent);
+}
+.wp-btn--white {
+  color: var(--wp-char-900);
+  background: var(--wp-cream-50);
+}
+.wp-btn--confirm {
+  color: var(--wp-cream-50);
+  background: var(--wp-verified-500);
+}
+.wp-btn--muted {
+  color: var(--wp-char-900);
+  background: rgba(254, 248, 237, 0.4);
+  cursor: not-allowed;
+}
+.wp-btn:active { opacity: 0.85; transform: scale(0.98); }

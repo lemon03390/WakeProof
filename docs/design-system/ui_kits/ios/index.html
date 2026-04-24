@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WakeProof · iOS UI Kit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #F3EADB; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    .kit-caption { font-size: 13px; color: #8A6B55; line-height: 1.5; padding: 10px 14px 0; }
+  </style>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="screens.jsx"></script>
+  <script type="text/babel" data-presets="react">
+    const DEVICE_W = 402;
+    const DEVICE_H = 874;
+
+    function Device({ screen, dark = false, label }) {
+      return (
+        <IOSDevice width={DEVICE_W} height={DEVICE_H} dark={dark} time="6:30">
+          {screen}
+        </IOSDevice>
+      );
+    }
+
+    function Kit() {
+      return (
+        <DesignCanvas title="WakeProof · iOS UI kit" defaultZoom={0.7}>
+          <DCSection id="onboarding" title="Onboarding" subtitle="Welcome → witness → baseline">
+            <DCArtboard id="welcome" label="01 · Welcome" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<OnboardingWelcomeScreen />} />
+            </DCArtboard>
+            <DCArtboard id="camera" label="02 · Camera permission" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<OnboardingCameraScreen />} />
+            </DCArtboard>
+            <DCArtboard id="baseline" label="03 · Baseline photo" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<BaselinePhotoScreen />} />
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="daily" title="Daily loop" subtitle="Home · ring · verified verdict">
+            <DCArtboard id="home" label="04 · Alarm scheduler (home)" width={DEVICE_W} height={DEVICE_H}>
+              <Device screen={<AlarmSchedulerScreen />} />
+            </DCArtboard>
+            <DCArtboard id="ringing" label="05 · Alarm ringing" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<AlarmRingingScreen />} />
+            </DCArtboard>
+            <DCArtboard id="briefing" label="06 · Morning briefing (sunrise)" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<MorningBriefingScreen />} />
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="gates" title="Commitment gates" subtitle="Disable = same proof as a ring">
+            <DCArtboard id="disable" label="07 · Disable challenge" width={DEVICE_W} height={DEVICE_H}>
+              <Device dark screen={<DisableChallengeScreen />} />
+            </DCArtboard>
+          </DCSection>
+        </DesignCanvas>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Kit />);
+  </script>
+</body>
+</html>

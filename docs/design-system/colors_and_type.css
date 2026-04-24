@@ -1,0 +1,265 @@
+/* ==========================================================================
+   WakeProof — Core Design Tokens
+   --------------------------------------------------------------------------
+   Palette is derived from the AppIcon (cream bg + orange→coral gradient
+   alarm clock). The app's current SwiftUI views lean on cold pure black /
+   pure white which breaks continuity with the icon; this file is the source
+   of truth for the warm-shift across both design surfaces and the iOS build.
+
+   Semantic tokens are split into "light" (cream-on-charcoal text surfaces)
+   and "dark" (warm-charcoal hero screens: ringing, morning-briefing, disable
+   challenge). No cold neutrals — every grey has a warm rotation.
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap");
+
+:root {
+  /* ── Brand palette ──────────────────────────────────────────────────── */
+  /* Cream surface — the icon's background. NOT pure white. */
+  --wp-cream-50:  #FEF8ED;   /* lifted card surface */
+  --wp-cream-100: #FBEEDB;   /* base cream — app background */
+  --wp-cream-200: #F5E3C7;   /* subtle divider, selected row */
+  --wp-cream-300: #EAD3AD;   /* pressed state on cream */
+
+  /* Warm charcoal — the icon's dark mark. NOT pure black. */
+  --wp-char-950: #1A120C;   /* deepest warm black (dark surface bg) */
+  --wp-char-900: #2B1F17;   /* hero-dark surface (ringing, briefing) */
+  --wp-char-800: #3D2D22;   /* elevated card in dark mode */
+  --wp-char-700: #554034;   /* secondary text on dark */
+  --wp-char-500: #8A6B55;   /* warm mid-grey — de-emphasized text */
+  --wp-char-300: #B89A82;   /* tertiary / placeholder */
+
+  /* Accent — the icon's orange→coral gradient. */
+  --wp-orange-500: #FFA047;  /* gradient start (top-left) */
+  --wp-orange-600: #FF8429;  /* pressed / darker mid */
+  --wp-coral-500:  #F54F4F;  /* gradient end (bottom-right) */
+  --wp-coral-600:  #D83838;  /* pressed coral */
+
+  /* Semantic supports — all warm-shifted, no cold blues/greens. */
+  --wp-verified-500: #4E8F47;   /* streak-verified day: warm leafy green */
+  --wp-verified-300: #8DBD88;   /* lighter success */
+  --wp-attempted-500: #E07A2E;  /* tried-but-not-verified: burnt amber */
+  --wp-warning-500:  #E6B54A;   /* soft warm yellow for banner */
+  --wp-danger-500:   #C94A3A;   /* same family as coral — serious tone */
+
+  /* Gradients — the signature WakeProof fill. */
+  --wp-gradient-primary: linear-gradient(135deg, var(--wp-orange-500) 0%, var(--wp-coral-500) 100%);
+  --wp-gradient-primary-soft: linear-gradient(135deg, #FFB878 0%, #F8796D 100%);
+  --wp-gradient-sunrise: linear-gradient(180deg, #2B1F17 0%, #6E3824 45%, #F38B4D 85%, #FBEEDB 100%);
+  --wp-gradient-hero-dark: linear-gradient(180deg, #1A120C 0%, #2B1F17 60%, #3D2D22 100%);
+
+  /* ── Semantic foundation (LIGHT — default app surface) ──────────────── */
+  --wp-bg:             var(--wp-cream-100);
+  --wp-bg-elevated:    var(--wp-cream-50);
+  --wp-bg-pressed:     var(--wp-cream-200);
+  --wp-divider:        rgba(43, 31, 23, 0.10);
+  --wp-divider-strong: rgba(43, 31, 23, 0.18);
+
+  --wp-fg-primary:   var(--wp-char-900);   /* body + headings */
+  --wp-fg-secondary: var(--wp-char-500);   /* labels, meta */
+  --wp-fg-tertiary:  var(--wp-char-300);   /* placeholder */
+  --wp-fg-on-accent: var(--wp-cream-50);   /* text on gradient/coral */
+
+  --wp-accent:         var(--wp-coral-500);
+  --wp-accent-gradient: var(--wp-gradient-primary);
+
+  /* ── Elevation / radii / spacing ────────────────────────────────────── */
+  --wp-radius-xs: 6px;
+  --wp-radius-sm: 10px;
+  --wp-radius-md: 14px;   /* PrimaryButtonStyle default cornerRadius: 12 → round up to 14 for softer feel */
+  --wp-radius-lg: 20px;   /* cards */
+  --wp-radius-xl: 28px;   /* hero cards, briefing */
+  --wp-radius-pill: 999px;
+
+  --wp-shadow-sm: 0 1px 2px rgba(43, 31, 23, 0.06), 0 1px 1px rgba(43, 31, 23, 0.04);
+  --wp-shadow-md: 0 4px 14px rgba(43, 31, 23, 0.08), 0 2px 4px rgba(43, 31, 23, 0.04);
+  --wp-shadow-lg: 0 12px 32px rgba(43, 31, 23, 0.12), 0 4px 8px rgba(43, 31, 23, 0.06);
+  --wp-shadow-accent: 0 8px 24px rgba(245, 79, 79, 0.25);
+
+  /* Spacing scale — 4pt base. */
+  --wp-space-1: 4px;
+  --wp-space-2: 8px;
+  --wp-space-3: 12px;
+  --wp-space-4: 16px;   /* base row padding */
+  --wp-space-5: 20px;
+  --wp-space-6: 24px;   /* section gap */
+  --wp-space-8: 32px;   /* screen padding */
+  --wp-space-10: 40px;
+  --wp-space-12: 48px;
+  --wp-space-16: 64px;  /* hero top space */
+
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  /* Body: SF Pro (iOS system); on web we fall back to a humanist sans.
+     SF Pro is not freely redistributable; we do NOT ship a web-font — the
+     UI kit targets iOS, and design-system previews use the system stack. */
+  --wp-font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Segoe UI", Roboto, system-ui, sans-serif;
+
+  /* Display (hero times, streak digits): SwiftUI uses `.system(design: .rounded)`
+     which renders as SF Pro Rounded on iOS. For web previews we substitute
+     Nunito — the closest open-source humanist-rounded match; see README
+     TYPE NOTES for flagged substitution. */
+  --wp-font-display: "Nunito", "SF Pro Rounded", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+
+  /* Mono — used only in developer surfaces / code blocks in docs. */
+  --wp-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Type scale — matches the SwiftUI `.system(size:)` values actually used
+     in AlarmRingingView, AlarmSchedulerView, MorningBriefing, etc. */
+  --wp-fs-hero-xl: 88px;   /* AlarmRingingView time */
+  --wp-fs-hero:    64px;   /* MorningBriefing H1 */
+  --wp-fs-display: 42px;   /* Welcome title */
+  --wp-fs-title-1: 34px;
+  --wp-fs-title-2: 28px;
+  --wp-fs-title-3: 22px;
+  --wp-fs-headline: 17px;
+  --wp-fs-body:     17px;
+  --wp-fs-callout:  16px;
+  --wp-fs-subhead:  15px;
+  --wp-fs-footnote: 13px;
+  --wp-fs-caption:  12px;
+
+  --wp-lh-tight:  1.10;
+  --wp-lh-snug:   1.25;
+  --wp-lh-normal: 1.45;
+  --wp-lh-relaxed: 1.60;
+
+  --wp-tracking-hero: -0.02em;
+  --wp-tracking-display: -0.015em;
+  --wp-tracking-body: 0em;
+  --wp-tracking-caps: 0.08em;
+
+  /* Motion — iOS-native easing defaults. */
+  --wp-ease-standard: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --wp-ease-emphasize: cubic-bezier(0.2, 0, 0, 1);
+  --wp-ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --wp-dur-fast: 120ms;    /* PrimaryButtonStyle press animation */
+  --wp-dur-base: 240ms;
+  --wp-dur-slow: 480ms;
+  --wp-dur-hero: 1200ms;   /* sunrise reveal */
+}
+
+/* ── Semantic override: DARK / hero surfaces ─────────────────────────────
+   Applied to AlarmRingingView, MorningBriefingView, DisableChallengeView,
+   Onboarding screens. Toggle via `.wp-dark` class on the root, OR via the
+   prefers-color-scheme query on web previews. */
+.wp-dark,
+.wp-hero-dark {
+  --wp-bg:             var(--wp-char-900);
+  --wp-bg-elevated:    var(--wp-char-800);
+  --wp-bg-pressed:     var(--wp-char-700);
+  --wp-divider:        rgba(251, 238, 219, 0.10);
+  --wp-divider-strong: rgba(251, 238, 219, 0.18);
+
+  --wp-fg-primary:   var(--wp-cream-50);
+  --wp-fg-secondary: rgba(251, 238, 219, 0.75);
+  --wp-fg-tertiary:  rgba(251, 238, 219, 0.45);
+  --wp-fg-on-accent: var(--wp-cream-50);
+}
+
+/* ==========================================================================
+   Semantic text styles
+   Matches SwiftUI Text style slots one-for-one so iOS and web previews
+   stay in lockstep.
+   ========================================================================== */
+.wp-hero-xl {
+  font-family: var(--wp-font-display);
+  font-size: var(--wp-fs-hero-xl);
+  font-weight: 700;
+  line-height: var(--wp-lh-tight);
+  letter-spacing: var(--wp-tracking-hero);
+  font-variant-numeric: tabular-nums;
+}
+.wp-hero {
+  font-family: var(--wp-font-display);
+  font-size: var(--wp-fs-hero);
+  font-weight: 700;
+  line-height: var(--wp-lh-tight);
+  letter-spacing: var(--wp-tracking-hero);
+}
+.wp-display {
+  font-family: var(--wp-font-display);
+  font-size: var(--wp-fs-display);
+  font-weight: 700;
+  line-height: var(--wp-lh-tight);
+  letter-spacing: var(--wp-tracking-display);
+}
+.wp-title-1 {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-title-1);
+  font-weight: 700;
+  line-height: var(--wp-lh-snug);
+  letter-spacing: var(--wp-tracking-display);
+}
+.wp-title-2 {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-title-2);
+  font-weight: 700;
+  line-height: var(--wp-lh-snug);
+}
+.wp-title-3 {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-title-3);
+  font-weight: 600;
+  line-height: var(--wp-lh-snug);
+}
+.wp-headline {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-headline);
+  font-weight: 600;
+  line-height: var(--wp-lh-normal);
+}
+.wp-body {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-body);
+  font-weight: 400;
+  line-height: var(--wp-lh-normal);
+}
+.wp-body-em {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-body);
+  font-weight: 500;
+  line-height: var(--wp-lh-normal);
+}
+.wp-callout {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-callout);
+  font-weight: 400;
+  line-height: var(--wp-lh-normal);
+}
+.wp-subhead {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-subhead);
+  font-weight: 400;
+  line-height: var(--wp-lh-normal);
+}
+.wp-footnote {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-footnote);
+  font-weight: 400;
+  line-height: var(--wp-lh-normal);
+}
+.wp-caption {
+  font-family: var(--wp-font-body);
+  font-size: var(--wp-fs-caption);
+  font-weight: 500;
+  line-height: var(--wp-lh-snug);
+  letter-spacing: var(--wp-tracking-caps);
+  text-transform: uppercase;
+}
+
+/* ── Gradient-fill text — hero numerals and accent emphasis ───────────── */
+.wp-text-gradient {
+  background: var(--wp-gradient-primary);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+html, body {
+  font-family: var(--wp-font-body);
+  background: var(--wp-bg);
+  color: var(--wp-fg-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
