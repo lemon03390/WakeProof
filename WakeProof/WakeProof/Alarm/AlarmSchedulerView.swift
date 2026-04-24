@@ -178,6 +178,8 @@ struct AlarmSchedulerView: View {
                                     text: $commitmentNote
                                 )
                                 .wpFont(.body)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
                                 // Wave 5 H2: Cap using `.count` (grapheme-cluster
                                 // measure) — matches user intuition for emoji / CJK,
                                 // same measure used by the test invariant. Trim off
