@@ -257,19 +257,31 @@ struct AlarmSchedulerView: View {
                     WPSection("Streak") {
                         WPCard(padding: WPSpacing.md) {
                             VStack(spacing: 0) {
-                                NavigationLink("View streak calendar") {
+                                NavigationLink {
                                     StreakCalendarView(attempts: wakeAttempts)
+                                } label: {
+                                    HStack {
+                                        Text("View streak calendar").wpFont(.body)
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .wpFont(.footnote)
+                                            .foregroundStyle(Color.wpChar500)
+                                    }
                                 }
-                                .wpFont(.body)
-                                .frame(maxWidth: .infinity, alignment: .leading)
 
                                 Divider().padding(.vertical, WPSpacing.xs2)
 
-                                NavigationLink("Your commitment") {
+                                NavigationLink {
                                     InvestmentDashboardView()
+                                } label: {
+                                    HStack {
+                                        Text("Your commitment").wpFont(.body)
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .wpFont(.footnote)
+                                            .foregroundStyle(Color.wpChar500)
+                                    }
                                 }
-                                .wpFont(.body)
-                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                     }
@@ -354,8 +366,14 @@ struct AlarmSchedulerView: View {
                 .padding(.bottom, WPSpacing.xl4)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(Color.wpCream100)
-            .ignoresSafeArea(edges: .bottom)
+            // Apply ignoresSafeArea ONLY to the cream background — extending
+            // it past the home indicator. Applying it to the ScrollView itself
+            // cancels iOS 16+'s automatic keyboard safe-area inset, which
+            // would obscure the commitment-note TextField on focus
+            // (especially on iPhone SE where vertical space is tightest).
+            .background(
+                Color.wpCream100.ignoresSafeArea(edges: .bottom)
+            )
             .navigationTitle("WakeProof")
             .onAppear(perform: loadFromScheduler)
             // R9: refresh the overnight error banner snapshot whenever the
