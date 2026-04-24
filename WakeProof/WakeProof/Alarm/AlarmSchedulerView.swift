@@ -147,14 +147,22 @@ struct AlarmSchedulerView: View {
                         // `WPStreakBadge.shouldRender(...)` returns false for
                         // a fresh install (both streaks 0) so the badge is
                         // absent rather than showing a bleak "0-day streak".
+                        // Wrapping in a NavigationLink makes the badge itself
+                        // a one-tap entry to the calendar — discoverability
+                        // win vs requiring scroll-to "View streak calendar".
                         if WPStreakBadge.shouldRender(
                             currentStreak: streakService.currentStreak,
                             bestStreak: streakService.bestStreak
                         ) {
-                            WPStreakBadge(
-                                currentStreak: streakService.currentStreak,
-                                bestStreak: streakService.bestStreak
-                            )
+                            NavigationLink {
+                                StreakCalendarView(attempts: wakeAttempts)
+                            } label: {
+                                WPStreakBadge(
+                                    currentStreak: streakService.currentStreak,
+                                    bestStreak: streakService.bestStreak
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
