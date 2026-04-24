@@ -167,9 +167,6 @@ actor PendingMemoryWriteQueue {
                 }
             }
         }
-        if droppedThisPass > 0 {
-            Self.incrementDroppedCount(by: droppedThisPass, on: defaults)
-        }
         // P8: merge any rows that landed during the await window. Without this,
         // a concurrent enqueue during flush would be clobbered by the save-back.
         // Read the current queue, subtract the pre-flush set, append the survivors.
@@ -178,7 +175,17 @@ actor PendingMemoryWriteQueue {
         // holds an immutable copy — Swift 6 strict concurrency rejects
         // capturing a mutable `var` by reference into the `withLock` closure
         // (which is `Sendable`-constrained).
+        //
+        // R3-5 (Stage 6 Wave 3): `incrementDroppedCount` moved INSIDE this
+        // lock block, AFTER `saveQueueUnsafe`. Prior order was counter-bump
+        // first then save — a crash between the two would persist the counter
+        // while leaving the dropped rows on disk, so the next launch re-dropped
+        // them and double-counted. Now either both persist or neither: the
+        // atomic "survivors saved, counter bumped" invariant lives inside one
+        // critical section. `defaults.set` is synchronous so no await occurs
+        // between the two writes.
         let finalSurvivors = survivors
+        let droppedCountToRecord = droppedThisPass
         sharedLock.withLock { _ in
             let currentQueue = loadQueueUnsafe()
             let preFlushIDs = Set(original.map { row in
@@ -193,6 +200,15 @@ actor PendingMemoryWriteQueue {
                 !preFlushIDs.contains("\(row.entry.timestamp.timeIntervalSince1970)_\(row.retryCount)")
             }
             saveQueueUnsafe(finalSurvivors + concurrentlyAdded)
+            // R3-5: bump dropped counter AFTER save so survivor state is the
+            // authoritative "what's still on disk" record by the time the
+            // counter moves — a crash between save and counter-bump simply
+            // leaves the counter slightly under-reported rather than causing
+            // double-count on the next launch (the dropped rows are already
+            // gone from the queue so they cannot be re-dropped).
+            if droppedCountToRecord > 0 {
+                Self.incrementDroppedCount(by: droppedCountToRecord, on: defaults)
+            }
         }
         return finalSurvivors.count
     }

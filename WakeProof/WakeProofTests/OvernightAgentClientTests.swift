@@ -519,6 +519,120 @@ final class OvernightAgentClientTests: XCTestCase {
                      "envID obviously not persisted since env-create failed")
     }
 
+    /// R3-4 (Stage 6 Wave 3): when `createEnvironment` throws after
+    /// `createAgent` succeeded, `ensureAgentAndEnvironment` must attempt a
+    /// best-effort upstream DELETE on the already-created agent BEFORE re-
+    /// throwing the original env-create error. Prior to R3-4 the orphan
+    /// agent sat on Anthropic's side indefinitely (though agents themselves
+    /// don't bill, they're still an accumulating resource hygiene issue
+    /// across reinstalls / dev iteration). This test asserts:
+    ///   (1) A DELETE /v1/agents/:id request reaches the stub.
+    ///   (2) The original env-create error still propagates (NOT the
+    ///       termination error — caller needs the actionable root cause).
+    ///   (3) Neither key is persisted (unchanged P15 invariant).
+    func testCreateEnvironmentFailureAttemptsAgentTermination() async {
+        StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let method = request.httpMethod ?? ""
+            if path.hasSuffix("/v1/agents") && method == "POST" {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "agent_orphan"])
+                return (response, body)
+            } else if path.hasSuffix("/v1/agents/agent_orphan") && method == "DELETE" {
+                // Best-effort agent deletion — return 200. We're asserting the
+                // CALL was attempted (R3-4), not the response shape.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data("{\"id\": \"agent_orphan\", \"type\": \"agent_deleted\"}".utf8))
+            } else if path.hasSuffix("/v1/environments") {
+                // env create throws 500 — the original error that should
+                // still propagate out.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+                return (response, Data("{\"error\": \"env create failed\"}".utf8))
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        do {
+            _ = try await client.ensureAgentAndEnvironment()
+            XCTFail("env-create failure must propagate as a throw")
+        } catch OvernightAgentError.httpError(let status, _) {
+            // R3-4 invariant (2): original env-create error propagates, NOT a
+            // termination error. The env stub returns 500 so we expect
+            // .httpError(status: 500, ...).
+            XCTAssertEqual(status, 500, "caller must receive the original env-create error, not the termination outcome")
+        } catch {
+            XCTFail("expected .httpError(500) from env-create, got \(error)")
+        }
+
+        // R3-4 invariant (1): a DELETE was issued for the orphaned agent.
+        // This asserts the attempt, not the success — a failure to issue
+        // would mean the orphan sits indefinitely.
+        let deletes = StubProtocol.requests.filter { $0.method == "DELETE" }
+        XCTAssertEqual(deletes.count, 1,
+                       "R3-4: env-create failure must trigger exactly one agent-termination DELETE")
+        XCTAssertTrue(deletes.first?.path.hasSuffix("/v1/agents/agent_orphan") ?? false,
+                      "termination DELETE must target /v1/agents/:id of the orphaned agent; got \(deletes.first?.path ?? "<none>")")
+
+        // R3-4 invariant (3): P15 agent-ID-not-persisted invariant preserved.
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightAgentClient.agentIDKey),
+                     "agentID must NOT be persisted when env-create fails — P15 invariant")
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightAgentClient.environmentIDKey),
+                     "envID obviously not persisted since env-create failed")
+    }
+
+    /// R3-4 (Stage 6 Wave 3): if the best-effort agent termination ITSELF
+    /// fails (e.g. the Managed Agents beta doesn't support DELETE /v1/agents),
+    /// `ensureAgentAndEnvironment` must STILL propagate the ORIGINAL env-create
+    /// error — swallowing the termination failure is the documented design
+    /// choice because the original error is the actionable signal for
+    /// retry semantics upstream in OvernightScheduler.startOvernightSession.
+    func testCreateEnvironmentFailureSwallowsAgentTerminationError() async {
+        StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let method = request.httpMethod ?? ""
+            if path.hasSuffix("/v1/agents") && method == "POST" {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "agent_unreachable"])
+                return (response, body)
+            } else if path.contains("/v1/agents/agent_unreachable") && method == "DELETE" {
+                // Simulate the case where DELETE /v1/agents/:id isn't supported
+                // (returns 404 or 405) — R3-4 docs this as the expected failure
+                // mode under the managed-agents-2026-04-01 beta.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 405, httpVersion: nil, headerFields: nil)!
+                return (response, Data("{\"error\": \"method not allowed\"}".utf8))
+            } else if path.hasSuffix("/v1/environments") {
+                // Distinct env-create error so the test can assert the
+                // original propagates vs the 405 termination error.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: nil)!
+                return (response, Data("{\"error\": \"env transient failure\"}".utf8))
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        do {
+            _ = try await client.ensureAgentAndEnvironment()
+            XCTFail("env-create failure must propagate even when termination also fails")
+        } catch OvernightAgentError.httpError(let status, _) {
+            // Caller receives 502 (env-create) not 405 (termination). This is
+            // the load-bearing invariant — if we rethrew the 405 the caller
+            // would think the env endpoint was unreachable and retry on the
+            // wrong signal.
+            XCTAssertEqual(status, 502,
+                           "caller must receive the ORIGINAL env-create 502, not the 405 termination outcome")
+        } catch {
+            XCTFail("expected .httpError(502), got \(error)")
+        }
+
+        // Both requests should still have been attempted — assert the DELETE
+        // was at least tried (so the .fault log fires and we don't silently
+        // skip the hygiene attempt).
+        let deletes = StubProtocol.requests.filter { $0.method == "DELETE" }
+        XCTAssertEqual(deletes.count, 1,
+                       "even when agent-termination fails, the ATTEMPT must be made so the .fault log captures it")
+    }
+
     /// P15 (Stage 6 Wave 2): corruption recovery — if one key is present and
     /// the other is missing (pre-P15 build, or direct defaults tamper), the
     /// ensureAgentAndEnvironment call must wipe both and recreate cleanly.

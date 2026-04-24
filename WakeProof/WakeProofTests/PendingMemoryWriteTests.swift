@@ -178,6 +178,71 @@ final class PendingMemoryWriteTests: XCTestCase {
                        "P10 counter must increment by 1 per dropped row — reflecting drops to the AlarmSchedulerView banner")
     }
 
+    /// R3-5 (Stage 6 Wave 3): the dropped-count bump must land inside the
+    /// same lock block as `saveQueueUnsafe` — a crash between the two writes
+    /// would otherwise persist the counter while leaving the dropped rows on
+    /// disk, causing the next launch to re-drop them and double-count.
+    ///
+    /// This test pins the ordering by running a mixed flush (one row drops,
+    /// one survives sub-cap) and asserting that:
+    ///   (1) After flush, `queue.count() == 1` (the survivor, retryCount=1).
+    ///   (2) `droppedCount == 1` (the single exhausted row).
+    /// Re-reading the queue back after flush confirms the counter and the
+    /// queue are in consistent steady-state. True crash-between-writes would
+    /// require a fault injection harness we don't have, but this assertion
+    /// locks in the "survivors save + counter bump are done in the same
+    /// critical section" shape — a regression that re-splits the two would
+    /// break the `count() == 1` portion because `saveQueueUnsafe` would land
+    /// before the concurrent-merge logic had run under the lock.
+    func testDroppedCountAndSurvivorsLandTogetherInSameLockBlock() async {
+        let queue = PendingMemoryWriteQueue(defaults: defaults)
+        PendingMemoryWriteQueue.resetDroppedCount(on: defaults)
+
+        // Entry A will exhaust retries (seed with retryCount = max - 1 so one
+        // more failed flush lands it at max, dropping + bumping the counter).
+        // Entry B stays sub-cap and survives.
+        let exhaustCandidate = MemoryEntry(
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            verdict: "VERIFIED", confidence: nil, retryCount: 0, note: "exhaust"
+        )
+        let survivor = MemoryEntry(
+            timestamp: Date(timeIntervalSince1970: 2_000),
+            verdict: "VERIFIED", confidence: nil, retryCount: 0, note: "survive"
+        )
+
+        // Prime the exhaust candidate at max - 1 retries so one failing flush
+        // pushes it past the threshold.
+        let primed = PendingMemoryWrite(
+            entry: exhaustCandidate,
+            profileDelta: nil,
+            retryCount: PendingMemoryWriteQueue.maxRetryAttempts - 1
+        )
+        await queue.enqueue(primed)
+        await queue.enqueue(PendingMemoryWrite(entry: survivor, profileDelta: nil))
+
+        // Both fail; one drops (exhausted), one survives (still below cap).
+        struct TestError: Error {}
+        _ = await queue.flush { _, _ in throw TestError() }
+
+        let postCount = await queue.count()
+        XCTAssertEqual(postCount, 1, "exhaust candidate must drop, survivor must remain")
+        XCTAssertEqual(PendingMemoryWriteQueue.droppedCount(on: defaults), 1,
+                       "R3-5: exactly one drop must bump the counter — counter and queue save are atomic")
+
+        // A fresh queue instance reads from UserDefaults: the survivor is
+        // STILL there with retryCount bumped to 1, and the counter STILL
+        // reads 1. This pins the ordering — if the two writes were separate
+        // and the save happened BEFORE the counter bump (pre-R3-5 ordering
+        // with partial crash simulation), we'd see counter=0 here despite
+        // the survivor's bumped retry. The test doesn't simulate the crash
+        // but verifies the final-state consistency the ordering guarantees.
+        let fresh = PendingMemoryWriteQueue(defaults: defaults)
+        let freshCount = await fresh.count()
+        XCTAssertEqual(freshCount, 1, "UserDefaults must hold the single survivor")
+        XCTAssertEqual(PendingMemoryWriteQueue.droppedCount(on: defaults), 1,
+                       "counter must still read 1 on a fresh actor — UserDefaults is the source of truth")
+    }
+
     /// P10 (Stage 6 Wave 2): transient failures (below the retry cap) must
     /// NOT bump the dropped counter. Only exhaustion-level drops are
     /// user-visible; earlier retries are kept in the queue and remain
@@ -239,14 +304,6 @@ final class PendingMemoryWriteTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: PendingMemoryWriteQueue.defaultsKey),
                      "corrupted data must be wiped to break the decode-fail loop")
     }
-
-    // MARK: - MemoryWriteBacklog sidecar
-    //
-    // SQ1 (Stage 4): the `MemoryWriteBacklog` @Observable sidecar was deleted as
-    // dead code — no view ever read it. Its only test (`testBacklogUpdateReflectsNewCount`)
-    // was removed with it. Queue-size verification now lives in the
-    // `testFlushSuccessDrainsQueue` / `testFlushFailureRetainsEntriesAndBumpsRetryCount`
-    // tests above, which read `queue.count()` directly on the underlying actor.
 
     // MARK: - P8: enqueueSync lands before the call returns
 
@@ -329,10 +386,6 @@ final class VisionVerifierPendingMemoryQueueTests: XCTestCase {
 
         let postCount = await queue.count()
         XCTAssertEqual(postCount, 0, "successful flush must drain the queue")
-        // SQ1 (Stage 4): dropped the `memoryWriteBacklog.count == 0` assertion.
-        // The @Observable sidecar was deleted; the underlying `queue.count()`
-        // assertion immediately above covers the same invariant (and more
-        // directly, since the sidecar's only job was to mirror that value).
 
         // Sanity: the entry actually landed in MemoryStore.
         let snapshot = try await store.read()

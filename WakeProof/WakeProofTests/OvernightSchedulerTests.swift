@@ -90,17 +90,15 @@ final class OvernightSchedulerTests: XCTestCase {
             return fetchResult
         }
 
-        func cleanup(handle: String) async {
-            cleanupCalls.append(handle)
-            // Record attempts but the non-throwing variant must not surface
-            // errors — protocol contract preserved.
-        }
-
-        /// P9 (Stage 6 Wave 1): override the protocol's default-implementation
-        /// forwarding so tests can programme this fake to actually throw. The
-        /// default protocol extension forwards `cleanupThrowing` → `cleanup`
-        /// (non-throwing), which would never exercise the scheduler's retain
-        /// path. By overriding explicitly we get full control.
+        /// P9 (Stage 6 Wave 1): programmable throwing cleanup so tests can
+        /// exercise the scheduler's retain-vs-abandon path. Records both the
+        /// handle and whether the throw-or-succeed route was taken.
+        ///
+        /// R3-2 (Stage 6 Wave 3): the protocol was collapsed from the dual
+        /// `cleanup` + `cleanupThrowing` shape down to just `cleanupThrowing`,
+        /// so the prior non-throwing overload was removed. Every cleanup
+        /// invocation now routes through this single method — the counter
+        /// still tracks attempts and the `setCleanupThrows` seam still works.
         func cleanupThrowing(handle: String) async throws {
             cleanupCalls.append(handle)
             cleanupThrowingCalls += 1
@@ -145,9 +143,10 @@ final class OvernightSchedulerTests: XCTestCase {
             ("unused-in-p17-test", nil)
         }
 
-        func cleanup(handle: String) async {
-            // no-op
-        }
+        /// R3-2 (Stage 6 Wave 3): conform to the collapsed single-method
+        /// protocol. This source never opens a real session so there's
+        /// nothing to clean up — body is intentionally empty.
+        func cleanupThrowing(handle: String) async throws {}
 
         /// Test helper — resume the continuation so the scheduler's
         /// `pokeIfNeeded` await returns and the actor proceeds through the
@@ -221,7 +220,33 @@ final class OvernightSchedulerTests: XCTestCase {
 
         let planCalls = await source.planCalls
         XCTAssertEqual(planCalls.count, 1, "planOvernight must be called exactly once per bedtime trigger")
-        XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey), "session-alpha")
+
+        // R3-3 (Stage 6 Wave 3): `scheduleNextBackgroundRefresh` is now async
+        // and the submit-failure branch AWAITS `cleanupStale` inline rather
+        // than spawning a fire-and-forget Task. In the test environment
+        // `BGTaskScheduler.shared.submit` can throw `.notPermitted` (no
+        // Background App Refresh entitlement in the test host), and the P7
+        // cost-safety path then tears down the handle synchronously — before
+        // this method returns. Prior to R3-3 the detached Task often hadn't
+        // completed by the time this assertion ran, so we checked the handle
+        // literally; that was racy (by design of the old code path). Under
+        // R3-3 the correct post-condition is: EITHER the handle is persisted
+        // (submit succeeded — production happy path) OR the handle is nil +
+        // cleanup was called on the source (submit failed — cost-safety
+        // teardown executed correctly). Both outcomes satisfy the intent of
+        // this test: `startOvernightSession` reached and persisted via
+        // `planOvernight`, and any downstream failure cleaned up atomically.
+        let persistedHandle = suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey)
+        let cleanupCalls = await source.cleanupCalls
+        if persistedHandle == "session-alpha" {
+            XCTAssertTrue(cleanupCalls.isEmpty,
+                          "happy path: handle persisted, cleanup NOT called")
+        } else {
+            XCTAssertNil(persistedHandle,
+                         "submit-failure path must clear the handle, not leave it partially set")
+            XCTAssertEqual(cleanupCalls, ["session-alpha"],
+                           "submit-failure path must tear down the just-created session (P7 cost safety) — with the SAME handle planOvernight returned")
+        }
     }
 
     /// R11 (Wave 2.5): previously this test relied on "simulator has no HealthKit
@@ -397,10 +422,11 @@ final class OvernightSchedulerTests: XCTestCase {
     // MARK: - B5: fetch failure cleanup + classification
 
     /// B5.2 fix: every failure path in finalizeBriefing must call
-    /// `source.cleanup(handle:)` AND clear the UserDefaults handle. Previously
-    /// the `catch { return nil }` branch left the session running at $0.08/hr
-    /// until next app launch. Test: seed a fetch-throwing source, assert
-    /// handle is cleared + cleanup was called with the correct handle.
+    /// `source.cleanupThrowing(handle:)` (via `terminateOrRetain`) AND clear
+    /// the UserDefaults handle. Previously the `catch { return nil }` branch
+    /// left the session running at $0.08/hr until next app launch. Test: seed
+    /// a fetch-throwing source, assert handle is cleared + cleanup was called
+    /// with the correct handle.
     func testFinalizeBriefingTransportFailureCleansUpSession() async throws {
         suiteDefaults.set("session-transport-fail", forKey: OvernightScheduler.activeHandleKey)
         let source = RecordingSource()

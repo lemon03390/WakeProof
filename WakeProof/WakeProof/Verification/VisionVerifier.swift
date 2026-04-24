@@ -79,10 +79,8 @@ final class VisionVerifier {
     /// Wave 2.4 R14 fix: retry queue for failed memory writes. Default uses the shared
     /// UserDefaults store; tests inject a mock. Not `Optional` — the queue itself is
     /// always available; a nil memoryStore simply means no writes ever get enqueued.
-    ///
-    /// SQ1 (Stage 4): the old `memoryWriteBacklog` @Observable sidecar was removed
-    /// because no view ever read it — dead code. Backlog counts remain reachable
-    /// via `memoryWriteQueue.count()` if a UI consumer is wired later.
+    /// Backlog counts are reachable via `memoryWriteQueue.count()` if a UI consumer
+    /// is wired later.
     var memoryWriteQueue: PendingMemoryWriteQueue = PendingMemoryWriteQueue()
 
     private let logger = Logger(subsystem: LogSubsystem.verification, category: "verifier")
@@ -272,10 +270,8 @@ final class VisionVerifier {
             // next-launch flush a chance to land the write.
             //
             // SE3 (Stage 4): the outer Task inherits @MainActor from VisionVerifier.
-            // No redundant `MainActor.run` hop needed after enqueue — the previous
-            // hop existed only to update the now-deleted `MemoryWriteBacklog` sidecar
-            // (SQ1). Queue counts remain reachable via `queue.count()` if a future
-            // UI banner needs them.
+            // No redundant `MainActor.run` hop needed after enqueue. Queue counts
+            // remain reachable via `queue.count()` if a future UI banner needs them.
             //
             // P8 (Stage 6 Wave 1): the catch branch switched from `await queue.enqueue(...)`
             // to synchronous `queue.enqueueSync(...)`. The outer `Task { ... }` still

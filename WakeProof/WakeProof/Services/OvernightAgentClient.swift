@@ -204,8 +204,33 @@ actor OvernightAgentClient {
             // path would hit the XOR branch above and wipe it anyway, just
             // with extra churn and an intermediate "we orphaned an agent but
             // don't know about it" window.
-            logger.warning("Environment create failed after agent create; agent \(newAgentID.prefix(12), privacy: .private) will not be persisted to avoid leak on retry: \(error.localizedDescription, privacy: .public)")
-            throw error
+            //
+            // R3-4 (Stage 6 Wave 3): the P15 fix prevented LOCAL corruption
+            // (don't persist the agent id unless both succeed), but the
+            // already-created agent at Anthropic was left orphaned upstream.
+            // We now attempt a best-effort `terminateAgent` before rethrowing
+            // so the orphan does not sit unused on Anthropic's side.
+            //
+            // Failure of the termination itself is logged at `.fault` and
+            // SWALLOWED — the original env-create error is the actionable one
+            // for the caller (retry-able, indicates upstream env endpoint
+            // health), while the termination failure is a background-
+            // hygiene concern best left to the cron sweep / server-side GC.
+            // If we rethrew the termination error here, the caller would
+            // lose the original env-create classification that drives the
+            // retry semantics in OvernightScheduler.startOvernightSession.
+            logger.warning("Environment create failed after agent create; agent \(newAgentID.prefix(12), privacy: .private) will not be persisted; attempting upstream termination to avoid orphan: \(error.localizedDescription, privacy: .public)")
+            do {
+                try await terminateAgent(agentID: newAgentID)
+                logger.info("Orphan agent terminated after env-create failure agent=\(newAgentID.prefix(12), privacy: .private)")
+            } catch let termError {
+                // Best-effort — agent termination may not be supported by the
+                // Managed Agents beta (undocumented). The cron sweep + server-
+                // side GC are the safety nets. Cost impact is bounded because
+                // agents themselves don't bill — only sessions do.
+                logger.fault("Orphan agent termination failed agent=\(newAgentID.prefix(12), privacy: .private); cron sweep + Anthropic server-side GC are the safety net. Underlying: \(termError.localizedDescription, privacy: .public)")
+            }
+            throw error  // re-throw the ORIGINAL env-create error (not the termination error)
         }
     }
 
@@ -338,6 +363,34 @@ actor OvernightAgentClient {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)")
         _ = try await jsonRequest(url: url, method: "DELETE", body: nil)
         logger.info("Session \(sessionID.prefix(12), privacy: .private) deleted")
+    }
+
+    /// R3-4 (Stage 6 Wave 3): best-effort upstream agent termination. Used
+    /// when `ensureAgentAndEnvironment` hits a partial-failure state where the
+    /// agent was created successfully but the environment create that
+    /// followed threw — the P15 fix prevents the orphaned agent ID from being
+    /// persisted locally, but the upstream agent still exists on Anthropic's
+    /// side until we delete it or the cron sweep / server-side GC catches it.
+    ///
+    /// API support caveat: the Managed Agents beta at `managed-agents-2026-04-01`
+    /// documents session termination (DELETE /v1/sessions/:id) explicitly. The
+    /// Anthropic docs (`/docs/en/managed-agents/sessions`) and our own
+    /// `opus-4-7-research-notes.md` reference session termination but do NOT
+    /// explicitly document DELETE /v1/agents/:id. We issue the DELETE as a
+    /// best-effort attempt: the method throws on upstream failure and the
+    /// caller logs at `.fault` before re-throwing the ORIGINAL env-create
+    /// error. If the API doesn't support agent deletion (expect 404 / 405),
+    /// the fault log captures the fact and we rely on:
+    ///   (1) the cost impact being low — agents themselves are configs,
+    ///       not sessions; only sessions accrue $0.08/hr. An orphan agent
+    ///       sitting without any attached session costs nothing.
+    ///   (2) the cron sweep at `cleanup-stale-sessions.js` still catches any
+    ///       stale session that eventually gets attached to the orphan agent.
+    ///   (3) Anthropic's own server-side GC for unused resources.
+    func terminateAgent(agentID: String) async throws {
+        let url = baseURL.appendingPathComponent("v1/agents/\(agentID)")
+        _ = try await jsonRequest(url: url, method: "DELETE", body: nil)
+        logger.info("Agent \(agentID.prefix(12), privacy: .private) deleted")
     }
 
     // MARK: - Private helpers

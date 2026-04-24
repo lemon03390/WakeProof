@@ -32,29 +32,23 @@ protocol OvernightBriefingSource: Actor {
     /// (a full-profile rewrite markdown, or nil to leave the profile as-is).
     func fetchBriefing(handle: String) async throws -> (text: String, memoryUpdate: String?)
 
-    /// Best-effort cleanup. On primary path this terminates the running
-    /// Managed Agent session (stops the $0.08/hr meter); on fallback this
-    /// is a no-op.
-    func cleanup(handle: String) async
-
-    /// P9 (Stage 6 Wave 1): throwing variant that surfaces termination failure
-    /// to the caller. Call sites that participate in the retry-counter machinery
-    /// (finalizeBriefing, cleanupStale) prefer this form so a failed DELETE can
-    /// be retained for a retry pass rather than silently clearing the local
-    /// handle while the upstream session keeps running at $0.08/hr up to its
-    /// 24h ceiling.
+    /// Cleanup — throws on termination failure so the caller can participate
+    /// in the retry-counter machinery. On primary path this terminates the
+    /// running Managed Agent session (stops the $0.08/hr meter); no-op
+    /// implementations (previews, test fakes where termination isn't
+    /// simulated) simply conform with a body that does nothing.
     ///
-    /// Default protocol implementation forwards to the non-throwing `cleanup`
-    /// so pre-existing conformers (NoopBriefingSource, test fakes) don't need
-    /// code changes. Conformers that can actually fail (ManagedAgentBriefingSource)
-    /// override with a real throwing implementation.
+    /// R3-2 (Stage 6 Wave 3): previously the protocol exposed BOTH a non-
+    /// throwing `cleanup(handle:)` and a throwing `cleanupThrowing(handle:)`
+    /// with a default-extension bridge. That was a P9-bypass foot-gun: any
+    /// caller that reached for `cleanup` silently bypassed the scheduler's
+    /// retry counter because the default forwarded into the non-throwing
+    /// variant which swallowed errors. Collapsing the protocol to just the
+    /// throwing form removes the foot-gun — callers that don't need retry
+    /// semantics (preview / test shims) can still conform with an empty body.
+    /// The scheduler's own `cleanupStale` and `finalizeBriefing` always route
+    /// through `terminateOrRetain`, which owns the counter bump.
     func cleanupThrowing(handle: String) async throws
-}
-
-extension OvernightBriefingSource {
-    func cleanupThrowing(handle: String) async throws {
-        await cleanup(handle: handle)
-    }
 }
 
 actor OvernightScheduler {
@@ -214,7 +208,22 @@ actor OvernightScheduler {
             // orphan we must terminate rather than pave over.
             if let existing = defaults.string(forKey: Self.activeHandleKey) {
                 logger.warning("startOvernightSession: post-plan conflict (existing=\(existing.prefix(8), privacy: .private) mine=\(handle.prefix(8), privacy: .private)); terminating mine to avoid orphan")
-                await source.cleanup(handle: handle)
+                // R3-1 (Stage 6 Wave 3): route through the throwing variant so
+                // a failed DELETE surfaces at .fault rather than silently
+                // vanishing. The handle for the orphan we just created is NOT
+                // persisted in UserDefaults (we bail below without setting the
+                // active-handle key), so routing through `terminateOrRetain`
+                // would have nothing to retain against — the retry-counter
+                // machinery requires the handle to be persisted for the next
+                // bootstrap to find it. Best-effort with a loud fault log is
+                // the correct shape: if the DELETE fails we rely on the cron
+                // sweep (every 2h, ≤12h ceiling) and Anthropic's server-side
+                // 24h auto-termination, same as any other dead-end orphan.
+                do {
+                    try await source.cleanupThrowing(handle: handle)
+                } catch {
+                    logger.fault("startOvernightSession: post-plan-conflict cleanup FAILED for orphan=\(handle.prefix(8), privacy: .private); cron sweep is the safety net. Underlying: \(error.localizedDescription, privacy: .public)")
+                }
                 return
             }
             defaults.set(handle, forKey: Self.activeHandleKey)
@@ -224,7 +233,7 @@ actor OvernightScheduler {
             // was broken.
             _lastSessionStartError = nil
             logger.info("startOvernightSession: session open handle=\(handle.prefix(8), privacy: .private)")
-            scheduleNextBackgroundRefresh()
+            await scheduleNextBackgroundRefresh()
         } catch {
             // R9 fix: expose the failure for banner surfacing. The error
             // description is user-visible — OvernightAgentError.errorDescription
@@ -331,7 +340,7 @@ actor OvernightScheduler {
         }
         // (3) Only re-queue while an active session exists. After finalizeBriefing
         // clears the handle, the pipeline stops until next bedtime.
-        scheduleNextBackgroundRefresh()
+        await scheduleNextBackgroundRefresh()
         // (4) The work itself.
         do {
             let sleep = await readSleepSafely()
@@ -379,11 +388,11 @@ actor OvernightScheduler {
     /// session), clears the active-handle flag, and returns a `BriefingResult`
     /// that distinguishes success / no-session / failure for the UI layer.
     ///
-    /// B5.2 fix: EVERY failure path below calls `source.cleanup(handle:)` and
-    /// clears the active-handle UserDefaults key. Previously the top-level
-    /// `catch { return nil }` left the session running at $0.08/hr until the
-    /// next app launch's `cleanupStaleOvernightSessionIfNeeded` caught it —
-    /// effectively up to 24h of cost-leak per failed fetch.
+    /// B5.2 fix: EVERY failure path below calls `source.cleanupThrowing(handle:)`
+    /// (via `terminateOrRetain`) and clears the active-handle UserDefaults key.
+    /// Previously the top-level `catch { return nil }` left the session running
+    /// at $0.08/hr until the next app launch's `cleanupStaleOvernightSessionIfNeeded`
+    /// caught it — effectively up to 24h of cost-leak per failed fetch.
     ///
     /// B5 fix: returns `BriefingResult` (enum) rather than `BriefingDTO?`. The
     /// nil vs. DTO distinction previously collapsed "no session" + "fetch
@@ -640,7 +649,20 @@ actor OvernightScheduler {
         }
     }
 
-    private func scheduleNextBackgroundRefresh() {
+    /// R3-3 (Stage 6 Wave 3): promoted from synchronous to `async` so the
+    /// cost-safety cleanup path in the submit-failure branch can `await`
+    /// `cleanupStale(handle:)` inline rather than detaching a fire-and-forget
+    /// Task. The detached form mirrored the exact pattern P8 just eliminated
+    /// for pendingAttemptQueue: a Task spawned from inside the actor could be
+    /// deprioritised after a BGTask handler returned, or race a concurrent
+    /// `startOvernightSession` that landed a new handle (the late cleanup then
+    /// read the NEW handle back via `defaults.string(forKey:)` and cleared
+    /// it). Awaiting inline keeps the teardown ordered with the submit path
+    /// and serialises correctly against any other actor-isolated caller.
+    ///
+    /// Both call sites (`startOvernightSession`, `handleRefresh`) are already
+    /// async-context so the protocol change is zero-churn at the boundary.
+    private func scheduleNextBackgroundRefresh() async {
         let request = BGProcessingTaskRequest(identifier: Self.backgroundTaskIdentifier)
         request.requiresExternalPower = false
         request.requiresNetworkConnectivity = true
@@ -685,12 +707,21 @@ actor OvernightScheduler {
             // we're not leaking spend while the user sleeps. `cleanupStale`
             // is best-effort and idempotent; if termination itself also fails,
             // the cron cleanup is the last safety net (and P9 will make the
-            // local cleanup retry-aware). Wrapping in a Task hop because this
-            // call is synchronous (from handleRefresh) but cleanupStale is
-            // async; we don't need to block the submit path on the DELETE.
+            // local cleanup retry-aware).
+            //
+            // R3-3 (Stage 6 Wave 3): await inline rather than spawning a
+            // detached `Task { ... }`. The prior form mirrored the fire-and-
+            // forget pattern P8 removed for pendingAttemptQueue — a detached
+            // Task can race with a concurrent `startOvernightSession` that
+            // lands a fresh handle under us; our late cleanup would then
+            // read the NEW handle from `defaults.string(forKey:)` and blow
+            // away the live session. Inline await serialises against the
+            // actor's other async paths via its serial executor, which
+            // guarantees any subsequent `startOvernightSession` runs only
+            // after our teardown completes.
             if let handle = defaults.string(forKey: Self.activeHandleKey) {
                 logger.warning("scheduleNextBackgroundRefresh: submit failed WITH active handle=\(handle.prefix(8), privacy: .private) — tearing down session to prevent cost leak")
-                Task { await self.cleanupStale(handle: handle) }
+                await self.cleanupStale(handle: handle)
             }
         }
     }

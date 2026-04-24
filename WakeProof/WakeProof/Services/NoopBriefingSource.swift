@@ -33,7 +33,12 @@ actor NoopBriefingSource: OvernightBriefingSource {
         throw OvernightNoopError.notConfigured
     }
 
-    func cleanup(handle: String) async {}
+    /// R3-2 (Stage 6 Wave 3): protocol collapsed to the throwing form. The
+    /// noop source never opens a real session (`planOvernight` returns a fake
+    /// "noop-handle-..." string), so there's nothing to terminate — body is
+    /// intentionally empty. Conforms to the new signature without behaviour
+    /// change; the throw clause is satisfied by simply not throwing.
+    func cleanupThrowing(handle: String) async throws {}
 }
 
 enum OvernightNoopError: LocalizedError {
