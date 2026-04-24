@@ -182,26 +182,25 @@ final class OvernightSchedulerTests: XCTestCase {
 
     // MARK: - finalizeBriefing
 
-    func testFinalizeBriefingInsertsRowAndClearsHandle() async throws {
+    func testFinalizeBriefingReturnsDTOAndClearsHandle() async throws {
+        // R5 fix: finalizeBriefing returns a `BriefingDTO` (Sendable value type)
+        // rather than a `MorningBriefing @Model` instance. The main actor is the
+        // one that materialises the model into mainContext — the scheduler no
+        // longer owns a ModelContext. Assert on the DTO shape; the SwiftData
+        // row is the main actor's responsibility (exercised in WakeProofApp).
         suiteDefaults.set("active-handle-xyz", forKey: OvernightScheduler.activeHandleKey)
         let source = RecordingSource()
         await source.setFetchResult((text: "Good morning — you logged 7.5h.", memoryUpdate: nil))
         let scheduler = makeScheduler(source: source)
 
         let wakeDate = Date(timeIntervalSince1970: 1_745_550_000)
-        let briefing = await scheduler.finalizeBriefing(forWakeDate: wakeDate)
+        let dto = await scheduler.finalizeBriefing(forWakeDate: wakeDate)
 
-        XCTAssertNotNil(briefing)
-        XCTAssertEqual(briefing?.briefingText, "Good morning — you logged 7.5h.")
-        XCTAssertEqual(briefing?.forWakeDate, wakeDate)
-        XCTAssertEqual(briefing?.sourceSessionID, "active-handle-xyz")
-        XCTAssertFalse(briefing?.memoryUpdateApplied ?? true, "no memoryUpdate returned → flag stays false")
-
-        // Row must be in the container.
-        let context = ModelContext(container)
-        let rows = try context.fetch(FetchDescriptor<MorningBriefing>())
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows.first?.briefingText, "Good morning — you logged 7.5h.")
+        XCTAssertNotNil(dto)
+        XCTAssertEqual(dto?.briefingText, "Good morning — you logged 7.5h.")
+        XCTAssertEqual(dto?.forWakeDate, wakeDate)
+        XCTAssertEqual(dto?.sourceSessionID, "active-handle-xyz")
+        XCTAssertFalse(dto?.memoryUpdateApplied ?? true, "no memoryUpdate returned → flag stays false")
 
         // Handle must be cleared.
         XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
@@ -216,20 +215,15 @@ final class OvernightSchedulerTests: XCTestCase {
         let scheduler = makeScheduler(source: source)
 
         // No handle pre-set in suiteDefaults.
-        let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNil(briefing)
+        XCTAssertNil(dto)
 
         // No source methods should have been touched.
         let fetchCalls = await source.fetchCalls
         let cleanupCalls = await source.cleanupCalls
         XCTAssertTrue(fetchCalls.isEmpty)
         XCTAssertTrue(cleanupCalls.isEmpty)
-
-        // No rows inserted.
-        let context = ModelContext(container)
-        let rows = try context.fetch(FetchDescriptor<MorningBriefing>())
-        XCTAssertTrue(rows.isEmpty)
     }
 
     func testFinalizeBriefingWithMemoryRewriteFailureLeavesFlagFalse() async throws {
@@ -237,19 +231,20 @@ final class OvernightSchedulerTests: XCTestCase {
         // via a non-UUID-shaped userUUID (the path-traversal guard in userDirectoryURL).
         // The C.3 fix wrapped rewriteProfile in do/catch; previously `try?` swallowed the
         // error and `memoryUpdateApplied = true` ran unconditionally, making the flag lie.
-        // Invariant: the briefing itself is still returned (it's the user-facing artefact
-        // and memory is ancillary), but the flag reflects the actual memory-write outcome.
+        // Invariant: the briefing DTO itself is still returned (it's the user-facing
+        // artefact and memory is ancillary), but the flag reflects the actual memory
+        // write outcome.
         suiteDefaults.set("active-handle-delta", forKey: OvernightScheduler.activeHandleKey)
         let memoryStore = makeMemoryStore(uuid: "../evil")
         let source = RecordingSource()
         await source.setFetchResult((text: "Briefing prose.", memoryUpdate: "## New profile\nSomething."))
         let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
 
-        let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNotNil(briefing, "briefing must still be returned even if memory rewrite fails")
-        XCTAssertEqual(briefing?.briefingText, "Briefing prose.")
-        XCTAssertFalse(briefing?.memoryUpdateApplied ?? true,
+        XCTAssertNotNil(dto, "briefing DTO must still be returned even if memory rewrite fails")
+        XCTAssertEqual(dto?.briefingText, "Briefing prose.")
+        XCTAssertFalse(dto?.memoryUpdateApplied ?? true,
                        "rewriteProfile threw → flag must stay false (no silent lies)")
 
         // Handle is still cleared and cleanup still runs — memory is ancillary, not
@@ -269,13 +264,41 @@ final class OvernightSchedulerTests: XCTestCase {
         await source.setFetchResult((text: "Today's briefing.", memoryUpdate: newProfile))
         let scheduler = makeScheduler(source: source, memoryStore: memoryStore)
 
-        let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
+        let dto = await scheduler.finalizeBriefing(forWakeDate: .now)
 
-        XCTAssertNotNil(briefing)
-        XCTAssertTrue(briefing?.memoryUpdateApplied ?? false, "memoryUpdate present → flag should be true")
+        XCTAssertNotNil(dto)
+        XCTAssertTrue(dto?.memoryUpdateApplied ?? false, "memoryUpdate present → flag should be true")
 
         let snap = try await memoryStore.read()
         XCTAssertEqual(snap.profile, newProfile, "MemoryStore must now hold the new profile")
+    }
+
+    // MARK: - B3: re-entrancy guard in startOvernightSession
+
+    /// B3 fix: two callers (auto-trigger + DEBUG button) previously raced the
+    /// pre-actor `defaults.string(forKey:) == nil` check — both could pass and
+    /// both enter the actor serially, both call `planOvernight`, and orphan
+    /// the earlier session at $0.08/hr until its 24h ceiling. The fix is a
+    /// post-actor re-check (UserDefaults) + `sessionCreationInFlight` flag.
+    /// Assert: if a session is already open, a second call is a no-op.
+    func testStartOvernightSessionSkipsWhenActiveHandleAlreadySet() async throws {
+        // Pre-seed the handle key — simulating "a session is already open".
+        suiteDefaults.set("pre-existing-handle", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setNextHandle("would-be-new-handle")
+        let scheduler = makeScheduler(source: source)
+
+        await scheduler.startOvernightSession()
+
+        // planOvernight must NOT have been called — the re-check caught the
+        // active handle and short-circuited before any API call.
+        let planCalls = await source.planCalls
+        XCTAssertEqual(planCalls.count, 0,
+                       "second concurrent startOvernightSession must not call planOvernight (would orphan the earlier session)")
+        // The pre-existing handle is still intact.
+        XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey),
+                       "pre-existing-handle",
+                       "pre-existing handle must NOT be overwritten by a concurrent caller")
     }
 
     // MARK: - cleanupStale

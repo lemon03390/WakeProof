@@ -58,12 +58,20 @@ struct AlarmSchedulerView: View {
                     Button("Fire alarm now") { scheduler.fireNow() }
                         .foregroundStyle(.red)
                     Button("Start overnight session now") {
+                        // B3: the scheduler now holds the single source of truth
+                        // for "is a session already open" (sessionCreationInFlight
+                        // + UserDefaults re-check on the actor). No pre-actor
+                        // TOCTOU guard needed; calling this repeatedly is safe.
                         Task { await overnightScheduler.startOvernightSession() }
                     }
                     Button("Finalize briefing now") {
                         Task {
-                            let briefing = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
-                            logger.info("Debug finalize: briefingText=\(briefing?.briefingText ?? "nil", privacy: .public)")
+                            // R5: finalizeBriefing now returns a Sendable DTO
+                            // rather than a SwiftData @Model — the DEBUG flow
+                            // only needs to log the text, so no main-actor hop
+                            // is required here.
+                            let dto = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
+                            logger.info("Debug finalize: briefingText=\(dto?.briefingText ?? "nil", privacy: .public)")
                         }
                     }
                 }

@@ -171,6 +171,14 @@ final class VisionVerifier {
         // bumped later. Construct the MemoryEntry with explicit values derived
         // from the Claude response so the on-disk row reflects what Claude actually
         // said, not the stale pre-verify state.
+        //
+        // R6 fix: use a single MemoryStore.writeVerdictRow(entry:profileDelta:) call
+        // so history-append + profile-rewrite are serialised by MemoryStore's actor
+        // executor. Previously two verifies in the same fire (RETRY → VERIFIED) each
+        // spawned their own `Task { ... }` and Swift doesn't guarantee FIFO across
+        // unstructured Tasks even when both inherit MainActor — a later Task's
+        // rewriteProfile could land before an earlier Task's appendHistory, leaving
+        // the profile updated without a corresponding history row.
         if let memoryStore, let memoryUpdate = result.memoryUpdate {
             // Mirror the retryCount adjustment updatePersistedAttempt applies: only
             // the .retry branch increments. Use finalVerdict (post-coercion) so the
@@ -183,17 +191,15 @@ final class VisionVerifier {
                 retryCount: effectiveRetryCount,
                 note: memoryUpdate.historyNote
             )
+            // R1 gate remains here: the profile represents durable TRUTH about this
+            // user; only rewrite on a verdict we believe (VERIFIED). REJECTED/RETRY
+            // verdicts still append a history row (useful calibration signal) but
+            // must NOT override the profile — otherwise failed spoof attempts
+            // pollute durable state.
+            let profileDelta: String? = (finalVerdict == .verified) ? memoryUpdate.profileDelta : nil
             Task { [logger] in
                 do {
-                    try await memoryStore.appendHistory(entry)
-                    // R1 fix: the profile represents durable TRUTH about this user;
-                    // only rewrite on a verdict we believe (VERIFIED). REJECTED/RETRY
-                    // verdicts still append a history row (useful calibration signal)
-                    // but must NOT override the profile — otherwise failed spoof
-                    // attempts pollute durable state.
-                    if finalVerdict == .verified, let delta = memoryUpdate.profileDelta {
-                        try await memoryStore.rewriteProfile(delta)
-                    }
+                    try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
                 } catch {
                     logger.error("MemoryStore write failed (non-fatal): \(error.localizedDescription, privacy: .public)")
                 }

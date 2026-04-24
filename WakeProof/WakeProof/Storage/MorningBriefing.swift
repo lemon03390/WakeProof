@@ -11,6 +11,20 @@
 import Foundation
 import SwiftData
 
+/// Sendable value-type snapshot used to cross actor boundaries. The scheduler
+/// actor (R5 fix) assembles and returns a DTO — the main actor is the one that
+/// materialises a `MorningBriefing @Model` using `ModelContainer.mainContext`.
+/// Without this shape, `finalizeBriefing` was creating a `ModelContext(modelContainer)`
+/// *inside* the scheduler actor's non-main executor and returning the resulting
+/// `@Model` instance back to the main actor — that was undefined behaviour because
+/// SwiftData's model contexts are tied to the executor that constructed them.
+struct BriefingDTO: Sendable {
+    let briefingText: String
+    let forWakeDate: Date
+    let sourceSessionID: String
+    let memoryUpdateApplied: Bool
+}
+
 @Model
 final class MorningBriefing {
     var generatedAt: Date

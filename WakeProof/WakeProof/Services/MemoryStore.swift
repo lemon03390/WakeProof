@@ -108,6 +108,29 @@ actor MemoryStore {
         return snapshot
     }
 
+    /// Atomic verdict-row write: append history then (optionally) rewrite the
+    /// profile inside a single actor call. R6 fix — VisionVerifier previously
+    /// spawned two unstructured `Task { ... }` blocks per fire, one for each
+    /// verify call; Swift does NOT guarantee FIFO across unstructured Tasks even
+    /// when both inherit MainActor, so Task2's rewriteProfile could land before
+    /// Task1's appendHistory. Coalescing both steps into one actor method makes
+    /// ordering an invariant of the actor's serial executor rather than relying
+    /// on Task-scheduling order.
+    ///
+    /// `profileDelta` is optional: nil means "append history only, leave profile
+    /// alone" (RETRY / REJECTED verdicts). Non-nil means "VERIFIED verdict with
+    /// a Claude-authored profile rewrite" (gate enforced by the caller per R1).
+    ///
+    /// Failures propagate: the caller's log-and-swallow detached-Task catch
+    /// preserves the pre-R6 behaviour ("memory write failure never rewinds
+    /// verdict"). Inline throwing here keeps the call-site decision visible.
+    func writeVerdictRow(entry: MemoryEntry, profileDelta: String?) async throws {
+        try await appendHistory(entry)
+        if let profileDelta {
+            try await rewriteProfile(profileDelta)
+        }
+    }
+
     /// Append one entry to history.jsonl. File + directory are created as needed.
     /// Over-capacity is logged but not enforced on Day 4.
     func appendHistory(_ entry: MemoryEntry) async throws {

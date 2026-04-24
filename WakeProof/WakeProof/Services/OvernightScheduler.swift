@@ -52,9 +52,22 @@ actor OvernightScheduler {
     private let source: any OvernightBriefingSource
     private let sleepReader: HealthKitSleepReader
     private let memoryStore: MemoryStore
+    /// Retained on the scheduler for call-site compatibility (WakeProofApp +
+    /// tests), but **no longer used inside the scheduler actor** after the R5
+    /// fix. SwiftData `ModelContext` construction moved to the main actor's
+    /// `onChange` handler; the scheduler returns a `BriefingDTO` instead.
+    /// Removing this property would be a source-breaking change for tests
+    /// without any functional benefit, so the container is held here passively.
     private let modelContainer: ModelContainer
     private let defaults: UserDefaults
     private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "scheduler")
+
+    /// Re-entrancy guard for `startOvernightSession` (B3 fix). Set atomically on
+    /// entry; cleared on return. Prevents two concurrent callers (auto-trigger +
+    /// DEBUG button, or launch-path + bedtime-timer) from both passing the
+    /// "no active handle" guard and both opening fresh Managed Agent sessions
+    /// at $0.08/hr each.
+    private var sessionCreationInFlight: Bool = false
 
     init(
         source: any OvernightBriefingSource,
@@ -76,12 +89,59 @@ actor OvernightScheduler {
     /// is enabled and the clock crosses the configured bedtime. Failure here
     /// logs and returns — the morning briefing is a best-effort feature, so a
     /// nightly failure must never block the core alarm flow.
+    ///
+    /// B3 fix: the call sites in WakeProofApp and AlarmSchedulerView previously
+    /// checked `defaults.string(forKey:) == nil` *before* entering the actor,
+    /// which is a TOCTOU window — two callers could both pass the pre-check, both
+    /// hop into the actor serially, and both create a fresh Managed Agent session
+    /// (orphaning the earlier one, which then burns $0.08/hr until its 24h ceiling).
+    /// This method is now the single source of truth for "should a session open":
+    /// callers may call freely and the actor resolves contention.
     func startOvernightSession() async {
+        // Two-layer guard (B3):
+        //   (1) `sessionCreationInFlight` — swallows concurrent calls that land
+        //       while this method is suspended at `source.planOvernight`. The
+        //       actor's serial executor ensures atomic set/check here.
+        //   (2) `defaults.string(forKey: activeHandleKey)` re-check — catches the
+        //       "previous session already succeeded" case (e.g. BGTask ran
+        //       overnight, or a prior auto-trigger completed before this one).
+        if sessionCreationInFlight {
+            logger.info("startOvernightSession: creation already in flight on this actor — skipping")
+            return
+        }
+        if let existing = defaults.string(forKey: Self.activeHandleKey) {
+            logger.info("startOvernightSession: session already open (handle=\(existing.prefix(8), privacy: .private)) — skipping")
+            return
+        }
+        sessionCreationInFlight = true
+        defer { sessionCreationInFlight = false }
+
         logger.info("startOvernightSession: begin")
         do {
             let sleep = await readSleepSafely()
             let snap = await readMemorySafely()
+            // Re-check AFTER the awaits above — a concurrent caller could have
+            // completed a full planOvernight + defaults.set while we were
+            // suspended. Without this, both callers would still race to
+            // defaults.set, overwriting each other's handle and orphaning the
+            // first session. The `sessionCreationInFlight` flag caps at two
+            // callers in flight (one here, one waiting at the top guard); this
+            // re-check catches the case where our own defer ran between a prior
+            // success and our suspension resume.
+            if let existing = defaults.string(forKey: Self.activeHandleKey) {
+                logger.info("startOvernightSession: concurrent session arrived while suspended (handle=\(existing.prefix(8), privacy: .private)); abandoning ours")
+                return
+            }
             let handle = try await source.planOvernight(sleep: sleep, memoryProfile: snap.profile)
+            // Post-plan re-check: the previous re-check occurred before planOvernight's
+            // await suspension. Closing the last remaining window means another in-flight
+            // creator cannot have landed a handle under us; if one did, we now hold an
+            // orphan we must terminate rather than pave over.
+            if let existing = defaults.string(forKey: Self.activeHandleKey) {
+                logger.warning("startOvernightSession: post-plan conflict (existing=\(existing.prefix(8), privacy: .private) mine=\(handle.prefix(8), privacy: .private)); terminating mine to avoid orphan")
+                await source.cleanup(handle: handle)
+                return
+            }
             defaults.set(handle, forKey: Self.activeHandleKey)
             logger.info("startOvernightSession: session open handle=\(handle.prefix(8), privacy: .private)")
             scheduleNextBackgroundRefresh()
@@ -99,24 +159,55 @@ actor OvernightScheduler {
     ///     BEFORE checking the guard, which kept the chain alive forever (C.3 fix).
     /// (3) scheduleNextBackgroundRefresh — only while a session is active.
     /// (4) the work itself — poke the source with fresh HealthKit data.
+    ///
+    /// B2 fix: `task.expirationHandler` is invoked by BackgroundTasks on an
+    /// unspecified queue — it may fire *while* this actor is suspended at an
+    /// `await`. Calling `task.setTaskCompleted(success:)` twice (once from the
+    /// expiration handler, once from the actor's own resumed path) raises
+    /// `NSInternalInconsistencyException` and crashes the app on the next
+    /// background-refresh fire.
+    ///
+    /// The `CompletionLatch` (backed by `OSAllocatedUnfairLock<Bool>`, shared
+    /// across the actor-vs-handler boundary) resolves this: whoever claims the
+    /// latch first wins the right to call `setTaskCompleted`; the loser
+    /// short-circuits. The actor's resumption path additionally checks
+    /// `latch.isClaimed` after each await so it exits the pipeline BEFORE doing
+    /// further work against a task that's already been marked complete.
     func handleBackgroundRefresh(_ task: BGProcessingTask) async {
+        // Shared completion-state between the expiration handler (non-actor
+        // queue) and the actor's own resumption path. Declared as a local
+        // `let` because each handleBackgroundRefresh invocation owns its own
+        // BGProcessingTask — no cross-invocation state.
+        let latch = CompletionLatch()
+
         // (1) expirationHandler FIRST. The handler runs on an unspecified
-        // queue from BackgroundTasks; hop onto the scheduler actor to log
-        // safely (`logger` is sendable, but keeping the actor hop avoids
-        // an accidental isolation gap if we later read other state here).
-        task.expirationHandler = { [weak self] in
+        // queue from BackgroundTasks. It must (a) claim the latch so the
+        // actor's normal-exit path no-ops its setTaskCompleted call, and
+        // (b) actually call setTaskCompleted(false). The `[latch]` capture
+        // retains the lock across the handler closure; `weak self` avoids
+        // a strong scheduler ref outliving the task.
+        task.expirationHandler = { [weak self, latch] in
+            guard latch.claim() else {
+                // Actor's normal path already claimed; handler must no-op.
+                return
+            }
             Task { [weak self] in
                 await self?.logExpiration()
             }
             task.setTaskCompleted(success: false)
         }
+
         // (2) No active handle → pipeline is stopped, exit silently. Do NOT
         // re-queue: finalizeBriefing clears the handle on VERIFIED, and if a
         // late BGTask fires after that we want the chain to terminate rather
         // than burn a task every 2h for nothing (Phase C review #2).
         guard let handle = defaults.string(forKey: Self.activeHandleKey) else {
             logger.warning("handleBackgroundRefresh: no active handle (pipeline stopped); completing")
-            task.setTaskCompleted(success: true)
+            if latch.claim() {
+                task.setTaskCompleted(success: true)
+            } else {
+                logger.warning("handleBackgroundRefresh: expiration raced no-handle path")
+            }
             return
         }
         // (3) Only re-queue while an active session exists. After finalizeBriefing
@@ -125,53 +216,70 @@ actor OvernightScheduler {
         // (4) The work itself.
         do {
             let sleep = await readSleepSafely()
+            // Early exit if expiration fired during the sleep read. Prevents
+            // burning a Managed Agent poke on a task that's already been
+            // marked complete — Claude credits matter and the poke wouldn't
+            // be reportable anyway.
+            if latch.isClaimed {
+                logger.warning("handleBackgroundRefresh: expiration fired during sleep read; aborting poke")
+                return
+            }
             let briefingReady = try await source.pokeIfNeeded(handle: handle, sleep: sleep)
             logger.info("handleBackgroundRefresh: pokeIfNeeded done briefingReady=\(briefingReady, privacy: .public)")
-            task.setTaskCompleted(success: true)
+            if latch.claim() {
+                task.setTaskCompleted(success: true)
+            } else {
+                logger.warning("handleBackgroundRefresh: expiration raced after pokeIfNeeded")
+            }
         } catch {
             logger.error("handleBackgroundRefresh failed: \(error.localizedDescription, privacy: .public)")
-            task.setTaskCompleted(success: false)
+            if latch.claim() {
+                task.setTaskCompleted(success: false)
+            } else {
+                logger.warning("handleBackgroundRefresh: expiration raced on failure path")
+            }
         }
     }
 
     /// Called at wake time after VERIFIED. Pulls the briefing from the source,
-    /// persists a `MorningBriefing` row to SwiftData, applies any memoryUpdate,
-    /// tears down the source (terminates Managed Agent session), and clears
-    /// the active-handle flag.
+    /// applies any memoryUpdate, tears down the source (terminates Managed Agent
+    /// session), clears the active-handle flag, and returns a Sendable DTO for
+    /// the main actor to materialise into a `MorningBriefing` SwiftData row.
     ///
     /// Returns nil when there is no active session (fresh install, previously
     /// finalized, or prior bedtime wasn't reached). The UI gracefully handles
     /// nil — `MorningBriefingView` shows nothing rather than a placeholder.
-    func finalizeBriefing(forWakeDate wakeDate: Date) async -> MorningBriefing? {
+    ///
+    /// R5 fix: previously this method constructed `ModelContext(modelContainer)`
+    /// *inside* the scheduler actor (non-MainActor executor), inserted a
+    /// `@Model` instance, saved, and returned the model across the actor
+    /// boundary to the MainActor caller who then read `briefing.briefingText`
+    /// from SwiftUI. SwiftData `@Model` instances are tied to the executor that
+    /// owns their `ModelContext`; reading them from a different executor
+    /// produces release-mode store-corruption assertions. The DTO shape
+    /// decouples the on-actor work (fetch + memory update) from the main-actor
+    /// work (materialise into `mainContext`). See WakeProofApp RootView's
+    /// onChange handler for the main-actor side of the pair.
+    func finalizeBriefing(forWakeDate wakeDate: Date) async -> BriefingDTO? {
         guard let handle = defaults.string(forKey: Self.activeHandleKey) else {
             logger.info("finalizeBriefing: no active handle, nothing to finalize")
             return nil
         }
         do {
             let (text, memoryUpdate) = try await source.fetchBriefing(handle: handle)
-            let context = ModelContext(modelContainer)
-            let briefing = MorningBriefing(
-                forWakeDate: wakeDate,
-                briefingText: text,
-                sourceSessionID: handle
-            )
-            context.insert(briefing)
-            try context.save()
-            logger.info("finalizeBriefing: briefing inserted chars=\(text.count, privacy: .public)")
+            logger.info("finalizeBriefing: briefing fetched chars=\(text.count, privacy: .public)")
+            var memoryUpdateApplied = false
             if let memoryUpdate {
                 // Previously `try?` swallowed rewrite failures then unconditionally set
                 // the flag — so `memoryUpdateApplied` lied when a disk-full or invalid-
                 // UUID error hit. CLAUDE.md promoted rule #2 forbids silent catch; wrap
                 // in do/catch so the flag reflects reality and a failure logs visibly.
-                // The briefing itself is still returned — it's the user-facing artefact
-                // and memory is ancillary, so a memory-store hiccup must not mask the
-                // briefing on the morning cover. The `try? context.save()` on the flag
-                // update is acceptable: save failure on the flag is recoverable — the
-                // main concern was silent profile-write drops.
+                // The DTO (and thus the briefing) is still returned — it's the
+                // user-facing artefact and memory is ancillary, so a memory-store
+                // hiccup must not mask the briefing on the morning cover.
                 do {
                     try await memoryStore.rewriteProfile(memoryUpdate)
-                    briefing.memoryUpdateApplied = true
-                    try? context.save()
+                    memoryUpdateApplied = true
                     logger.info("finalizeBriefing: memory update applied chars=\(memoryUpdate.count, privacy: .public)")
                 } catch {
                     logger.warning("finalizeBriefing: memory rewrite failed; briefing kept, flag stays false: \(error.localizedDescription, privacy: .public)")
@@ -179,7 +287,12 @@ actor OvernightScheduler {
             }
             await source.cleanup(handle: handle)
             defaults.removeObject(forKey: Self.activeHandleKey)
-            return briefing
+            return BriefingDTO(
+                briefingText: text,
+                forWakeDate: wakeDate,
+                sourceSessionID: handle,
+                memoryUpdateApplied: memoryUpdateApplied
+            )
         } catch {
             logger.error("finalizeBriefing failed: \(error.localizedDescription, privacy: .public)")
             return nil
@@ -277,5 +390,52 @@ actor OvernightScheduler {
 
     private func logExpiration() {
         logger.warning("BGProcessingTask expired before completion")
+    }
+}
+
+/// Single-use latch that guards `BGProcessingTask.setTaskCompleted` against a
+/// double-claim race between (a) the BackgroundTasks-queue `expirationHandler`
+/// and (b) the scheduler actor's post-await resumption. Whoever calls `claim()`
+/// first gets `true` and owns the right to call `setTaskCompleted`; any later
+/// caller gets `false` and must no-op.
+///
+/// Why `OSAllocatedUnfairLock<Bool>` rather than a Swift actor: the
+/// expirationHandler must synchronously decide whether to call
+/// `setTaskCompleted` — there is no async suspension tolerance because iOS may
+/// reclaim the task microseconds after the handler runs. An actor-hop would
+/// miss the window. `OSAllocatedUnfairLock` (iOS 16+) is a thin wrapper over
+/// `os_unfair_lock_t` with an explicit initial-state parameter, making the
+/// "unclaimed=false, claimed=true" semantics visible at the type level.
+///
+/// Declared as a reference-type class so the actor body and the
+/// `expirationHandler` closure (running on BackgroundTasks' queue) share the
+/// same instance. Every method and stored property is `nonisolated` to escape
+/// the project's MainActor default — this type must be callable from any
+/// queue (BackgroundTasks', the scheduler actor's executor, or the main
+/// actor) without hops. `Sendable` because the one mutable state cell is
+/// guarded by `OSAllocatedUnfairLock` (itself Sendable when wrapping a
+/// Sendable value).
+final class CompletionLatch: Sendable {
+    nonisolated private let lock = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    nonisolated init() {}
+
+    /// Attempt to claim the latch. Returns `true` on first call, `false`
+    /// thereafter. Thread-safe.
+    nonisolated func claim() -> Bool {
+        lock.withLock { claimed in
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
+    }
+
+    /// Observe the latch's current state without claiming. Used for early-exit
+    /// decisions in the actor's resumption path — avoids the scheduler doing
+    /// further work against a task whose completion the expiration handler has
+    /// already claimed. This is advisory; any post-check claim still has to
+    /// go through `claim()` to actually call setTaskCompleted.
+    nonisolated var isClaimed: Bool {
+        lock.withLock { $0 }
     }
 }

@@ -121,72 +121,106 @@ struct WakeProofApp: App {
         // phase transitions on VERIFIED / REJECTED / RETRY without the verifier holding a
         // non-optional scheduler reference (which would couple it at test-time).
         visionVerifier.scheduler = scheduler
-        Task { @MainActor in
-            do {
-                try await memoryStore.bootstrapIfNeeded()
-                // Only expose the store to the verifier AFTER bootstrap completes so
-                // the first verify() call can never win the directory-creation race.
-                // (The actor's read() handles missing-dir gracefully via .empty, but
-                // moving the assignment here makes the invariant visible in the code
-                // shape — S6 in memory-tool-findings.md.)
-                visionVerifier.memoryStore = memoryStore
-            } catch {
-                Self.logger.error("MemoryStore bootstrap failed: \(error.localizedDescription, privacy: .public)")
-                // Bootstrap failed — do NOT expose the store. read() would still work
-                // (it early-returns .empty on missing dir), but writes would fail
-                // repeatedly — better to run memory-less for this launch.
-            }
-        }
+
         // Recover any fire that started in a prior session but never resolved (force-quit
         // during ring). Persists an UNRESOLVED WakeAttempt so the audit trail records the
         // missed wake instead of silently forgetting it.
         scheduler.recoverUnresolvedFireIfNeeded()
         scheduler.scheduleNextFireIfEnabled()
 
-        // Launch-time stale-handle cleanup. C.1 cost-containment: Managed Agents charges
-        // $0.08/hr while a session is running; a crash during the night leaves the
-        // session meter running until its 24h ceiling. Catching it on next launch caps
-        // the cost at "time until next launch" instead. No-op when no stale handle is
-        // present (the happy path after a clean finalize).
-        if let staleHandle = UserDefaults.standard.string(forKey: OvernightScheduler.activeHandleKey) {
-            let scheduler = overnightScheduler
-            Task {
-                Self.logger.warning("Found stale overnight handle on launch; attempting cleanup")
-                await scheduler.cleanupStale(handle: staleHandle)
-            }
-        }
-
-        // Auto-kick the overnight session when the user launches the app after
-        // their configured bedtime has already passed today. C.3 BLOCKING fix:
-        // without this, `startOvernightSession` had zero production call sites —
-        // the Layer 3 pipeline was dead code despite being wired end-to-end.
+        // Single serialized Task for the three steps that must run in order
+        // (M1 + R7 fix): (1) MemoryStore bootstrap → expose store to verifier,
+        // (2) stale-handle cleanup → *awaited* so the auto-trigger below sees
+        // the post-cleanup UserDefaults state, (3) auto-trigger overnight
+        // session if bedtime just passed.
         //
-        // "Bedtime passed recently" = within the last 12 hours. `nextBedtime(after:)`
-        // always returns a future date (today's if still upcoming, else tomorrow's),
-        // so the most recent bedtime is `nextBedtime - 24h`. If that was within the
-        // last 12h AND no active handle exists AND bedtime is enabled, start the
-        // session now. The 12h window intentionally undershoots a full day to avoid
-        // kicking a session in the afternoon after a missed bedtime — by then the
-        // morning briefing would be stale.
-        //
-        // The real-bedtime-in-future path (user opens app earlier in the evening)
-        // still needs a proper scheduled Task to fire at 23:00; that's a Day-4
-        // follow-up. The launch-side trigger covers the demo case and the common
-        // "I opened the app as I went to bed" case.
+        // Previously: three separate `Task { ... }` blocks with no ordering
+        // guarantee. Auto-trigger could fire before memoryStore bootstrap
+        // completed (→ verifier's memoryStore stayed nil on the first verify),
+        // or before cleanupStale terminated the previous day's session (→
+        // auto-trigger saw the stale handle and skipped, leaving us with no
+        // overnight session AND a now-terminated-by-cleanup Managed Agent).
         Task { @MainActor in
-            let settings = BedtimeSettings.load()
-            guard settings.isEnabled else { return }
-            let hasActiveHandle = UserDefaults.standard.string(forKey: OvernightScheduler.activeHandleKey) != nil
-            guard !hasActiveHandle else { return }
-
-            guard let nextBedtime = settings.nextBedtime(after: .now) else { return }
-            let mostRecentBedtime = nextBedtime.addingTimeInterval(-24 * 3600)
-            let secondsSinceBedtime = Date.now.timeIntervalSince(mostRecentBedtime)
-            guard secondsSinceBedtime > 0, secondsSinceBedtime < 12 * 3600 else { return }
-
-            Self.logger.info("Auto-triggering startOvernightSession (bedtime was \(Int(secondsSinceBedtime / 60), privacy: .public)min ago)")
-            await self.overnightScheduler.startOvernightSession()
+            await self.bootstrapMemoryStore()
+            await self.cleanupStaleOvernightSessionIfNeeded()
+            await self.autoTriggerOvernightSessionIfNeeded()
         }
+    }
+
+    /// (1/3) Bootstrap the on-disk memory store and late-bind it into the
+    /// VisionVerifier. Run inside the bootstrap serial Task so the subsequent
+    /// steps observe the store as either wired (bootstrap succeeded) or nil
+    /// (bootstrap failed — verify() handles nil-store as memory-less mode).
+    private func bootstrapMemoryStore() async {
+        do {
+            try await memoryStore.bootstrapIfNeeded()
+            // Only expose the store to the verifier AFTER bootstrap completes so
+            // the first verify() call can never win the directory-creation race.
+            // (The actor's read() handles missing-dir gracefully via .empty, but
+            // moving the assignment here makes the invariant visible in the code
+            // shape — S6 in memory-tool-findings.md.)
+            visionVerifier.memoryStore = memoryStore
+        } catch {
+            Self.logger.error("MemoryStore bootstrap failed: \(error.localizedDescription, privacy: .public)")
+            // Bootstrap failed — do NOT expose the store. read() would still work
+            // (it early-returns .empty on missing dir), but writes would fail
+            // repeatedly — better to run memory-less for this launch.
+        }
+    }
+
+    /// (2/3) Launch-time stale-handle cleanup. C.1 cost-containment: Managed
+    /// Agents charges $0.08/hr while a session is running; a crash during the
+    /// night leaves the session meter running until its 24h ceiling. Catching
+    /// it on next launch caps the cost at "time until next launch" instead.
+    ///
+    /// R7 fix: this is now *awaited* rather than spawned as a fire-and-forget
+    /// Task, so the auto-trigger step below observes the cleared
+    /// UserDefaults handle and decides correctly whether to open a new
+    /// session. Previously the two steps raced: cleanup could still be in
+    /// flight when the trigger read `activeHandleKey`, producing non-
+    /// deterministic "skip vs. proceed" outcomes depending on scheduling.
+    private func cleanupStaleOvernightSessionIfNeeded() async {
+        guard let staleHandle = UserDefaults.standard.string(forKey: OvernightScheduler.activeHandleKey) else {
+            return
+        }
+        Self.logger.warning("Found stale overnight handle on launch; attempting cleanup")
+        await overnightScheduler.cleanupStale(handle: staleHandle)
+    }
+
+    /// (3/3) Auto-kick the overnight session when the user launches the app
+    /// after their configured bedtime has already passed today. C.3 BLOCKING
+    /// fix: without this, `startOvernightSession` had zero production call
+    /// sites — the Layer 3 pipeline was dead code despite being wired
+    /// end-to-end.
+    ///
+    /// "Bedtime passed recently" = within the last 12 hours. `nextBedtime(after:)`
+    /// always returns a future date (today's if still upcoming, else tomorrow's),
+    /// so the most recent bedtime is `nextBedtime - 24h`. If that was within the
+    /// last 12h AND bedtime is enabled, start the session now. The 12h window
+    /// intentionally undershoots a full day to avoid kicking a session in the
+    /// afternoon after a missed bedtime — by then the morning briefing would be
+    /// stale.
+    ///
+    /// B3 note: we no longer pre-check the active-handle UserDefaults here.
+    /// `startOvernightSession` now holds the single source of truth for
+    /// re-entrancy (`sessionCreationInFlight` + post-actor re-check). Leaving
+    /// the pre-check here would re-introduce the TOCTOU window B3 aims to
+    /// close.
+    ///
+    /// The real-bedtime-in-future path (user opens app earlier in the evening)
+    /// still needs a proper scheduled Task to fire at 23:00; that's a Day-4
+    /// follow-up. The launch-side trigger covers the demo case and the common
+    /// "I opened the app as I went to bed" case.
+    private func autoTriggerOvernightSessionIfNeeded() async {
+        let settings = BedtimeSettings.load()
+        guard settings.isEnabled else { return }
+        guard let nextBedtime = settings.nextBedtime(after: .now) else { return }
+        let mostRecentBedtime = nextBedtime.addingTimeInterval(-24 * 3600)
+        let secondsSinceBedtime = Date.now.timeIntervalSince(mostRecentBedtime)
+        guard secondsSinceBedtime > 0, secondsSinceBedtime < 12 * 3600 else { return }
+
+        Self.logger.info("Auto-triggering startOvernightSession (bedtime was \(Int(secondsSinceBedtime / 60), privacy: .public)min ago)")
+        await overnightScheduler.startOvernightSession()
     }
 
     /// Install the scheduler's late-bound callbacks. Each guard makes the call idempotent
@@ -330,10 +364,38 @@ struct RootView: View {
                 // The whole thing is ancillary — any error here just means no briefing
                 // appears, which is the same UX as no bedtime being set (handled by
                 // MorningBriefingView's nil-briefing fallback).
+                //
+                // R5 fix: the scheduler now returns a Sendable `BriefingDTO` rather
+                // than a `@Model MorningBriefing` instance — SwiftData `@Model`s are
+                // tied to the executor that owns their `ModelContext`, so a model
+                // constructed inside the scheduler actor can't be safely read from
+                // SwiftUI on the main actor. The DTO carries the plain-data payload
+                // across the boundary; below we materialise it into `mainContext`
+                // (the container's main-actor-owned context) and persist it.
                 let scheduler = overnightScheduler
+                let container = modelContext.container
                 Task { @MainActor in
-                    let briefing = await scheduler.finalizeBriefing(forWakeDate: .now)
-                    Self.logger.info("VERIFIED transition: briefing fetched present=\(briefing != nil, privacy: .public)")
+                    guard let dto = await scheduler.finalizeBriefing(forWakeDate: .now) else {
+                        Self.logger.info("VERIFIED transition: no briefing (no active session)")
+                        latestBriefing = nil
+                        showBriefing = true
+                        return
+                    }
+                    let briefing = MorningBriefing(
+                        forWakeDate: dto.forWakeDate,
+                        briefingText: dto.briefingText,
+                        sourceSessionID: dto.sourceSessionID,
+                        memoryUpdateApplied: dto.memoryUpdateApplied
+                    )
+                    let mainContext = container.mainContext
+                    mainContext.insert(briefing)
+                    do {
+                        try mainContext.save()
+                        Self.logger.info("VERIFIED transition: briefing inserted chars=\(dto.briefingText.count, privacy: .public)")
+                    } catch {
+                        Self.logger.error("VERIFIED transition: briefing persist failed: \(error.localizedDescription, privacy: .public)")
+                        mainContext.rollback()
+                    }
                     latestBriefing = briefing
                     showBriefing = true
                 }
