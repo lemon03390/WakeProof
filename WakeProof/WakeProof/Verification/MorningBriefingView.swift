@@ -74,6 +74,13 @@ struct MorningBriefingView: View {
     /// background reveal rather than a jarring hard-cut to the gradient.
     @State private var revealOpacity: Double = 0
 
+    /// Task 4.2: commitment-note spring-in. Starts offset 24pt below natural
+    /// position and fully transparent; animates to zero offset and full opacity
+    /// with a spring (response 0.5s, damping 0.7) delayed 400ms after .onAppear
+    /// so the sunrise has established before the note rises into frame.
+    @State private var commitmentNoteOffset: CGFloat = 24
+    @State private var commitmentNoteOpacity: Double = 0
+
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
@@ -109,11 +116,13 @@ struct MorningBriefingView: View {
                 // yourself to do this", the briefing is context.
                 if let commitmentNote, !commitmentNote.isEmpty {
                     Text(commitmentNote)
-                        .font(.system(size: 28, weight: .semibold))
+                        .wpFont(.title2)
                         .foregroundStyle(Color.wpCream50.opacity(0.95))
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                        .padding(.top, 16)
+                        .padding(.horizontal, WPSpacing.xl)
+                        .padding(.top, WPSpacing.md)
+                        .offset(y: commitmentNoteOffset)
+                        .opacity(commitmentNoteOpacity)
                 }
                 Spacer()
                 content
@@ -207,6 +216,13 @@ struct MorningBriefingView: View {
             // renders on those paths, so revealOpacity assignment is harmless.
             withAnimation(.easeOut(duration: 1.2)) {
                 revealOpacity = 1
+            }
+            // Task 4.2: commitment-note springs in 400ms after appear — sunrise
+            // establishes warmth first (1.2s total), note rises into it at 400ms
+            // and lands at ~900ms (spring response 0.5s + 400ms delay).
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.4)) {
+                commitmentNoteOffset = 0
+                commitmentNoteOpacity = 1
             }
         }
     }
