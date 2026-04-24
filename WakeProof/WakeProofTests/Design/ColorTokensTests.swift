@@ -22,8 +22,8 @@ final class ColorTokensTests: XCTestCase {
         XCTAssertEqual(rgb.b, Double(b) / 255.0, accuracy: 0.01, "blue channel", file: file, line: line)
     }
 
-    func testCream100_FBEEDB()  { assertHex(.wpCream100, 0xFB, 0xEE, 0xDB) }
     func testCream50_FEF8ED()   { assertHex(.wpCream50,  0xFE, 0xF8, 0xED) }
+    func testCream100_FBEEDB()  { assertHex(.wpCream100, 0xFB, 0xEE, 0xDB) }
     func testCream200_F5E3C7()  { assertHex(.wpCream200, 0xF5, 0xE3, 0xC7) }
     func testChar950_1A120C()   { assertHex(.wpChar950,  0x1A, 0x12, 0x0C) }
     func testChar900_2B1F17()   { assertHex(.wpChar900,  0x2B, 0x1F, 0x17) }
