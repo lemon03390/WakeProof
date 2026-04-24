@@ -87,6 +87,14 @@ struct MorningBriefingView: View {
     /// note (400ms spring, lands ~900ms) have both resolved.
     @State private var observationOpacity: Double = 0
 
+    /// Task 4.4: haptic feedback trigger for the "Start your day" dismiss action.
+    /// Toggled on button tap before calling onDismiss() so .sensoryFeedback fires
+    /// the success pulse at the moment the user commits — the haptic confirms
+    /// the contract is fulfilled. Bool toggle is the canonical trigger pattern
+    /// for .sensoryFeedback because the value change is what drives the feedback,
+    /// not the value itself.
+    @State private var dismissedTrigger: Bool = false
+
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
@@ -105,10 +113,10 @@ struct MorningBriefingView: View {
             VStack(spacing: 24) {
                 Spacer()
                 Text("Good morning")
-                    .font(.system(size: 40, weight: .bold))
+                    .wpFont(.display)
                     .foregroundStyle(Color.wpCream50)
                 Text(Date.now.formatted(date: .complete, time: .omitted))
-                    .font(.title3)
+                    .wpFont(.title3)
                     .foregroundStyle(Color.wpCream50.opacity(0.7))
                 // Wave 5 H2: the user's pre-sleep commitment note in LARGE type.
                 // Sits between "Good morning"/date and the briefing content so
@@ -167,9 +175,13 @@ struct MorningBriefingView: View {
                 }
                 #endif
                 Spacer()
-                Button("Start your day", action: onDismiss)
-                    .buttonStyle(.primaryWhite)
-                    .padding(.bottom, 8)
+                Button("Start your day") {
+                    dismissedTrigger.toggle()
+                    onDismiss()
+                }
+                .buttonStyle(.primaryWhite)
+                .padding(.bottom, WPSpacing.xs2)
+                .sensoryFeedback(.success, trigger: dismissedTrigger)
 
                 // Wave 5 H5: opt-in Share button. Gated by three AND-ed
                 // conditions via `ShareCardModel.shouldShowShareButton`:
@@ -200,8 +212,8 @@ struct MorningBriefingView: View {
                         )
                     ) {
                         Text(ShareCardModel.shareButtonCopy)
-                            .font(.callout)
-                            .foregroundStyle(Color.wpCream50.opacity(0.6))
+                            .wpFont(.callout)
+                            .foregroundStyle(Color.wpCream50.opacity(0.55))
                             .underline()
                     }
                     .padding(.bottom, 40)
@@ -290,7 +302,7 @@ struct MorningBriefingView: View {
             // Happy path: render the prose. `briefingText` is guaranteed
             // non-empty by B5.3's parseAgentReply validation.
             Text(dto.briefingText)
-                .font(.title3)
+                .wpFont(.title3)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.wpCream50.opacity(0.9))
                 .padding(.horizontal, 28)
@@ -300,10 +312,10 @@ struct MorningBriefingView: View {
             // briefing, not apologising for tonight's absence.
             VStack(spacing: 8) {
                 Text("No briefing this morning")
-                    .font(.title3)
+                    .wpFont(.title3)
                     .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text("Sleep well tonight — Claude will prepare one.")
-                    .font(.callout)
+                    .wpFont(.callout)
                     .foregroundStyle(Color.wpCream50.opacity(0.5))
             }
         case .failure(_, let message):
@@ -312,10 +324,10 @@ struct MorningBriefingView: View {
             // in second-person to the user.
             VStack(spacing: 8) {
                 Text("Briefing unavailable")
-                    .font(.title3)
+                    .wpFont(.title3)
                     .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text(message)
-                    .font(.callout)
+                    .wpFont(.callout)
                     .foregroundStyle(Color.wpCream50.opacity(0.5))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 28)
