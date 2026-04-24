@@ -13,6 +13,11 @@
 //  warm-peach) appear only in this gradient and are inlined rather than
 //  promoted to `Color+WakeProof.swift`.
 //
+//  Doc-drift note: docs/design-system/README.md line 143 shows #1A120C at
+//  sunrise stop 0. This is stale; CSS is canonical per SKILL.md and specifies
+//  #2B1F17 (wpChar900). Reconcile README in a follow-up doc PR; this code
+//  follows CSS.
+//
 
 import SwiftUI
 
@@ -20,6 +25,14 @@ extension LinearGradient {
     /// 135° orange → coral. Primary alarm CTA, hero numerals, streak-digit
     /// fill, WakeProof wordmark on onboarding. NOT for backgrounds, NOT for
     /// long runs of text (use `wpCoral` solid for those).
+    ///
+    /// Known angle limitation: SwiftUI `LinearGradient` with `.topLeading` /
+    /// `.bottomTrailing` renders a true 135° only on square frames. On a
+    /// full-width pill CTA (~390×56pt) the diagonal flattens toward horizontal
+    /// because the gradient stretches corner-to-corner. The CSS source
+    /// specifies `135deg`; this SwiftUI approximation is visually close on
+    /// typical hero numerals and pill buttons, but demo-critical surfaces
+    /// (primaryAlarm) require on-device sign-off during Phase 6 UAT.
     static let wpPrimary = LinearGradient(
         colors: [.wpOrange, .wpCoral],
         startPoint: .topLeading,
