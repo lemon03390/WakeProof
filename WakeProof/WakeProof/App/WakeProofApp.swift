@@ -20,6 +20,13 @@ struct WakeProofApp: App {
     @State private var soundEngine = AlarmSoundEngine()
     @State private var visionVerifier = VisionVerifier()
     @State private var weeklyCoach = WeeklyCoach()
+    /// Wave 5 H3: derives current + best streak from the existing
+    /// WakeAttempt history. Instantiated here so RootView and
+    /// AlarmSchedulerView share one @Observable instance via
+    /// `.environment(_:)`. Initial value is (0, 0) until bootstrap's
+    /// first recompute lands — the badge's `shouldRender` gate hides it
+    /// during that millisecond, so there's no flash.
+    @State private var streakService = StreakService()
     /// One-shot guard so .task running on every RootView re-mount (multi-scene attach,
     /// SwiftUI identity churn) doesn't repeatedly cancel + reschedule the fire pipeline.
     @State private var didBootstrap = false
@@ -106,6 +113,7 @@ struct WakeProofApp: App {
                 .environment(soundEngine)
                 .environment(visionVerifier)
                 .environment(weeklyCoach)
+                .environment(streakService)
                 // NOTE: MemoryStore + OvernightScheduler are Swift `actor`s, not `Observable`,
                 // so SwiftUI's .environment(_:) refuses them. MemoryStore reaches views via
                 // `visionVerifier.memoryStore`; OvernightScheduler is passed directly to
@@ -139,6 +147,14 @@ struct WakeProofApp: App {
         Task { @MainActor [scheduler] in
             await scheduler.flushPendingAttempts()
         }
+
+        // Wave 5 H3: prime the streak badge from the existing WakeAttempt
+        // history. AlarmSchedulerView also recomputes on appear, but priming
+        // here means RootView's first render sees an accurate streak if the
+        // user launches the app and immediately sees the scheduler screen.
+        // The fetch runs on the main context (@MainActor) so `@Model`
+        // instances stay on their owning actor per SwiftData's contract.
+        recomputeStreakFromStore()
 
         // Single serialized Task for the three steps that must run in order
         // (M1 + R7 fix): (1) MemoryStore bootstrap → expose store to verifier,
@@ -239,6 +255,25 @@ struct WakeProofApp: App {
 
         Self.logger.info("Auto-triggering startOvernightSession (bedtime was \(Int(secondsSinceBedtime / 60), privacy: .public)min ago)")
         await overnightScheduler.startOvernightSession()
+    }
+
+    /// Wave 5 H3: fetch WakeAttempt rows from the main context and hand them
+    /// to StreakService for re-derivation. Called from `bootstrapIfNeeded`
+    /// (so the badge is primed before any view renders) and from the
+    /// VERIFIED transition in RootView (so a just-landed verify bumps the
+    /// streak count without waiting for the @Query observer to tick).
+    ///
+    /// A fetch failure is non-fatal — the badge stays at (0, 0) and the
+    /// next view-level `@Query` update will supply a fresh snapshot via
+    /// `AlarmSchedulerView.onChange(of: wakeAttempts.count)`.
+    private func recomputeStreakFromStore() {
+        let context = modelContainer.mainContext
+        do {
+            let attempts = try context.fetch(FetchDescriptor<WakeAttempt>())
+            streakService.recompute(from: attempts)
+        } catch {
+            Self.logger.error("Streak recompute fetch failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Install the scheduler's late-bound callbacks. Each guard makes the call idempotent
@@ -352,6 +387,11 @@ struct RootView: View {
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(AlarmSoundEngine.self) private var soundEngine
     @Environment(VisionVerifier.self) private var visionVerifier
+    /// Wave 5 H3: streak service shared with AlarmSchedulerView. RootView
+    /// triggers a recompute on the `(.verifying → .idle)` transition so the
+    /// home-view badge is already up-to-date when the briefing cover
+    /// dismisses and AlarmSchedulerView becomes visible again.
+    @Environment(StreakService.self) private var streakService
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
 
@@ -428,6 +468,15 @@ struct RootView: View {
                 soundEngine.stop()
                 audioKeepalive.stopAlarmSound()
                 visionVerifier.resetForNewFire()
+                // Wave 5 H3: recompute the streak now that the VERIFIED
+                // WakeAttempt row has been written. Re-fetches the full
+                // table from the main context so the service sees the
+                // freshly-persisted row. AlarmSchedulerView's
+                // `.onChange(of: wakeAttempts.count)` observer would also
+                // catch this next time the view is visible, but the
+                // recompute here means the streak is already correct when
+                // the briefing cover dismisses — no stale-count flicker.
+                Self.recomputeStreak(streakService: streakService, context: modelContext)
                 // Surface the overnight briefing right after a successful verify. The
                 // fetch runs in a detached Task so the scheduler's isolation boundary
                 // is honoured; the main-actor hop afterwards drives the cover binding.
@@ -543,6 +592,29 @@ struct RootView: View {
                 instruction: instruction,
                 onReady: { scheduler.beginCapturing() }
             )
+        }
+    }
+
+    /// Wave 5 H3: pull the WakeAttempt rows from the given main-actor model
+    /// context and hand them to `StreakService`. Static so the VERIFIED
+    /// transition handler can call it without closure-capturing `self`
+    /// (which would thread through the Task to no benefit). The caller is
+    /// already on the main actor — `@MainActor` on the helper enforces that
+    /// at the compiler level.
+    ///
+    /// Non-fatal on fetch failure: the service's existing values stay, and
+    /// AlarmSchedulerView's @Query observer will supply fresh data on next
+    /// appearance.
+    @MainActor
+    private static func recomputeStreak(
+        streakService: StreakService,
+        context: ModelContext
+    ) {
+        do {
+            let attempts = try context.fetch(FetchDescriptor<WakeAttempt>())
+            streakService.recompute(from: attempts)
+        } catch {
+            logger.error("Post-VERIFIED streak recompute fetch failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

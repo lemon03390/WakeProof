@@ -6,6 +6,7 @@
 //  and (DEBUG) fire immediately for demo video capture.
 //
 
+import SwiftData
 import SwiftUI
 import os
 
@@ -27,6 +28,20 @@ struct AlarmSchedulerView: View {
     /// case. VisionVerifier is already wired into the app via
     /// `.environment(visionVerifier)` — we just read the flag here.
     @Environment(VisionVerifier.self) private var visionVerifier
+    /// Wave 5 H3 (§12.3-H3): injected from WakeProofApp so the badge and
+    /// calendar read a single source of derived streak state. Recomputes on
+    /// view appear so a navigation-back-and-forth reflects any attempts
+    /// added since the last render (e.g. a VERIFIED verify that completed in
+    /// between).
+    @Environment(StreakService.self) private var streakService
+
+    /// Wave 5 H3: the full WakeAttempt history drives both the streak-service
+    /// recompute and the StreakCalendarView grid. No filter / no sort — the
+    /// service and the grid do their own day-keyed aggregation, and a
+    /// full-history scan stays cheap on-device (a few hundred rows at most).
+    /// `@Query` gets auto-invalidated by SwiftData on any WakeAttempt mutation,
+    /// so the badge reacts to each VERIFIED transition without extra plumbing.
+    @Query private var wakeAttempts: [WakeAttempt]
 
     @State private var startTime: Date = .now
     @State private var isEnabled: Bool = false
@@ -75,11 +90,39 @@ struct AlarmSchedulerView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // Wave 5 H3: streak badge at the top of the Form. Only renders
+                // when there's something meaningful to show — the helper
+                // `StreakBadgeView.shouldRender(...)` returns false for a
+                // fresh install (both streaks 0) so the section is absent
+                // rather than showing a bleak "0-day streak" placeholder.
+                if StreakBadgeView.shouldRender(
+                    currentStreak: streakService.currentStreak,
+                    bestStreak: streakService.bestStreak
+                ) {
+                    Section {
+                        StreakBadgeView(
+                            currentStreak: streakService.currentStreak,
+                            bestStreak: streakService.bestStreak
+                        )
+                    }
+                }
+
                 if let banner = systemBanner {
                     Section {
                         Text(banner)
                             .font(.callout)
                             .foregroundStyle(.orange)
+                    }
+                }
+
+                // Wave 5 H3: "View streak calendar" row — entry to the month-
+                // grid surface. Rendered unconditionally (even for fresh
+                // installs with no attempts) so the user discovers the
+                // calendar before their first fire; an empty grid with all
+                // gray days is still an accurate reflection of state.
+                Section("Streak") {
+                    NavigationLink("View streak calendar") {
+                        StreakCalendarView(attempts: wakeAttempts)
                     }
                 }
 
@@ -188,7 +231,28 @@ struct AlarmSchedulerView: View {
             // bumped from within the queue's flush path, so by the time this
             // view is active we always see a current value.
             .onAppear(perform: refreshDroppedMemoryCount)
+            // Wave 5 H3: recompute the streak from the current WakeAttempt
+            // rows every time the view appears AND every time the @Query-
+            // driven array changes (e.g. a VERIFIED verify just landed).
+            // `.onAppear` covers "navigated back from the calendar";
+            // `.onChange(of: wakeAttempts.count)` covers "a row was added
+            // while the view was visible". Bootstrap in WakeProofApp runs
+            // the first recompute before this view appears, so the badge is
+            // accurate on first render even if the user never leaves it.
+            .onAppear(perform: recomputeStreak)
+            .onChange(of: wakeAttempts.count) { _, _ in
+                recomputeStreak()
+            }
         }
+    }
+
+    /// Wave 5 H3: dispatch a streak recompute against the current @Query
+    /// snapshot. Pure MainActor call — `StreakService.recompute(from:)` is
+    /// deliberately @MainActor for the @Observable write contract, and the
+    /// @Query-backed `wakeAttempts` is already on the main actor. No Task
+    /// hop needed.
+    private func recomputeStreak() {
+        streakService.recompute(from: wakeAttempts)
     }
 
     /// R9 helper: pull the latest overnight-pipeline error from the scheduler
