@@ -37,6 +37,15 @@ struct AlarmSchedulerView: View {
     /// accessor → View.
     @State private var lastSessionStartError: String?
 
+    /// P5 (Stage 6 Wave 1): inline warning shown when the Save & schedule button
+    /// tap hit a `WakeWindow.save()` failure. Mirrors BedtimeStep's `saveFailureMessage`
+    /// pattern — cleared on the next save tap so a successful retry dismisses the
+    /// warning without the user having to navigate away. Appearance-only state
+    /// (no UserDefaults persistence) because the alarm scheduler's in-memory
+    /// window already reflects the user's intent; the warning is just the nudge
+    /// to retry so the setting survives next launch.
+    @State private var windowSaveFailureMessage: String?
+
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "schedulerView")
 
     var body: some View {
@@ -57,6 +66,15 @@ struct AlarmSchedulerView: View {
 
                 Section {
                     Button("Save & schedule") { save() }
+                    // P5 (Stage 6 Wave 1): inline warning rendered immediately under
+                    // the button so the user sees the failure at the point of action.
+                    // Same shape as BedtimeStep.saveFailureMessage — yellow text, footnote
+                    // size, dismissed on next successful save.
+                    if let windowSaveFailureMessage {
+                        Text(windowSaveFailureMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.yellow)
+                    }
                 }
 
                 if let next = scheduler.nextFireAt {
@@ -116,13 +134,22 @@ struct AlarmSchedulerView: View {
         }
     }
 
-    /// R9 helper: pull the latest overnight-start error from the scheduler
+    /// R9 helper: pull the latest overnight-pipeline error from the scheduler
     /// actor. Called on `.task` so it runs once per view appearance, covering
     /// both "just came back from background" and "just navigated to this
     /// tab". Extracted as its own method so tests can exercise it without
     /// reaching into `body`.
+    ///
+    /// P6 + P7 (Stage 6 Wave 1): upgraded to the composite `lastOvernightError()`
+    /// accessor which returns either the start error OR the refresh/submit
+    /// error (start takes precedence). Previously this only covered start
+    /// failures; a mid-night session death or a `BGTaskScheduler.submit`
+    /// throw was invisible to the user until the morning briefing failed.
+    /// The `@State` name stays `lastSessionStartError` for grep-stability with
+    /// the R9-era layout; the semantics widened but the variable just mirrors
+    /// whatever the composite accessor returns.
     private func refreshOvernightStartError() async {
-        lastSessionStartError = await overnightScheduler.lastSessionStartError()
+        lastSessionStartError = await overnightScheduler.lastOvernightError()
     }
 
     /// Composite "the alarm contract is partially broken" banner. Surfaces the highest-impact
@@ -192,7 +219,14 @@ struct AlarmSchedulerView: View {
             endMinute: scheduler.window.endMinute,
             isEnabled: isEnabled
         )
-        scheduler.updateWindow(w)
+        // P5 (Stage 6 Wave 1): consume the Bool return from `updateWindow`. On failure
+        // show an inline warning so the user knows the setting didn't persist; on
+        // success clear any prior warning so a retry dismisses it silently.
+        if scheduler.updateWindow(w) {
+            windowSaveFailureMessage = nil
+        } else {
+            windowSaveFailureMessage = "Couldn't save the wake window — try once more. The alarm is scheduled for this session but the setting won't survive a relaunch."
+        }
     }
 
 }

@@ -247,6 +247,16 @@ final class VisionVerifier {
             // hop existed only to update the now-deleted `MemoryWriteBacklog` sidecar
             // (SQ1). Queue counts remain reachable via `queue.count()` if a future
             // UI banner needs them.
+            //
+            // P8 (Stage 6 Wave 1): the catch branch switched from `await queue.enqueue(...)`
+            // to synchronous `queue.enqueueSync(...)`. The outer `Task { ... }` still
+            // runs the MemoryStore write concurrently with the scheduler transition
+            // (that's load-bearing — the await would block verdict UX on disk I/O),
+            // but when the write fails the enqueue must not hop-and-lose under app
+            // teardown. `enqueueSync` runs under an unfair-lock-guarded UserDefaults
+            // write, landing the row before the catch block returns — a tear-down at
+            // this boundary still leaves the calibration row on disk for the
+            // next-launch flush to pick up.
             let queue = memoryWriteQueue
             Task { [logger] in
                 do {
@@ -254,7 +264,7 @@ final class VisionVerifier {
                 } catch {
                     logger.error("MemoryStore write failed — enqueueing for retry: \(error.localizedDescription, privacy: .public)")
                     let pending = PendingMemoryWrite(entry: entry, profileDelta: profileDelta)
-                    await queue.enqueue(pending)
+                    queue.enqueueSync(pending)
                 }
             }
         }

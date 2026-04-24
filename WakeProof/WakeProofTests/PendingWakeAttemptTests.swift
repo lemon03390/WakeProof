@@ -137,6 +137,81 @@ final class PendingWakeAttemptTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: PendingWakeAttemptQueue.defaultsKey),
                      "corrupted data must be wiped so we don't loop trying to decode the same bytes")
     }
+
+    // MARK: - P8: enqueueSync lands before the call returns
+
+    /// P8 (Stage 6 Wave 1): the CRITICAL invariant — `enqueueSync` must persist
+    /// the row to UserDefaults BEFORE the call returns. Previously the enqueue
+    /// went through `Task.detached { await queue.enqueue(...) }` which could
+    /// race app-teardown: if iOS killed the app between the detach and the
+    /// actor receiving the message, the enqueue never landed and the audit row
+    /// was lost — defeating the whole B4 design purpose. The sync path closes
+    /// that window.
+    ///
+    /// Asserting the write lands synchronously: after calling `enqueueSync`
+    /// (non-async, no `await`), the UserDefaults blob must already reflect
+    /// the new row when we read back immediately on the same thread.
+    func testEnqueueSyncLandsBeforeFunctionReturns() {
+        let queue = PendingWakeAttemptQueue(defaults: defaults)
+        let pending = PendingWakeAttempt(
+            verdictRawValue: "VERIFIED",
+            scheduledFor: Date(timeIntervalSince1970: 1_745_000_000)
+        )
+
+        // Synchronous call — no Task, no await, no actor hop.
+        queue.enqueueSync(pending)
+
+        // Immediate read-back on the same synchronous path. If this is empty,
+        // the enqueue went through an async path and the row is at risk of
+        // loss if the app is terminated right here.
+        let raw = defaults.data(forKey: PendingWakeAttemptQueue.defaultsKey)
+        XCTAssertNotNil(raw, "enqueueSync MUST persist the row synchronously — an async hop here would regress the B4/R14 retry-queue intent")
+
+        // Decode it and assert content.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try? decoder.decode([PendingWakeAttempt].self, from: raw ?? Data())
+        XCTAssertEqual(decoded?.count, 1)
+        XCTAssertEqual(decoded?.first?.verdictRawValue, "VERIFIED")
+    }
+
+    /// P8: sync + async paths serialise against each other. Mixing them should
+    /// produce a queue whose size equals the total number of enqueues from
+    /// both paths — no lost rows from races.
+    func testSyncAndAsyncEnqueuesCoexistCleanly() async {
+        let queue = PendingWakeAttemptQueue(defaults: defaults)
+        // Sync first.
+        queue.enqueueSync(PendingWakeAttempt(verdictRawValue: "SYNC1", scheduledFor: .now))
+        // Async in the middle.
+        await queue.enqueue(PendingWakeAttempt(verdictRawValue: "ASYNC1", scheduledFor: .now))
+        // Sync again.
+        queue.enqueueSync(PendingWakeAttempt(verdictRawValue: "SYNC2", scheduledFor: .now))
+
+        let snapshot = await queue.snapshot()
+        XCTAssertEqual(snapshot.count, 3, "all three enqueues must persist — no lost rows from sync/async interleaving")
+        // Order is preserved FIFO.
+        XCTAssertEqual(snapshot.map(\.verdictRawValue), ["SYNC1", "ASYNC1", "SYNC2"])
+    }
+
+    /// P8: sync enqueue also respects the queue cap. At the boundary, the oldest
+    /// row drops just like the async path.
+    func testEnqueueSyncRespectsQueueCap() {
+        let queue = PendingWakeAttemptQueue(defaults: defaults)
+        let cap = PendingWakeAttemptQueue.maxQueueEntries
+        for i in 0..<(cap + 2) {
+            queue.enqueueSync(PendingWakeAttempt(
+                verdictRawValue: "V\(i)",
+                scheduledFor: Date(timeIntervalSince1970: TimeInterval(i))
+            ))
+        }
+        // Read back synchronously from UserDefaults to confirm cap enforcement.
+        let raw = defaults.data(forKey: PendingWakeAttemptQueue.defaultsKey)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try? decoder.decode([PendingWakeAttempt].self, from: raw ?? Data())
+        XCTAssertEqual(decoded?.count, cap)
+        XCTAssertEqual(decoded?.first?.verdictRawValue, "V2", "oldest 2 entries must have dropped under cap enforcement")
+    }
 }
 
 // MARK: - AlarmScheduler integration

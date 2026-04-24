@@ -102,14 +102,28 @@ final class AlarmScheduler {
 
     // MARK: - Public API
 
-    func updateWindow(_ new: WakeWindow) {
+    /// Apply and persist a new wake window. Returns `true` on success; `false` if
+    /// `WakeWindow.save()` failed (encode error / defaults write rejected).
+    ///
+    /// P5 (Stage 6 Wave 1): previously this routed a save failure to
+    /// `lastCaptureError`, which AlarmRingingView surfaces but AlarmSchedulerView's
+    /// "Save & schedule" button never renders — so a user tapping that button
+    /// silently proceeded past a failed persist and would see the old window's
+    /// fire time on "Next fire" with no warning. Mirroring `BedtimeSettings.save`
+    /// / `BedtimeStep`'s Bool-return pattern (M5) lets AlarmSchedulerView render
+    /// an inline warning like BedtimeStep does, instead of depending on a view
+    /// surface the settings UI doesn't mount.
+    ///
+    /// Return-on-failure still reschedules — the in-memory `window` reflects the
+    /// user's intent even if persistence failed; the alarm should fire with the
+    /// new time for this session, and `BedtimeStep`-style inline warning tells
+    /// the user to retry so the new window survives next launch.
+    @discardableResult
+    func updateWindow(_ new: WakeWindow) -> Bool {
         window = new
-        if !window.save() {
-            // WakeWindow.save() now returns Bool; surface failure rather than silently
-            // proceeding with a window the user can't trust will persist.
-            lastCaptureError = "Couldn't save the wake window. The alarm will use the previous setting."
-        }
+        let saved = window.save()
         scheduleNextFireIfEnabled()
+        return saved
     }
 
     func scheduleNextFireIfEnabled() {
@@ -174,8 +188,16 @@ final class AlarmScheduler {
         backupScheduleTask?.cancel()
         backupScheduleTask = nil
         nextFireAt = nil
-        // Generation bumping happens in scheduleNextFireIfEnabled, not here — Task.isCancelled
-        // is sufficient when cancel runs without a follow-up schedule.
+        // P3 (Stage 6 Wave 1): bump the scheduling generation unconditionally here.
+        // Previously this lived only in `scheduleNextFireIfEnabled`, on the theory that
+        // `Task.isCancelled` was sufficient — but a fire-task that had already passed
+        // its `guard !Task.isCancelled` check before the `cancel()` call landed could
+        // still reach the MainActor hop. At that point the generation check
+        // (`myGeneration == self.schedulingGeneration`) would match, and the alarm
+        // would fire despite the cancel. Bumping here invalidates every pre-cancel
+        // fire task deterministically. `&+=` wraps safely; a 64-bit overflow at
+        // one bump per fire is absurdly past device lifetime.
+        schedulingGeneration &+= 1
         notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
         // Intentionally NOT removing delivered notifications here — see fire(). Delivered
         // banners auto-dismiss when the user opens the app. Aggressive removal would kill
@@ -479,9 +501,15 @@ final class AlarmScheduler {
             verdictRawValue: verdict.rawValue,
             scheduledFor: scheduledFor
         )
-        let queue = pendingAttemptQueue
-        Task.detached {
-            await queue.enqueue(pending)
-        }
+        // P8 (Stage 6 Wave 1): switch from `Task.detached { await queue.enqueue(...) }`
+        // to the synchronous `enqueueSync` path. The prior pattern was fire-and-forget:
+        // if the app was torn down (iOS kill / force-quit / scene discard) BETWEEN
+        // the detach and the actor receiving the message, the enqueue never landed
+        // and the row was lost — defeating the B4 intent that these rows exist
+        // SPECIFICALLY to prevent silent data loss. `enqueueSync` uses an
+        // `OSAllocatedUnfairLock`-guarded UserDefaults write that completes before
+        // this method returns, so tear-down right after this call still leaves
+        // the row on disk for next-launch recovery.
+        pendingAttemptQueue.enqueueSync(pending)
     }
 }

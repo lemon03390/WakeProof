@@ -30,6 +30,11 @@
 
 import { timingSafeEqual } from 'node:crypto';
 
+// P4 (Stage 6 Wave 1): shared allowlist imported so cron + wildcard stay
+// in sync on the current beta identifier. Previously each file declared
+// its own copy and a beta bump required remembering to edit both.
+import { ALLOWED_BETA_HEADERS } from '../lib/beta-headers.js';
+
 // L1 (Wave 2.7): constant-time token compare. See api/v1/messages.js for the
 // full rationale — same implementation mirrored here because Vercel route
 // files are independent modules.
@@ -46,11 +51,11 @@ function tokensEqual(clientToken, expectedToken) {
  * R1 allowlist — only these beta header values round-trip to Anthropic.
  * Split by comma so multiple betas in a single header are each validated;
  * unknown tokens are dropped with an info log, valid tokens are re-joined.
- * Add new beta identifiers here as we onboard them (keep alphabetical).
+ *
+ * P4 (Stage 6 Wave 1): `ALLOWED_BETA_HEADERS` is imported from
+ * ../lib/beta-headers.js so the cron cleanup and wildcard agree without
+ * duplicating the literal. Add new beta identifiers there, not here.
  */
-const ALLOWED_BETA_HEADERS = new Set([
-  'managed-agents-2026-04-01',
-]);
 
 /**
  * R2 allowlist — HTTP methods the proxy is willing to forward. POST covers

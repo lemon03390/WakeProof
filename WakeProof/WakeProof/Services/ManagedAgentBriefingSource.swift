@@ -56,13 +56,38 @@ actor ManagedAgentBriefingSource: OvernightBriefingSource {
         return parsed
     }
 
+    /// P9 (Stage 6 Wave 1): cleanup now THROWS on termination failure. The prior
+    /// implementation swallowed errors internally and returned normally, so the
+    /// caller (OvernightScheduler.finalizeBriefing) always unconditionally cleared
+    /// the local handle — even though the upstream session was still running at
+    /// $0.08/hr until its 24h ceiling. Throwing propagates the failure so the
+    /// caller can retain the handle for a retry pass, bounding cost-leak to the
+    /// per-cleanup-pass time window instead of the full 24h ceiling.
+    ///
+    /// Protocol-level note: `OvernightBriefingSource.cleanup(handle:)` is declared
+    /// as `func cleanup(handle:) async` (non-throwing). We keep the same method
+    /// signature in the protocol and add a new throwing variant below; call sites
+    /// (OvernightScheduler.finalizeBriefing, .cleanupStale) prefer the throwing
+    /// variant and convert failures into the retry-counter bump.
     func cleanup(handle: String) async {
+        // Kept for protocol conformance. Forwards to the throwing variant but
+        // only logs on error — used at sites where cleanup failure can't be
+        // retried (e.g. the dry-run cron path in tests that just wants best-effort).
+        // Call sites that participate in the retry-counter machinery MUST use
+        // `cleanupThrowing(handle:)` below.
         do {
-            try await client.terminateSession(sessionID: handle)
-            logger.info("cleanup: session=\(handle.prefix(12), privacy: .private) deleted")
+            try await cleanupThrowing(handle: handle)
         } catch {
-            logger.error("cleanup failed (non-fatal) for session=\(handle.prefix(12), privacy: .private): \(error.localizedDescription, privacy: .public)")
+            logger.error("cleanup (non-throwing variant) failed for session=\(handle.prefix(12), privacy: .private): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// P9 (Stage 6 Wave 1): throwing cleanup that surfaces termination failure.
+    /// Call from sites that participate in the retry-counter machinery — the
+    /// scheduler's finalize + stale-cleanup paths.
+    func cleanupThrowing(handle: String) async throws {
+        try await client.terminateSession(sessionID: handle)
+        logger.info("cleanup: session=\(handle.prefix(12), privacy: .private) deleted")
     }
 
     // MARK: - Helpers

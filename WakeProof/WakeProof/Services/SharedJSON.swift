@@ -31,7 +31,15 @@
 
 import Foundation
 
-enum SharedJSON {
+// P8 (Stage 6 Wave 1): marking the enum itself `nonisolated` (vs adding the
+// attribute per-property) lets the nonisolated retry-queue paths
+// (`PendingWakeAttemptQueue.loadQueueUnsafe` / `saveQueueUnsafe` and friends)
+// reach these singletons without an actor hop. The underlying encoders/decoders
+// are `Sendable` at the Foundation level so cross-actor use is safe; the only
+// reason the properties were previously MainActor-inferred is the project-wide
+// default-actor-isolation setting — explicitly marking `nonisolated` overrides
+// that inference here so file-local access stays cheap.
+nonisolated enum SharedJSON {
     /// JSON decoder with `.iso8601` date-decoding strategy. Used for
     /// UserDefaults queue blobs, MemoryEntry + sidecar round-trips, and any
     /// WakeProof-authored JSON that serialises Dates as ISO-8601 strings.

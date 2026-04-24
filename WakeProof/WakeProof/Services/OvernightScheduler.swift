@@ -36,6 +36,25 @@ protocol OvernightBriefingSource: Actor {
     /// Managed Agent session (stops the $0.08/hr meter); on fallback this
     /// is a no-op.
     func cleanup(handle: String) async
+
+    /// P9 (Stage 6 Wave 1): throwing variant that surfaces termination failure
+    /// to the caller. Call sites that participate in the retry-counter machinery
+    /// (finalizeBriefing, cleanupStale) prefer this form so a failed DELETE can
+    /// be retained for a retry pass rather than silently clearing the local
+    /// handle while the upstream session keeps running at $0.08/hr up to its
+    /// 24h ceiling.
+    ///
+    /// Default protocol implementation forwards to the non-throwing `cleanup`
+    /// so pre-existing conformers (NoopBriefingSource, test fakes) don't need
+    /// code changes. Conformers that can actually fail (ManagedAgentBriefingSource)
+    /// override with a real throwing implementation.
+    func cleanupThrowing(handle: String) async throws
+}
+
+extension OvernightBriefingSource {
+    func cleanupThrowing(handle: String) async throws {
+        await cleanup(handle: handle)
+    }
 }
 
 actor OvernightScheduler {
@@ -48,6 +67,20 @@ actor OvernightScheduler {
     /// launch-time recovery (`cleanupStale`) can read it before the scheduler
     /// actor is constructed.
     static let activeHandleKey = "com.wakeproof.overnight.activeHandle"
+
+    /// P9 (Stage 6 Wave 1): UserDefaults key for the cleanup-termination retry
+    /// counter. Bumped every time `source.cleanupThrowing(handle:)` fails;
+    /// reset to zero when cleanup succeeds OR when the retry cap is hit (in
+    /// which case the handle is force-cleared with a .fault log). Exposed
+    /// static so bootstrap-time recovery can read it before actor construction.
+    static let terminationAttemptsKey = "com.wakeproof.overnight.terminationAttempts"
+
+    /// P9 retry cap — after this many failed termination attempts, abandon the
+    /// local handle to avoid burning forever on a permanently-unreachable
+    /// Anthropic endpoint. Upstream cost is capped by Anthropic's own 24h
+    /// session ceiling; this value (5) gives us ~5 bootstrap passes to recover
+    /// before we wave the white flag and rely on server-side auto-termination.
+    static let maxTerminationAttempts = 5
 
     private let source: any OvernightBriefingSource
     // R11 (Wave 2.5): typed as `any SleepReading` so tests can swap in `FakeSleepReader`
@@ -73,6 +106,25 @@ actor OvernightScheduler {
     /// silently stopped working looked identical to a correctly-armed one.
     /// Cleared on the next successful start.
     private var _lastSessionStartError: String?
+
+    /// P6 + P7 (Stage 6 Wave 1): surfaces the error from the most recent failed
+    /// BGProcessingTask handler (`handleBackgroundRefresh` catch branch or
+    /// `scheduleNextBackgroundRefresh` submit-throw). Previously both sites
+    /// only called `logger.error(...)` so a session that died mid-night or a
+    /// submit that threw `notPermitted` / `tooManyPendingTaskRequests` was
+    /// invisible until the morning briefing surfaced "transport failed" copy
+    /// at wake time — no earlier signal, no root-cause hint.
+    ///
+    /// Kept separate from `_lastSessionStartError` so tests + future UI can
+    /// distinguish the two flavours ("couldn't open tonight's session" vs
+    /// "tonight's session died / background refresh blocked"). The composite
+    /// accessor `lastOvernightError()` collapses both into a single banner
+    /// string for AlarmSchedulerView's use.
+    ///
+    /// Cleared when a `handleBackgroundRefresh` run completes without error.
+    /// NOT cleared by `startOvernightSession` success — a refresh failure
+    /// mid-night reveals a problem the session-open path doesn't exercise.
+    private var _lastRefreshError: String?
 
     /// SQ3 (Stage 4): `modelContainer` parameter was removed. After the R5 DTO
     /// refactor, SwiftData `ModelContext` construction moved to the main actor's
@@ -113,10 +165,26 @@ actor OvernightScheduler {
         //       "previous session already succeeded" case (e.g. BGTask ran
         //       overnight, or a prior auto-trigger completed before this one).
         if sessionCreationInFlight {
+            // Intentionally do NOT clear `_lastSessionStartError` here — an
+            // in-flight attempt represents a concurrent caller that hasn't
+            // yet resolved; if it fails, its own catch branch will overwrite
+            // the error. If it succeeds, it clears on its success path. Clearing
+            // here would create a banner-flicker window where a prior failure is
+            // invisible for the milliseconds between the concurrent entry and
+            // its resolution.
             logger.info("startOvernightSession: creation already in flight on this actor — skipping")
             return
         }
         if let existing = defaults.string(forKey: Self.activeHandleKey) {
+            // P2 (Stage 6 Wave 1): clear the banner-error when a session is
+            // already open. If a prior launch failed and a later re-launch
+            // sees an active handle (e.g. the BGTask-driven re-engagement
+            // chain produced one overnight, or an earlier auto-trigger in
+            // this same foreground landed successfully after the failure
+            // attempt), the pipeline IS healthy tonight — showing yesterday's
+            // banner lies. Distinct from the in-flight branch above, which
+            // represents a concurrent attempt whose outcome is unknown.
+            _lastSessionStartError = nil
             logger.info("startOvernightSession: session already open (handle=\(existing.prefix(8), privacy: .private)) — skipping")
             return
         }
@@ -172,6 +240,21 @@ actor OvernightScheduler {
     /// unwarranted when the banner only refreshes on user-visible boundaries.
     func lastSessionStartError() async -> String? {
         _lastSessionStartError
+    }
+
+    /// P6 + P7 (Stage 6 Wave 1): refresh/submit-failure surface. Parallel to
+    /// `lastSessionStartError()` so tests can assert each path independently.
+    func lastRefreshError() async -> String? {
+        _lastRefreshError
+    }
+
+    /// P6 + P7 (Stage 6 Wave 1): composite banner for AlarmSchedulerView. Returns
+    /// the start-error first if set (takes precedence: a session that never opened
+    /// is more directly actionable than a session that started then refreshed badly);
+    /// otherwise returns the refresh-error. Nil means no overnight-pipeline failure
+    /// is outstanding.
+    func lastOvernightError() async -> String? {
+        _lastSessionStartError ?? _lastRefreshError
     }
 
     /// BGProcessingTask handler. **Order is load-bearing** (R1 in plan review):
@@ -262,12 +345,26 @@ actor OvernightScheduler {
             }
             let briefingReady = try await source.pokeIfNeeded(handle: handle, sleep: sleep)
             logger.info("handleBackgroundRefresh: pokeIfNeeded done briefingReady=\(briefingReady, privacy: .public)")
+            // P6 (Stage 6 Wave 1): clear any prior refresh error on success. The
+            // pipeline is demonstrably healthy this tick — a lingering banner
+            // error would mislead the user into thinking something was still
+            // broken. Start-error is left untouched (different field; cleared
+            // only by startOvernightSession success).
+            _lastRefreshError = nil
             if latch.claim() {
                 task.setTaskCompleted(success: true)
             } else {
                 logger.warning("handleBackgroundRefresh: expiration raced after pokeIfNeeded")
             }
         } catch {
+            // P6 (Stage 6 Wave 1): surface the poke failure via `_lastRefreshError`
+            // so AlarmSchedulerView's banner can tell the user "tonight's overnight
+            // session died — we'll retry" BEFORE the morning briefing's own
+            // transport-error copy surfaces at wake time. Without this, a mid-night
+            // session death was invisible until wake — no chance to diagnose,
+            // restart, or adjust expectations. The log is kept at .error level
+            // for post-mortem visibility.
+            _lastRefreshError = "Tonight's overnight analysis hit a problem: \(error.localizedDescription). We'll retry on the next refresh."
             logger.error("handleBackgroundRefresh failed: \(error.localizedDescription, privacy: .public)")
             if latch.claim() {
                 task.setTaskCompleted(success: false)
@@ -312,10 +409,15 @@ actor OvernightScheduler {
             logger.info("finalizeBriefing: briefing fetched chars=\(text.count, privacy: .public)")
         } catch {
             // B5.2 cleanup invariant: release the session on every failure
-            // path. `source.cleanup` is best-effort and its own errors are
-            // already swallowed + logged inside ManagedAgentBriefingSource.
-            await source.cleanup(handle: handle)
-            defaults.removeObject(forKey: Self.activeHandleKey)
+            // path. P9 (Stage 6 Wave 1): route through `terminateOrRetain` so
+            // a failed DELETE bumps the retry counter instead of silently
+            // clearing the handle while the upstream session keeps running
+            // at $0.08/hr. If the termination itself fails we LOG the fetch
+            // error and RETAIN the handle — next bootstrap's cleanupStale
+            // will retry. The UI still returns `.failure` with the fetch
+            // classification because that's the root cause the user needs
+            // to know about.
+            await terminateOrRetain(handle: handle)
             let (reason, message) = Self.classify(fetchError: error)
             logger.error("finalizeBriefing failed: reason=\(reason.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
             return .failure(reason: reason, message: message)
@@ -338,8 +440,14 @@ actor OvernightScheduler {
                 logger.warning("finalizeBriefing: memory rewrite failed; briefing kept, flag stays false: \(error.localizedDescription, privacy: .public)")
             }
         }
-        await source.cleanup(handle: handle)
-        defaults.removeObject(forKey: Self.activeHandleKey)
+        // P9 (Stage 6 Wave 1): happy-path cleanup also routes through the
+        // retry-counter machinery. If the DELETE fails we return `.success`
+        // with the briefing the user has already earned, and the handle
+        // retention lets a future bootstrap retry the termination — the
+        // briefing content is captured upstream so retaining the handle is
+        // purely a cost-safety decision (continue charging the meter vs.
+        // abandon and rely on Anthropic's 24h ceiling).
+        await terminateOrRetain(handle: handle)
         return .success(BriefingDTO(
             briefingText: text,
             forWakeDate: wakeDate,
@@ -402,10 +510,65 @@ actor OvernightScheduler {
     /// running sessions. A force-quit during the night leaves the session
     /// running until its 24h ceiling — this entry point caps the cost at
     /// "time until next launch" instead.
+    ///
+    /// P9 (Stage 6 Wave 1): routed through `terminateOrRetain` so a failed
+    /// DELETE bumps the retry counter instead of silently clearing the handle
+    /// while the upstream session keeps running. After `maxTerminationAttempts`
+    /// failures the handle is force-cleared with a .fault log — at that point
+    /// Anthropic's 24h auto-termination is the last safety net.
     func cleanupStale(handle: String) async {
         logger.warning("cleanupStale: terminating stale handle=\(handle.prefix(8), privacy: .private)")
-        await source.cleanup(handle: handle)
-        defaults.removeObject(forKey: Self.activeHandleKey)
+        await terminateOrRetain(handle: handle)
+    }
+
+    /// P9 (Stage 6 Wave 1): centralised termination path with retry-counter
+    /// bookkeeping. On termination success: clears the handle + resets the
+    /// counter to zero. On termination failure: bumps the counter + retains
+    /// the handle for the next cleanup pass, UNLESS the counter would exceed
+    /// `maxTerminationAttempts`, in which case we force-clear + log a .fault
+    /// (Anthropic's server-side 24h auto-termination becomes the last line of
+    /// defense). Called by both `finalizeBriefing` and `cleanupStale`.
+    ///
+    /// Returns true if the handle was cleared (either because termination
+    /// succeeded or because the retry cap was hit), false if the handle was
+    /// retained for a retry pass. The boolean is advisory — call sites that
+    /// no longer need the handle clear their own references regardless.
+    @discardableResult
+    private func terminateOrRetain(handle: String) async -> Bool {
+        do {
+            try await source.cleanupThrowing(handle: handle)
+            // Success: clear the handle and reset the retry counter. Even if
+            // the counter was zero, `removeObject` on an already-empty key is
+            // a no-op so the call is cheap.
+            defaults.removeObject(forKey: Self.activeHandleKey)
+            defaults.removeObject(forKey: Self.terminationAttemptsKey)
+            logger.info("terminateOrRetain: session=\(handle.prefix(8), privacy: .private) terminated cleanly")
+            return true
+        } catch {
+            // Failure path: bump the counter and decide whether to retain or
+            // force-clear based on the cap. The counter is 1-indexed after
+            // this bump — on the first failure it becomes 1.
+            let priorAttempts = defaults.integer(forKey: Self.terminationAttemptsKey)
+            let newAttempts = priorAttempts + 1
+            if newAttempts >= Self.maxTerminationAttempts {
+                // Exhausted — force-clear the handle so subsequent bootstraps
+                // don't re-trigger the same failing DELETE indefinitely. Reset
+                // the counter so a future session's failure starts fresh at 1.
+                // .fault level because this is the cost-safety last-line event:
+                // an orphan session may continue at $0.08/hr up to the 24h
+                // server-side ceiling before Anthropic cleans it up for us.
+                defaults.removeObject(forKey: Self.activeHandleKey)
+                defaults.removeObject(forKey: Self.terminationAttemptsKey)
+                logger.fault("terminateOrRetain: overnight session termination exhausted \(newAttempts, privacy: .public) retries — abandoning handle=\(handle.prefix(8), privacy: .private); cost may continue to Anthropic 24h ceiling. Underlying error: \(error.localizedDescription, privacy: .public)")
+                return true
+            }
+            // Retain: keep the handle + bumped counter for the next pass. The
+            // bootstrap-time cleanupStale entry will try again on the next app
+            // launch; between launches the cron cleanup is the other safety net.
+            defaults.set(newAttempts, forKey: Self.terminationAttemptsKey)
+            logger.warning("terminateOrRetain: termination attempt \(newAttempts, privacy: .public)/\(Self.maxTerminationAttempts, privacy: .public) failed for session=\(handle.prefix(8), privacy: .private) — retaining handle for next cleanup pass. Error: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - Background-task registration
@@ -478,7 +641,46 @@ actor OvernightScheduler {
             try BGTaskScheduler.shared.submit(request)
             logger.info("scheduleNextBackgroundRefresh: submitted earliest=\(request.earliestBeginDate?.ISO8601Format() ?? "nil", privacy: .public)")
         } catch {
+            // P7 (Stage 6 Wave 1): surface the submit failure via `_lastRefreshError`
+            // so AlarmSchedulerView's banner can distinguish the actionable cases:
+            // `notPermitted` means the user disabled Background App Refresh in
+            // Settings (user action can fix it), `tooManyPendingTaskRequests`
+            // means iOS's internal queue is saturated (self-heals on next launch).
+            // Without this the user would only see the consequence — a missing
+            // morning briefing — with zero root-cause signal. The log still runs
+            // at .error for post-mortem.
+            let message: String
+            if let bgError = error as? BGTaskScheduler.Error {
+                switch bgError.code {
+                case .notPermitted:
+                    message = "Overnight refresh blocked — enable Background App Refresh in Settings → General → Background App Refresh → WakeProof."
+                case .tooManyPendingTaskRequests:
+                    message = "iOS has too many pending background tasks — WakeProof will retry on next launch."
+                case .unavailable:
+                    message = "Background tasks are unavailable on this device right now. Overnight analysis is paused until iOS reopens the window."
+                @unknown default:
+                    message = "Couldn't schedule next overnight refresh: \(bgError.localizedDescription)"
+                }
+            } else {
+                message = "Couldn't schedule next overnight refresh: \(error.localizedDescription)"
+            }
+            _lastRefreshError = message
             logger.error("scheduleNextBackgroundRefresh: submit failed \(error.localizedDescription, privacy: .public)")
+
+            // P7 cost-safety: if a session handle is set but we can't schedule
+            // another refresh, the re-engagement chain is broken — the session
+            // would keep running at $0.08/hr until iOS lets us queue again or
+            // the cron cleanup catches it at 12h. Tear it down proactively so
+            // we're not leaking spend while the user sleeps. `cleanupStale`
+            // is best-effort and idempotent; if termination itself also fails,
+            // the cron cleanup is the last safety net (and P9 will make the
+            // local cleanup retry-aware). Wrapping in a Task hop because this
+            // call is synchronous (from handleRefresh) but cleanupStale is
+            // async; we don't need to block the submit path on the DELETE.
+            if let handle = defaults.string(forKey: Self.activeHandleKey) {
+                logger.warning("scheduleNextBackgroundRefresh: submit failed WITH active handle=\(handle.prefix(8), privacy: .private) — tearing down session to prevent cost leak")
+                Task { await self.cleanupStale(handle: handle) }
+            }
         }
     }
 

@@ -59,6 +59,18 @@ final class OvernightSchedulerTests: XCTestCase {
         var pokeResult: Bool = true
         var planThrows: Error?
         var fetchThrows: Error?
+        /// P6 (Stage 6 Wave 1): programmable throw for the poke path so tests
+        /// can exercise handleRefresh's catch branch which surfaces via
+        /// `_lastRefreshError`.
+        var pokeThrows: Error?
+        /// P9 (Stage 6 Wave 1): programmable throw for the cleanup path so
+        /// tests can exercise the retain-vs-abandon logic.
+        var cleanupThrows: Error?
+        /// P9: count of cleanup invocations that *should have thrown* — because
+        /// the non-throwing `cleanup` just forwards to `cleanupThrowing` and
+        /// swallows, tests that need to distinguish success from retained-handle
+        /// outcomes read this counter.
+        private(set) var cleanupThrowingCalls: Int = 0
 
         func planOvernight(sleep: SleepSnapshot, memoryProfile: String?) async throws -> String {
             planCalls.append(PlanCall(sleep: sleep, memoryProfile: memoryProfile))
@@ -68,6 +80,7 @@ final class OvernightSchedulerTests: XCTestCase {
 
         func pokeIfNeeded(handle: String, sleep: SleepSnapshot) async throws -> Bool {
             pokeCalls.append(PokeCall(handle: handle, sleep: sleep))
+            if let pokeThrows { throw pokeThrows }
             return pokeResult
         }
 
@@ -79,6 +92,19 @@ final class OvernightSchedulerTests: XCTestCase {
 
         func cleanup(handle: String) async {
             cleanupCalls.append(handle)
+            // Record attempts but the non-throwing variant must not surface
+            // errors — protocol contract preserved.
+        }
+
+        /// P9 (Stage 6 Wave 1): override the protocol's default-implementation
+        /// forwarding so tests can programme this fake to actually throw. The
+        /// default protocol extension forwards `cleanupThrowing` → `cleanup`
+        /// (non-throwing), which would never exercise the scheduler's retain
+        /// path. By overriding explicitly we get full control.
+        func cleanupThrowing(handle: String) async throws {
+            cleanupCalls.append(handle)
+            cleanupThrowingCalls += 1
+            if let cleanupThrows { throw cleanupThrows }
         }
 
         // Test setters — need to be inside the actor so mutation is isolated.
@@ -86,6 +112,8 @@ final class OvernightSchedulerTests: XCTestCase {
         func setFetchResult(_ result: (text: String, memoryUpdate: String?)) { self.fetchResult = result }
         func setFetchThrows(_ error: Error?) { self.fetchThrows = error }
         func setPlanThrows(_ error: Error?) { self.planThrows = error }
+        func setPokeThrows(_ error: Error?) { self.pokeThrows = error }
+        func setCleanupThrows(_ error: Error?) { self.cleanupThrows = error }
     }
 
     // MARK: - Test plumbing
@@ -592,5 +620,188 @@ final class OvernightSchedulerTests: XCTestCase {
         let cleanupCalls = await source.cleanupCalls
         XCTAssertEqual(cleanupCalls, ["zombie-handle"])
         XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey))
+    }
+
+    // MARK: - P2: startOvernightSession clears banner when session already open
+
+    /// P2 (Stage 6 Wave 1): when re-launch sees an active-handle already set,
+    /// `startOvernightSession` early-returns — but previously it did NOT clear
+    /// `_lastSessionStartError`, so yesterday's failure banner persisted even
+    /// though tonight's session is live. This test seeds a failure, then seeds
+    /// an active handle + re-invokes start, and asserts the banner was cleared.
+    func testStartOvernightSessionClearsBannerWhenSessionAlreadyOpen() async throws {
+        // First call: throws → banner set.
+        let source = RecordingSource()
+        await source.setPlanThrows(OvernightAgentError.transportFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+        await scheduler.startOvernightSession()
+        let preErr = await scheduler.lastSessionStartError()
+        XCTAssertNotNil(preErr, "precondition: banner must be set after the first failed start")
+
+        // Simulate the scenario: a successor session opened (e.g. BGTask-driven
+        // re-engagement landed a handle overnight), and now foreground re-launch
+        // calls startOvernightSession. The early-return path must clear the
+        // stale banner.
+        suiteDefaults.set("inherited-session", forKey: OvernightScheduler.activeHandleKey)
+        await scheduler.startOvernightSession()
+
+        let err = await scheduler.lastSessionStartError()
+        XCTAssertNil(err, "session-already-open early-return MUST clear the stale banner — leaving it lies to the user")
+        // The pre-existing handle is still intact.
+        XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey), "inherited-session")
+    }
+
+    // MARK: - P6: refresh error surfacing
+
+    /// P6 (Stage 6 Wave 1): `handleRefresh` catch branch previously only logged.
+    /// Now it sets `_lastRefreshError` so AlarmSchedulerView can surface a banner
+    /// before the morning briefing's transport-error copy. Assert the poke-throw
+    /// case populates the new field via `lastRefreshError()`.
+    func testHandleRefreshSurfacesPokeFailureViaLastRefreshError() async throws {
+        suiteDefaults.set("bg-test-handle-p6", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setPokeThrows(OvernightAgentError.transportFailed(underlying: SampleError.boom))
+        let scheduler = makeScheduler(source: source)
+
+        let fakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: fakeTask)
+
+        // Pre-fix: this assertion failed because `_lastRefreshError` didn't exist.
+        let refreshErr = await scheduler.lastRefreshError()
+        XCTAssertNotNil(refreshErr,
+                        "handleRefresh catch branch MUST populate lastRefreshError so the UI can banner it BEFORE the morning's transport-error copy")
+        // Composite accessor also returns it (no start error in this scenario).
+        let compositeErr = await scheduler.lastOvernightError()
+        XCTAssertEqual(compositeErr, refreshErr,
+                       "composite lastOvernightError must surface refreshError when startError is nil")
+
+        // Successful next refresh clears the banner. Re-seed the handle in case
+        // a concurrent cleanup Task from the prior refresh's cost-safety path
+        // cleared it (P7 spawns a cleanupStale Task when BGTaskScheduler.submit
+        // throws AND a handle is set). Polling-wait up to ~500ms then re-seed
+        // so the second handleRefresh reliably takes the "handle present" branch
+        // where the success-path clear lives.
+        await source.setPokeThrows(nil)
+        // Give any in-flight cleanup Task room to settle, then re-seed.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        suiteDefaults.set("bg-test-handle-p6-recovery", forKey: OvernightScheduler.activeHandleKey)
+        let secondFakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: secondFakeTask)
+        let afterRecoveryErr = await scheduler.lastRefreshError()
+        XCTAssertNil(afterRecoveryErr, "successful refresh MUST clear prior refresh error — else stale banner lingers")
+    }
+
+    /// P6: the composite `lastOvernightError()` accessor prefers `_lastSessionStartError`
+    /// over `_lastRefreshError` when both are set. Rationale: a session that never
+    /// opened is more directly actionable than one that opened then refreshed badly.
+    func testLastOvernightErrorPrefersStartErrorOverRefreshError() async throws {
+        suiteDefaults.set("handle-p6-both", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setPokeThrows(OvernightAgentError.timeout)
+        let scheduler = makeScheduler(source: source)
+
+        // Seed a refresh error first.
+        let fakeTask = FakeBGProcessingTask()
+        await scheduler.handleRefresh(task: fakeTask)
+        let seededRefreshErr = await scheduler.lastRefreshError()
+        XCTAssertNotNil(seededRefreshErr, "precondition")
+
+        // Now manufacture a start error on a FRESH scheduler with no handle
+        // (so startOvernightSession actually tries to open). Re-use the same
+        // mechanism as testLastSessionStartErrorSurfacesPlanFailure.
+        // Since the scheduler actor keeps both fields independently, a start
+        // error added AFTER a refresh error should take precedence in the
+        // composite.
+        suiteDefaults.removeObject(forKey: OvernightScheduler.activeHandleKey)
+        await source.setPlanThrows(OvernightAgentError.httpError(status: 503, snippet: "x"))
+        await source.setPokeThrows(nil)
+        await scheduler.startOvernightSession()
+
+        let composite = await scheduler.lastOvernightError()
+        let startErr = await scheduler.lastSessionStartError()
+        XCTAssertEqual(composite, startErr,
+                       "composite must return startError when both present — start failure is more directly actionable")
+    }
+
+    // MARK: - P9: cleanup failure retry semantics
+
+    /// P9 (Stage 6 Wave 1): if `source.cleanupThrowing` fails, the scheduler
+    /// must RETAIN the handle + bump the termination-attempts counter rather
+    /// than silently clearing the handle (which leaves an orphan session running
+    /// at $0.08/hr up to the 24h Anthropic ceiling). This test exercises the
+    /// retain path via `finalizeBriefing` — fetchBriefing succeeds, cleanup
+    /// throws, scheduler retains handle and records attempt 1.
+    func testCleanupFailurePreservesHandleUntilMaxRetries() async throws {
+        suiteDefaults.set("handle-p9-retain", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setFetchResult((text: "briefing prose", memoryUpdate: nil))
+        await source.setCleanupThrows(OvernightAgentError.httpError(status: 503, snippet: "delete unavailable"))
+        let scheduler = makeScheduler(source: source)
+
+        let result = await scheduler.finalizeBriefing(forWakeDate: .now)
+
+        // fetchBriefing succeeded so the result is still .success — briefing is
+        // captured upstream; retention is purely cost-safety.
+        _ = unwrapSuccess(result)
+
+        // The cleanup throw must cause retention.
+        XCTAssertEqual(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey), "handle-p9-retain",
+                       "cleanup failure MUST retain the handle — clearing it strands Anthropic's meter at $0.08/hr for up to 24h")
+        XCTAssertEqual(suiteDefaults.integer(forKey: OvernightScheduler.terminationAttemptsKey), 1,
+                       "first cleanup failure must bump counter to 1")
+
+        // Cleanup was attempted.
+        let throwingCalls = await source.cleanupThrowingCalls
+        XCTAssertEqual(throwingCalls, 1, "cleanupThrowing must have been invoked once")
+    }
+
+    /// P9: after `maxTerminationAttempts` failures, the scheduler abandons the
+    /// handle (force-clears) and resets the counter. A `.fault` log fires but
+    /// we don't assert on logger output — just the resulting UserDefaults state.
+    func testCleanupFailureAfterMaxRetriesAbandonsHandle() async throws {
+        suiteDefaults.set("handle-p9-abandon", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        await source.setCleanupThrows(OvernightAgentError.httpError(status: 500, snippet: "persistent"))
+        let scheduler = makeScheduler(source: source)
+
+        // Call cleanupStale repeatedly. Each failure bumps the counter. On the
+        // maxTerminationAttempts'th failure the handle is abandoned.
+        for _ in 0..<OvernightScheduler.maxTerminationAttempts {
+            // Each iteration simulates a bootstrap-time cleanupStale pass.
+            // Handle is re-seeded by the previous iteration (if retained) OR
+            // was never cleared; for the last iteration the retain path should
+            // flip to abandon.
+            if let handle = suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey) {
+                await scheduler.cleanupStale(handle: handle)
+            }
+        }
+
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey),
+                     "after maxTerminationAttempts failed cleanups, handle must be force-cleared so bootstrap doesn't loop on the same dead session")
+        XCTAssertEqual(suiteDefaults.integer(forKey: OvernightScheduler.terminationAttemptsKey), 0,
+                       "counter must reset on abandon so a future session's failure starts fresh at 1")
+
+        // Sanity: the attempted cleanup count equals the retry cap.
+        let throwingCalls = await source.cleanupThrowingCalls
+        XCTAssertEqual(throwingCalls, OvernightScheduler.maxTerminationAttempts,
+                       "cleanupThrowing should have been called once per retry pass")
+    }
+
+    /// P9: successful cleanup resets the counter to zero, so a future failure
+    /// starts fresh at 1 rather than at whatever the prior session left behind.
+    func testSuccessfulCleanupResetsRetryCounter() async throws {
+        // Seed a counter from a prior session.
+        suiteDefaults.set(3, forKey: OvernightScheduler.terminationAttemptsKey)
+        suiteDefaults.set("handle-p9-reset", forKey: OvernightScheduler.activeHandleKey)
+        let source = RecordingSource()
+        // No cleanupThrows → cleanupThrowing succeeds.
+        let scheduler = makeScheduler(source: source)
+
+        await scheduler.cleanupStale(handle: "handle-p9-reset")
+
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightScheduler.activeHandleKey),
+                     "successful cleanup must clear the handle")
+        XCTAssertEqual(suiteDefaults.integer(forKey: OvernightScheduler.terminationAttemptsKey), 0,
+                       "successful cleanup must reset the counter — else a lingering count from a prior session distorts future budget decisions")
     }
 }

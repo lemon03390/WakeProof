@@ -182,6 +182,36 @@ final class PendingMemoryWriteTests: XCTestCase {
     // was removed with it. Queue-size verification now lives in the
     // `testFlushSuccessDrainsQueue` / `testFlushFailureRetainsEntriesAndBumpsRetryCount`
     // tests above, which read `queue.count()` directly on the underlying actor.
+
+    // MARK: - P8: enqueueSync lands before the call returns
+
+    /// P8 (Stage 6 Wave 1): memory-write retry queue must land its row
+    /// synchronously, same invariant as PendingWakeAttemptQueue. See
+    /// `PendingWakeAttemptTests.testEnqueueSyncLandsBeforeFunctionReturns` for
+    /// the full rationale.
+    func testEnqueueSyncLandsBeforeFunctionReturns() {
+        let queue = PendingMemoryWriteQueue(defaults: defaults)
+        let entry = MemoryEntry(
+            timestamp: Date(timeIntervalSince1970: 1_745_000_000),
+            verdict: "VERIFIED",
+            confidence: 0.92,
+            retryCount: 0,
+            note: "sync-landing-probe"
+        )
+        let pending = PendingMemoryWrite(entry: entry, profileDelta: "## delta")
+
+        // Sync call — no await, no detached Task.
+        queue.enqueueSync(pending)
+
+        let raw = defaults.data(forKey: PendingMemoryWriteQueue.defaultsKey)
+        XCTAssertNotNil(raw, "enqueueSync MUST persist synchronously — an async hop here would regress R14 retry-queue intent")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try? decoder.decode([PendingMemoryWrite].self, from: raw ?? Data())
+        XCTAssertEqual(decoded?.count, 1)
+        XCTAssertEqual(decoded?.first?.entry.note, "sync-landing-probe")
+    }
 }
 
 // MARK: - VisionVerifier integration

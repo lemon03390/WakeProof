@@ -19,7 +19,11 @@
 import Foundation
 
 /// Well-known log subsystems. See file header for rationale.
-enum LogSubsystem {
+///
+/// P8 (Stage 6 Wave 1): `nonisolated` so retry-queue nonisolated helpers can
+/// reference subsystem strings without an actor hop. These are `let String`
+/// constants — zero concurrency risk.
+nonisolated enum LogSubsystem {
     static let alarm = "com.wakeproof.alarm"
     static let app = "com.wakeproof.app"
     static let audio = "com.wakeproof.audio"

@@ -132,9 +132,16 @@ actor OvernightAgentClient {
             preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
         }
         // SR7 (Stage 4): validateOrCrash replaces the inline catch → preconditionFailure
-        // block. The derived URL string is `scheme://host` (no path); validateOrCrash
+        // block. The derived URL string is `scheme://host[:port]`; validateOrCrash
         // parses + allowlist-checks it and returns the URL.
-        return EndpointGuard.validateOrCrash(urlString: "\(scheme)://\(host)", label: "Overnight agent endpoint")
+        //
+        // P1 (Stage 6 Wave 1): preserve an explicit port if one was configured. The
+        // previous build rendered `scheme://host` unconditionally, which silently
+        // stripped `:PORT` from the Secrets endpoint — fine for prod (standard 443),
+        // but broke any local proxy deployment or non-default Vercel preview URL
+        // that pins a port. Including the port preserves the iOS → proxy intent.
+        let portSuffix = url.port.map { ":\($0)" } ?? ""
+        return EndpointGuard.validateOrCrash(urlString: "\(scheme)://\(host)\(portSuffix)", label: "Overnight agent endpoint")
     }
 
     private static var defaultSession: URLSession {

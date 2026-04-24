@@ -24,8 +24,12 @@
 // Anthropic API pricing for listing/deleting is cheap-to-free vs. the
 // session-hour billing this prevents.
 
+// P4 (Stage 6 Wave 1): single source of truth for the current Managed
+// Agents beta identifier. See ../../lib/beta-headers.js for the rationale
+// (cron + wildcard share the constant so a future beta bump is one edit).
+import { CURRENT_BETA } from '../../lib/beta-headers.js';
+
 const ANTHROPIC_BASE = 'https://api.anthropic.com';
-const ANTHROPIC_BETA = 'managed-agents-2026-04-01';
 const WAKEPROOF_AGENT_PREFIX = 'wakeproof-overnight';
 const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000; // 12 hours
 
@@ -56,7 +60,7 @@ export default async function handler(req, res) {
   const upstreamHeaders = {
     'x-api-key': anthropicKey,
     'anthropic-version': '2023-06-01',
-    'anthropic-beta': ANTHROPIC_BETA,
+    'anthropic-beta': CURRENT_BETA,
     'User-Agent': 'wakeproof-proxy-vercel/cron-cleanup',
   };
 
