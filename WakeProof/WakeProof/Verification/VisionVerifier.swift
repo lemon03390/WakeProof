@@ -233,7 +233,26 @@ final class VisionVerifier {
             return
         }
         guard scheduler.phase == .disableChallenge else {
-            logger.fault("verifyDisableChallenge called with scheduler.phase=\(String(describing: scheduler.phase), privacy: .public) (expected .disableChallenge) — aborting before Claude spend")
+            // Stage 8 MEDIUM 6 fix: previously a bare `return` left the
+            // WakeAttempt row at `.captured` forever — the audit trail
+            // never closed for this programmer-error path. Now we still
+            // abort before Claude spend, but we explicitly mark the
+            // attempt REJECTED so the audit row reaches a terminal state.
+            // The scheduler's `disableChallengeSucceeded/Failed` guards on
+            // `phase == .disableChallenge` so calling finishDisableChallenge
+            // here will (a) persist the REJECTED row via updatePersistedAttempt
+            // and (b) no-op the scheduler transition (we're already in a
+            // wrong phase, triggering a transition from that phase would be
+            // incorrect). If the persist itself throws, finishDisableChallenge's
+            // own catch logs `.fault` and attempts disableChallengeFailed
+            // (which will no-op at the guard — fail-closed is correct here).
+            logger.fault("verifyDisableChallenge called with scheduler.phase=\(String(describing: scheduler.phase), privacy: .public) (expected .disableChallenge) — persisting REJECTED and aborting before Claude spend")
+            await finishDisableChallenge(
+                attempt: attempt,
+                context: context,
+                verdict: .rejected,
+                reasoning: "Verification aborted — phase mismatch at entry"
+            )
             return
         }
         lastError = nil

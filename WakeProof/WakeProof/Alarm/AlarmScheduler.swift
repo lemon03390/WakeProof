@@ -330,6 +330,20 @@ final class AlarmScheduler {
         // unresolved-fire marker so the next launch doesn't log a phantom UNRESOLVED row.
         lastFireAt = nil
         logger.info("Ringing cleared (phase → idle)")
+        // Stage 8 CRITICAL 2 fix: today's +90s/+180s backup chain uses the same
+        // identifiers as tomorrow's would. Calling scheduleNextFireIfEnabled()
+        // inside fire() would cancel them mid-flight, defeating G3's force-quit
+        // durability (force-quit after the +0s banner → +90s/+180s never fire).
+        // Terminal resolution (stopRinging / handleRingCeiling — which already
+        // calls stopRinging) is the safe moment: today's fire is fully resolved
+        // and tomorrow's schedule can be written without identifier collision.
+        // Guarded so a disabled window (e.g. after disableChallengeSucceeded
+        // called stopRinging indirectly via a future refactor) doesn't churn
+        // the pipeline for nothing — scheduleNextFireIfEnabled itself no-ops
+        // on disabled windows anyway, but the guard makes the intent explicit.
+        if window.isEnabled {
+            scheduleNextFireIfEnabled()
+        }
     }
 
     /// Transition ringing → capturing when the user taps "Prove you're awake".
@@ -475,11 +489,20 @@ final class AlarmScheduler {
     /// `window.isEnabled = false`, persist, and re-schedule (which in turn
     /// cancels any pending fire because the window is now disabled). Mirrors
     /// `finishVerifyingVerified()`'s shape so the two success surfaces stay
-    /// symmetric. A persist failure inside `updateWindow` still transitions
-    /// to .idle — the in-memory window reflects the user's intent for this
-    /// session even if the UserDefaults write was rejected; the retry path
-    /// lives in AlarmSchedulerView's save-failure banner if/when the user
-    /// re-opens the form.
+    /// symmetric.
+    ///
+    /// Stage 8 CRITICAL 1 fix: a `WakeWindow.save()` failure is no longer
+    /// dropped silently. Previously `_ = updateWindow(updated)` discarded
+    /// the Bool return — on encode failure the in-memory flip to
+    /// `isEnabled = false` had already happened (so the Toggle UI animated
+    /// OFF), but UserDefaults still held `isEnabled = true`. The NEXT
+    /// relaunch would re-arm the alarm silently — the exact silent-failure
+    /// pattern CLAUDE.md forbids (8x repeat offense). The fix pre-saves
+    /// via `WakeWindow.save()` directly; only on success do we propagate
+    /// the flip to in-memory + re-schedule. Save failure routes through
+    /// `disableChallengeFailed(error:)` so state stays consistent with
+    /// "alarm stays enabled" (in-memory window keeps its previous
+    /// `isEnabled = true`, Toggle stays ON, user sees a banner).
     func disableChallengeSucceeded() {
         guard phase == .disableChallenge else {
             logger.warning("disableChallengeSucceeded ignored — phase=\(String(describing: self.phase), privacy: .public)")
@@ -487,14 +510,24 @@ final class AlarmScheduler {
         }
         var updated = window
         updated.isEnabled = false
-        // updateWindow saves + reschedules (which sees isEnabled=false → no
-        // next fire). Return value deliberately dropped here — the boolean
-        // drives the AlarmSchedulerView save banner, but there's no equivalent
-        // UI surface in the disable-challenge flow. A save failure is logged
-        // inside `WakeWindow.save()`.
-        _ = updateWindow(updated)
-        phase = .idle
-        logger.info("Disable challenge succeeded — window.isEnabled=false, phase=.idle")
+        // Persist FIRST so a write-rejection doesn't leave us with a
+        // flipped in-memory window but stale UserDefaults — the bug this
+        // fix addresses. Only on success do we publish the flip through
+        // in-memory state + the re-schedule pipeline.
+        if updated.save() {
+            window = updated
+            scheduleNextFireIfEnabled()
+            phase = .idle
+            logger.info("Disable challenge verified — window disabled and persisted")
+        } else {
+            // Persist failed. Keep in-memory `window.isEnabled = true` so
+            // the Toggle stays ON (the `.onChange(of: scheduler.window.isEnabled)`
+            // observer in AlarmSchedulerView won't fire because the value
+            // didn't change), and surface the error via the failed branch
+            // so the user knows to retry.
+            logger.error("Disable challenge verified but window.save() failed — alarm stays enabled")
+            disableChallengeFailed(error: "Couldn't save — alarm stayed enabled. Try again.")
+        }
     }
 
     /// Wave 5 G1: REJECTED / RETRY verdict on the disable challenge. Surface
@@ -590,9 +623,16 @@ final class AlarmScheduler {
             logger.fault("fire() invoked but onFire handler not wired — alarm will be silent")
         }
         onFire?(firedAt)
-        // Re-schedule the next day's fire. Cheap: this just sets up another Task.sleep
-        // plus a backup notification for tomorrow.
-        scheduleNextFireIfEnabled()
+        // Stage 8 CRITICAL 2 fix: DO NOT call scheduleNextFireIfEnabled() here.
+        // Today's +0s/+90s/+180s backup chain shares identifiers with tomorrow's,
+        // so rescheduling inside fire() cancels the still-pending tail (+90s,
+        // +180s) mid-flight. A force-quit after the +0s banner lands would then
+        // never see +90s/+180s — defeating G3's force-quit durability story.
+        // Scheduling is now deferred to terminal resolution (stopRinging() +
+        // handleRingCeiling() which already calls stopRinging). Launch-time
+        // wiring in WakeProofApp.bootstrapIfNeeded also calls
+        // scheduleNextFireIfEnabled, so a force-quit during ring still gets a
+        // tomorrow schedule when the user reopens the app.
     }
 
     private func scheduleBackupNotification(fireAt: Date, generation: UInt64) async {

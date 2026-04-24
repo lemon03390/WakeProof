@@ -91,7 +91,7 @@ struct AlarmSchedulerView: View {
     /// toggle in the Form's "Sharing" section below binds to this.
     /// @AppStorage key matches MorningBriefingView's matching @AppStorage so
     /// both surfaces read the same UserDefaults bool without any plumbing.
-    @AppStorage("com.wakeproof.shareCardEnabled") private var shareCardEnabled: Bool = false
+    @AppStorage(ShareCardModel.shareCardEnabledKey) private var shareCardEnabled: Bool = false
 
     /// Wave 5 G1 (§12.4-G1): DEBUG-only toggle that lets demo recordings flip
     /// the alarm off without the vision-verified challenge. The underlying

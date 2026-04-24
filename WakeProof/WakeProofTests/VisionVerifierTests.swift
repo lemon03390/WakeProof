@@ -855,6 +855,13 @@ final class VisionVerifierTests: XCTestCase {
     /// isn't in `.disableChallenge`. Prevents burned credits on a
     /// misrouted caller (e.g. a refactor that accidentally invokes the
     /// disable verify from the ring path).
+    ///
+    /// Stage 8 MEDIUM 6 fix: previously the wrong-phase guard `return`ed
+    /// without persisting — the attempt row stayed at `.captured` forever,
+    /// never reaching a terminal state. The audit trail thus had an
+    /// orphan row for this programmer-error path. Post-fix, the function
+    /// explicitly persists a REJECTED row before aborting, so the audit
+    /// trail closes cleanly while still preventing Claude spend.
     func testVerifyDisableChallengeBailsWhenSchedulerNotInDisableChallenge() async {
         let recorder = RecordingClient(verdict: .verified)
         let verifier = VisionVerifier(client: recorder)
@@ -867,8 +874,10 @@ final class VisionVerifierTests: XCTestCase {
 
         XCTAssertEqual(recorder.callCount, 0,
                        "verifyDisableChallenge must not reach Claude when scheduler.phase != .disableChallenge")
-        XCTAssertEqual(attempt.verdictEnum, .captured,
-                       "attempt verdict must be unchanged when verify bails early")
+        XCTAssertEqual(attempt.verdictEnum, .rejected,
+                       "Stage 8 MEDIUM 6 fix: wrong-phase guard now persists a REJECTED row so the audit trail reaches a terminal state (previously stayed at .captured forever)")
+        XCTAssertEqual(attempt.verdictReasoning, "Verification aborted — phase mismatch at entry",
+                       "reasoning must cite the phase-mismatch cause so the audit row explains itself")
     }
 
     /// G1: network-error paths must not flip the window. Treat as REJECTED

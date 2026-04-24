@@ -184,20 +184,24 @@ struct InvestmentDashboardView: View {
     /// still observable via Console.app without polluting the UI.
     private func loadInsightsCount() async {
         guard let store = visionVerifier.memoryStore else {
-            // Bootstrap hasn't wired the store yet (unusual — normally happens
-            // before any view mount). Leave at `nil` so render stays on the
-            // "-" placeholder; the user can navigate away and back to retry.
-            logger.info("MemoryStore not yet wired; insights count stays at nil")
+            // Stage 8 IMPORTANT 4 fix: escalated from `.info` to `.error`. An
+            // unwired MemoryStore at view-appear time is an observability
+            // issue — bootstrap (WakeProofApp.bootstrapMemoryStore) should
+            // have assigned it before any view mounts. `.info` is routine
+            // lifecycle; this is "something didn't happen that should have".
+            // Banner stays absent per spec (soft metric), but Console.app
+            // now surfaces the signal prominently.
+            logger.error("MemoryStore not wired — insights count unresolvable; check bootstrap wiring")
             return
         }
         do {
             let snapshot = try await store.read()
-            // Hop back to the main actor to publish into the @State.
-            // MemoryStore is an actor so read() completes on its executor;
-            // @State writes must happen on the main actor.
-            await MainActor.run {
-                self.insightsCount = snapshot.totalHistoryCount
-            }
+            // Stage 8 MEDIUM 7 fix: dropped the redundant `await MainActor.run`
+            // hop. `.task` on a SwiftUI view body runs on MainActor by
+            // SwiftUI contract, and after `await memoryStore.read()` resumes,
+            // the continuation is already back on MainActor. The explicit
+            // MainActor.run wrapper was dead ceremony.
+            self.insightsCount = snapshot.totalHistoryCount
         } catch {
             logger.error("MemoryStore read failed for dashboard: \(error.localizedDescription, privacy: .public)")
             // Intentionally leave insightsCount at nil — the dashboard is a

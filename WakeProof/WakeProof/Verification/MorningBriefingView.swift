@@ -59,7 +59,15 @@ struct MorningBriefingView: View {
     /// is a transient surface; settings belong in the long-lived scheduler
     /// form. Key uses the reverse-DNS style matching the bundle identifier
     /// so any future export/reset tooling can grep WakeProof keys cleanly.
-    @AppStorage("com.wakeproof.shareCardEnabled") private var shareCardEnabled: Bool = false
+    @AppStorage(ShareCardModel.shareCardEnabledKey) private var shareCardEnabled: Bool = false
+
+    /// Stage 8 IMPORTANT 3 fix: surface ShareLink render failure in the DEBUG
+    /// diagnostic reason-tag so demo-prep logs aren't ambiguous between "user
+    /// opted out / streak < 1 / non-success morning" and "ImageRenderer returned
+    /// nil". Set inside `makeShareImage()` when it returns nil; read by
+    /// `reasonTag`. Single-shot latch — once failed this morning, we want the
+    /// reason to stay visible until the briefing cover dismisses.
+    @State private var shareCardFailed: Bool = false
 
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
@@ -193,6 +201,14 @@ struct MorningBriefingView: View {
     ///    `guard let` hides the ShareLink rather than presenting a broken
     ///    button — consistent with the "no placeholder, just hide" rule in
     ///    the scope doc.
+    ///
+    /// Stage 8 IMPORTANT 3 fix: render failure is now an observability
+    /// signal that warrants attention. Logged at `.fault` (previously
+    /// `.error`) so demo-prep logs surface it prominently, and the
+    /// `shareCardFailed` flag is flipped (via a deferred Task to avoid
+    /// mutating `@State` mid-body-evaluation) so the DEBUG reason-tag can
+    /// disambiguate this from "user opted out" / "streak < 1" / "non-success
+    /// morning" branches.
     @MainActor
     private func makeShareImage() -> Image? {
         let card = ShareCardView(streak: currentStreak, observation: observation)
@@ -202,7 +218,14 @@ struct MorningBriefingView: View {
         // IG Story would downscale anyway — wasted bytes on the share hop.
         renderer.scale = 1
         guard let uiImage = renderer.uiImage else {
-            Self.logger.error("ShareCard render: ImageRenderer.uiImage returned nil")
+            Self.logger.fault("ShareCard render: ImageRenderer.uiImage returned nil — Share button hidden")
+            // Defer the @State write to after body evaluation so SwiftUI
+            // doesn't issue a "modifying state during view update" warning.
+            // MainActor hop is already on the main actor, so the Task
+            // resolves on the next runloop turn.
+            Task { @MainActor in
+                shareCardFailed = true
+            }
             return nil
         }
         return Image(uiImage: uiImage)
@@ -250,12 +273,19 @@ struct MorningBriefingView: View {
 
     #if DEBUG
     private var reasonTag: String? {
+        // Stage 8 IMPORTANT 3 fix: append the share-card render failure suffix
+        // when ImageRenderer came back nil this morning. Demo-prep logs can now
+        // tell at a glance whether the Share button's absence is "user opted
+        // out / streak < 1 / non-success" vs "render broke" — previously the
+        // two cases collapsed into the same silent hide.
+        let base: String
         switch result {
-        case .success: return "reason: success"
-        case .noSession: return "reason: noSession"
-        case .failure(let reason, _): return "reason: failure.\(reason.rawValue)"
-        case .none: return "reason: nil"
+        case .success: base = "reason: success"
+        case .noSession: base = "reason: noSession"
+        case .failure(let reason, _): base = "reason: failure.\(reason.rawValue)"
+        case .none: base = "reason: nil"
         }
+        return shareCardFailed ? "\(base) | shareCardRenderFailed" : base
     }
     #endif
 

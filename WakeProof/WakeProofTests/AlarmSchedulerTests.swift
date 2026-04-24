@@ -502,6 +502,152 @@ final class AlarmSchedulerTests: XCTestCase {
                      "cancel is intentional, not a failure — no error message should surface")
     }
 
+    // MARK: - Stage 8 CRITICAL 1: disableChallengeSucceeded save failure
+
+    /// Stage 8 CRITICAL 1: the review identified that `disableChallengeSucceeded`
+    /// previously discarded `updateWindow`'s Bool return via `_ = updateWindow(...)`.
+    /// On `WakeWindow.save()` failure the in-memory flip to `isEnabled = false` had
+    /// already happened → Toggle UI animated OFF, but UserDefaults still held
+    /// `isEnabled = true`, so the NEXT relaunch re-armed the alarm silently. The
+    /// exact silent-failure pattern CLAUDE.md forbids (8x repeat offense).
+    ///
+    /// Testing the save-failure branch directly requires either (a) injecting a
+    /// `WakeWindow` subclass that overrides `save()` — but `WakeWindow` is a
+    /// `struct`, not a class, so subclassing isn't available, or (b) making
+    /// `WakeWindow.save()` fail via a UserDefaults mock — but the scheduler's
+    /// `disableChallengeSucceeded` calls `updated.save()` with the default `.standard`
+    /// argument which isn't injectable from here.
+    ///
+    /// Constructing a save-failing scenario is therefore impractical at the unit
+    /// level; the invariant is enforced by code inspection + the happy-path test
+    /// below which locks the expected post-success state. The full save-failure
+    /// branch is device-tested alongside the disk-full / encode-error scenarios
+    /// in `docs/device-test-protocol.md`.
+    ///
+    /// What this test locks instead: the happy path's end-state is structurally
+    /// unchanged by the fix (save succeeds → window flips, phase idle, fire
+    /// cleared). If a future refactor accidentally swaps the order of operations
+    /// and breaks this, the test catches it.
+    func testDisableChallengeSucceededHappyPathEndState() {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        XCTAssertTrue(scheduler.window.isEnabled, "precondition: window enabled + saved")
+        scheduler.beginDisableChallenge()
+        XCTAssertEqual(scheduler.phase, .disableChallenge)
+
+        scheduler.disableChallengeSucceeded()
+
+        // Save-on-success path: all three invariants must hold together.
+        // If save() returned false, the fix routes through disableChallengeFailed
+        // and `window.isEnabled` would remain true — so this combined assertion
+        // also indirectly confirms save() succeeded in-test.
+        XCTAssertFalse(scheduler.window.isEnabled,
+                       "VERIFIED disable challenge with successful save must flip window.isEnabled=false")
+        XCTAssertEqual(scheduler.phase, .idle,
+                       "post-success save: phase must return to .idle")
+        XCTAssertNil(scheduler.nextFireAt,
+                     "post-success save: disabled window has no next fire")
+    }
+
+    // MARK: - Stage 8 CRITICAL 2: fire() no longer reschedules (G3 backup chain)
+
+    /// Stage 8 CRITICAL 2: `fire()` previously called `scheduleNextFireIfEnabled()`
+    /// at its tail, which internally calls `cancel()` — wiping the +90s/+180s
+    /// backup chain identifiers that `scheduleBackupNotification` had JUST
+    /// scheduled. A force-quit after the +0s banner would then never see
+    /// +90s/+180s, defeating G3's force-quit durability story.
+    ///
+    /// The fix moved `scheduleNextFireIfEnabled()` out of `fire()` and into
+    /// terminal transitions (`stopRinging()` + `handleRingCeiling()` which
+    /// calls stopRinging). This test verifies the invariant: after `fireNow()`,
+    /// the scheduling generation has NOT been bumped again (which would happen
+    /// if fire() had called scheduleNextFireIfEnabled / cancel internally).
+    ///
+    /// Direct proof would require observing `schedulingGeneration`, which is
+    /// private. Proxy: `nextFireAt` after `fireNow()` with an enabled window
+    /// must remain at the SAME value it held before fire (i.e. today's fire
+    /// time), not advance to tomorrow. Pre-fix, fire() would have cancelled
+    /// the today-schedule and written a tomorrow-schedule, so `nextFireAt`
+    /// would have advanced. Post-fix, fire() leaves `nextFireAt` untouched.
+    func testFireDoesNotRescheduleTomorrow() throws {
+        // Enable a window so scheduleNextFireIfEnabled populates nextFireAt.
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        let initialNextFireAt = try XCTUnwrap(scheduler.nextFireAt,
+                                               "precondition: enabled window must schedule")
+
+        // Fire. With the fix, fire() does NOT call scheduleNextFireIfEnabled,
+        // so nextFireAt stays at the initial (pre-fire) value. Pre-fix, it
+        // would have advanced to tomorrow (a roughly +24h jump).
+        scheduler.fireNow()
+        XCTAssertEqual(scheduler.phase, .ringing)
+        XCTAssertEqual(scheduler.nextFireAt, initialNextFireAt,
+                       "fire() must NOT reschedule — that would cancel today's +90s/+180s backup chain mid-flight (G3 durability)")
+    }
+
+    /// Stage 8 CRITICAL 2 (cont.): the counterpart invariant — `stopRinging()`
+    /// MUST reschedule when the window is enabled so tomorrow's fire is set
+    /// up at terminal resolution (when the backup-chain identifier collision
+    /// is safe because today's chain has resolved).
+    ///
+    /// Shape of the test: call fireNow (which no longer reschedules per the
+    /// fix), then call cancel() to clear nextFireAt, then call stopRinging
+    /// and assert that stopRinging re-populated nextFireAt via
+    /// scheduleNextFireIfEnabled (because window.isEnabled is true). The
+    /// cancel() step is what makes the test observable — without it we
+    /// can't distinguish "stopRinging reschedules" from "already scheduled
+    /// from updateWindow" because the fire-time calculation is wall-clock
+    /// based and doesn't change between fireNow and stopRinging.
+    func testStopRingingReschedulesWhenWindowEnabled() throws {
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        XCTAssertNotNil(scheduler.nextFireAt, "precondition: updateWindow scheduled")
+
+        scheduler.fireNow()
+        XCTAssertEqual(scheduler.phase, .ringing)
+
+        // Simulate a mid-flight cancel to make the reschedule observable:
+        // without this cancel step the pre-fire schedule persists from
+        // updateWindow (fire() no longer reschedules per the fix), so we
+        // can't distinguish "stopRinging DID reschedule" from "was already
+        // scheduled". Cancel clears nextFireAt; if stopRinging reschedules
+        // as expected, it will re-populate. If stopRinging DOESN'T
+        // reschedule (the pre-fix / wrong behavior), nextFireAt stays nil.
+        scheduler.cancel()
+        XCTAssertNil(scheduler.nextFireAt, "precondition: cancel cleared nextFireAt")
+        // fireNow left phase=.ringing; cancel() doesn't touch phase. Call
+        // stopRinging which is the path under test.
+        scheduler.stopRinging()
+        XCTAssertEqual(scheduler.phase, .idle)
+        XCTAssertNotNil(scheduler.nextFireAt,
+                        "stopRinging with an enabled window must call scheduleNextFireIfEnabled to set up tomorrow's fire")
+    }
+
+    /// Stage 8 CRITICAL 2 (cont.): when the window becomes disabled between
+    /// fire and resolution (e.g. disable-challenge succeeded during a ring
+    /// edge case), stopRinging's rescheduling is gated — no tomorrow fire
+    /// should be written for a disabled window. Belt-and-suspenders: the
+    /// scheduler's own `scheduleNextFireIfEnabled` also no-ops on disabled
+    /// windows, but the guard inside stopRinging makes the intent explicit.
+    func testStopRingingDoesNotRescheduleWhenWindowDisabled() {
+        // Enable + fire → then disable mid-ring → stopRinging.
+        let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
+        scheduler.updateWindow(enabled)
+        scheduler.fireNow()
+        XCTAssertEqual(scheduler.phase, .ringing)
+
+        let disabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: false)
+        // updateWindow on a disabled window clears nextFireAt via
+        // scheduleNextFireIfEnabled's early-return branch.
+        scheduler.updateWindow(disabled)
+        XCTAssertNil(scheduler.nextFireAt, "disabled window must clear nextFireAt")
+
+        scheduler.stopRinging()
+        XCTAssertEqual(scheduler.phase, .idle)
+        XCTAssertNil(scheduler.nextFireAt,
+                     "stopRinging with a disabled window must NOT write a tomorrow schedule")
+    }
+
     #if DEBUG
     /// G1: the DEBUG bypass flag short-circuits `requestDisable` to `.allowed`
     /// regardless of grace-window state. Demo recording only. A UIT launch

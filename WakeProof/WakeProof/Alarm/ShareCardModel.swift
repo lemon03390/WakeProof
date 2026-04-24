@@ -42,6 +42,17 @@ enum ShareCardModel {
     /// into `ImageRenderer` or frame modifiers.
     static let canvasSize: CGSize = CGSize(width: canvasWidth, height: canvasHeight)
 
+    // MARK: - UserDefaults keys
+
+    /// Stage 8 IMPORTANT 5 fix: single source of truth for the "user opted
+    /// in to sharing" UserDefaults key. Previously duplicated as a string
+    /// literal across `AlarmSchedulerView` (the toggle) and
+    /// `MorningBriefingView` (the consumer gate) — a typo in either site
+    /// would silently desync the two surfaces. Consolidating here means the
+    /// compiler catches any future drift and any @AppStorage wrapper
+    /// referencing the key reads from one place.
+    static let shareCardEnabledKey = "com.wakeproof.shareCardEnabled"
+
     // MARK: - Copy constants
 
     /// The caption under the large streak number. Pinned as a constant (not
