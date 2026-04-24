@@ -48,6 +48,17 @@ final class VisionVerifier {
     /// unless explicitly set; nil-safe: a nil store means memory is never read or written.
     var memoryStore: MemoryStore?
 
+    /// Wave 2.4 R14 fix: retry queue for failed memory writes. Default uses the shared
+    /// UserDefaults store; tests inject a mock. Not `Optional` — the queue itself is
+    /// always available; a nil memoryStore simply means no writes ever get enqueued.
+    var memoryWriteQueue: PendingMemoryWriteQueue = PendingMemoryWriteQueue()
+
+    /// @Observable sidecar for the AlarmSchedulerView system-banner. Updated via
+    /// `refreshMemoryWriteBacklog()` after each enqueue and after flush. Backlog of
+    /// >5 entries surfaces a "Memory writes are backlogged (N pending) — calibration
+    /// may be stale" banner (threshold defined in AlarmSchedulerView).
+    let memoryWriteBacklog = MemoryWriteBacklog()
+
     private let logger = Logger(subsystem: "com.wakeproof.verification", category: "verifier")
 
     private static let antiSpoofBank = [
@@ -67,6 +78,25 @@ final class VisionVerifier {
         lastError = nil
         currentAttemptIndex = 0
         currentAntiSpoofInstruction = nil
+    }
+
+    /// Wave 2.4 R14 fix: drain any queued memory writes that failed on a prior launch.
+    /// Called from WakeProofApp.bootstrapMemoryStore AFTER memoryStore bootstrap succeeds
+    /// so the writer closure can actually land a row. Failures during flush re-enqueue
+    /// the row with a bumped retryCount; rows exceeding `maxRetryAttempts` get dropped
+    /// with a logger.error (see PendingMemoryWriteQueue.flush).
+    func flushMemoryWriteQueue() async {
+        guard let memoryStore else {
+            logger.info("flushMemoryWriteQueue: no memoryStore wired — leaving queue intact")
+            return
+        }
+        let backlog = memoryWriteBacklog
+        let queue = memoryWriteQueue
+        let remaining = await queue.flush { entry, profileDelta in
+            try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
+        }
+        await MainActor.run { backlog.update(remaining) }
+        logger.info("flushMemoryWriteQueue: flushed backlog; remaining=\(remaining, privacy: .public)")
     }
 
     /// Entry point. The caller has already persisted `attempt` with `verdict = .captured`;
@@ -197,11 +227,24 @@ final class VisionVerifier {
             // must NOT override the profile — otherwise failed spoof attempts
             // pollute durable state.
             let profileDelta: String? = (finalVerdict == .verified) ? memoryUpdate.profileDelta : nil
+            // Wave 2.4 R14 fix: on memory write failure, enqueue into the retry queue
+            // instead of silently logging. The enclosing fire-and-forget Task preserved
+            // the "non-fatal" invariant (memory is ancillary; a write hiccup must never
+            // rewind the alarm verdict UX), but the catch branch silently dropped the
+            // calibration data — degrading Layer 2 fidelity over time with no signal.
+            // The retry queue (PendingMemoryWriteQueue, UserDefaults-backed) gives a
+            // next-launch flush a chance to land the write.
+            let queue = memoryWriteQueue
+            let backlog = memoryWriteBacklog
             Task { [logger] in
                 do {
                     try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
                 } catch {
-                    logger.error("MemoryStore write failed (non-fatal): \(error.localizedDescription, privacy: .public)")
+                    logger.error("MemoryStore write failed — enqueueing for retry: \(error.localizedDescription, privacy: .public)")
+                    let pending = PendingMemoryWrite(entry: entry, profileDelta: profileDelta)
+                    await queue.enqueue(pending)
+                    let newCount = await queue.count()
+                    await MainActor.run { backlog.update(newCount) }
                 }
             }
         }

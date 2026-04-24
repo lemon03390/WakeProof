@@ -128,6 +128,15 @@ struct WakeProofApp: App {
         scheduler.recoverUnresolvedFireIfNeeded()
         scheduler.scheduleNextFireIfEnabled()
 
+        // Wave 2.4 B4 fix: flush any pending WakeAttempt rows queued from previous
+        // launches whose SwiftData save failed. Must run AFTER persistAttempt is wired
+        // (done by wireSchedulerCallbacks above) so the flush's retry attempts can
+        // reach ModelContext. Runs in a MainActor Task because AlarmScheduler is
+        // @MainActor-isolated and persistAttempt reads the captured mainContext.
+        Task { @MainActor [scheduler] in
+            await scheduler.flushPendingAttempts()
+        }
+
         // Single serialized Task for the three steps that must run in order
         // (M1 + R7 fix): (1) MemoryStore bootstrap → expose store to verifier,
         // (2) stale-handle cleanup → *awaited* so the auto-trigger below sees
@@ -151,6 +160,11 @@ struct WakeProofApp: App {
     /// VisionVerifier. Run inside the bootstrap serial Task so the subsequent
     /// steps observe the store as either wired (bootstrap succeeded) or nil
     /// (bootstrap failed — verify() handles nil-store as memory-less mode).
+    ///
+    /// Wave 2.4 R14: after the store is wired, flush any pending memory writes
+    /// queued from previous launches. Must be after assignment so VisionVerifier's
+    /// `memoryStore` reference is non-nil; otherwise flushMemoryWriteQueue early-
+    /// returns with "no memoryStore wired" and the backlog grows indefinitely.
     private func bootstrapMemoryStore() async {
         do {
             try await memoryStore.bootstrapIfNeeded()
@@ -160,6 +174,7 @@ struct WakeProofApp: App {
             // moving the assignment here makes the invariant visible in the code
             // shape — S6 in memory-tool-findings.md.)
             visionVerifier.memoryStore = memoryStore
+            await visionVerifier.flushMemoryWriteQueue()
         } catch {
             Self.logger.error("MemoryStore bootstrap failed: \(error.localizedDescription, privacy: .public)")
             // Bootstrap failed — do NOT expose the store. read() would still work
@@ -273,6 +288,13 @@ struct WakeProofApp: App {
     /// Wire the WakeAttempt persistence closure that the scheduler invokes on TIMEOUT and
     /// UNRESOLVED paths. The model context is captured here so AlarmScheduler stays free of
     /// SwiftData coupling.
+    ///
+    /// Wave 2.4 B4 fix: the closure now THROWS on save failure. Previously the catch
+    /// branch did `context.rollback()` + `logger.error` and swallowed the outcome —
+    /// AlarmScheduler's call-site couldn't tell success from failure, so the audit-trail
+    /// row vanished while `lastFireAt` had already been cleared in handleRingCeiling().
+    /// Propagating the throw lets `AlarmScheduler.recordAttempt` enqueue the failed row
+    /// into `PendingWakeAttemptQueue` for a next-launch retry.
     private func wireSchedulerPersistenceIfNeeded() {
         guard scheduler.persistAttempt == nil else { return }
         let context = modelContainer.mainContext
@@ -285,8 +307,12 @@ struct WakeProofApp: App {
                 try context.save()
                 Self.logger.info("Persisted WakeAttempt verdict=\(verdict.rawValue, privacy: .public) scheduledFor=\(scheduledFor.ISO8601Format(), privacy: .public)")
             } catch {
+                // Rollback before re-throw so the in-memory context doesn't carry the
+                // uncommitted insert into the next save cycle. The re-throw hands the
+                // error to AlarmScheduler.recordAttempt which enqueues to the retry queue.
                 Self.logger.error("Failed to persist WakeAttempt verdict=\(verdict.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 context.rollback()
+                throw error
             }
         }
     }

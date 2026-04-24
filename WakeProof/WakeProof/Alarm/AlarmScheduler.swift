@@ -57,7 +57,18 @@ final class AlarmScheduler {
 
     /// Invoked when the scheduler decides a WakeAttempt row should be persisted. The closure
     /// is owned by WakeProofApp so AlarmScheduler stays free of ModelContext coupling.
-    var persistAttempt: ((WakeAttempt.Verdict, Date) -> Void)?
+    ///
+    /// Wave 2.4 B4 fix: the closure now `throws`. Callers (WakeProofApp) propagate any
+    /// `ModelContext.save()` failure up so `recordAttempt` can enqueue a retry into
+    /// `PendingWakeAttemptQueue`. Previously the closure was `@MainActor (Verdict, Date) -> Void`
+    /// with an internal `try?` + `context.rollback()` + log, which swallowed save failures —
+    /// the audit-trail row vanished and the scheduler's lastFireAt had already been cleared
+    /// in `handleRingCeiling()`, leaving next-launch recovery unable to detect the loss.
+    var persistAttempt: ((WakeAttempt.Verdict, Date) throws -> Void)?
+
+    /// Wave 2.4 B4 fix: queue that survives audit-row persist failures across launches.
+    /// Default resolves to the shared UserDefaults queue; tests inject a mock.
+    var pendingAttemptQueue: PendingWakeAttemptQueue = PendingWakeAttemptQueue()
 
     // MARK: - Private
 
@@ -383,10 +394,76 @@ final class AlarmScheduler {
 
     /// Single sink for all WakeAttempt persistence calls. Centralises the unwired-closure
     /// fault-log so a future third caller can't forget it.
+    ///
+    /// Wave 2.4 B4 fix: save failures now enqueue into PendingWakeAttemptQueue so the row
+    /// survives across launches instead of being silently swallowed by rollback+log. The
+    /// enqueue happens inside a detached Task because the queue is an `actor` and we must
+    /// not block the MainActor call-site; this is safe because the closure's throwing
+    /// contract gives us the failure signal synchronously — only the recovery hop goes async.
     private func recordAttempt(_ verdict: WakeAttempt.Verdict, at firedAt: Date, source: String = #function) {
-        if persistAttempt == nil {
+        guard let persistAttempt else {
             logger.fault("\(source, privacy: .public): persistAttempt closure not wired — \(verdict.rawValue, privacy: .public) row dropped")
+            // Even with no closure wired, enqueue the row so a later hot-patch that wires
+            // the closure + triggers flushPendingAttempts can still land it. This is the
+            // most conservative choice: audit rows are the product's self-commitment
+            // contract; losing one because of a test-time mis-wiring would undermine the
+            // whole value prop.
+            enqueuePendingAttempt(verdict: verdict, scheduledFor: firedAt)
+            return
         }
-        persistAttempt?(verdict, firedAt)
+        do {
+            try persistAttempt(verdict, firedAt)
+        } catch {
+            logger.error("\(source, privacy: .public): persistAttempt threw for verdict=\(verdict.rawValue, privacy: .public) — enqueuing for retry: \(error.localizedDescription, privacy: .public)")
+            enqueuePendingAttempt(verdict: verdict, scheduledFor: firedAt)
+        }
+    }
+
+    /// External entry point used by WakeProofApp.persistAttempt closure when the save
+    /// itself failed but the scheduler can't learn of it through the closure-throw path
+    /// (e.g. future code paths that fire-and-forget). Also used by recordAttempt's own
+    /// catch block.
+    func markAttemptPersistFailed(verdict: WakeAttempt.Verdict, scheduledFor: Date) {
+        enqueuePendingAttempt(verdict: verdict, scheduledFor: scheduledFor)
+    }
+
+    /// Flush any queued pending WakeAttempt rows. Called from WakeProofApp.bootstrapIfNeeded
+    /// BEFORE new attempts are expected so tonight's row doesn't jostle with a pre-existing
+    /// backlog. Flushes serially via the persistAttempt closure — whichever entries succeed
+    /// drop out of the queue; the rest stay for the next launch with retryCount bumped.
+    func flushPendingAttempts() async {
+        guard let persistAttempt else {
+            logger.warning("flushPendingAttempts: persistAttempt closure not wired — leaving queue intact until next launch")
+            return
+        }
+        let pending = await pendingAttemptQueue.snapshot()
+        guard !pending.isEmpty else { return }
+        logger.info("flushPendingAttempts: attempting to flush \(pending.count, privacy: .public) queued rows")
+
+        var survivors: [PendingWakeAttempt] = []
+        for row in pending {
+            let verdict = WakeAttempt.Verdict(legacyRawValue: row.verdictRawValue)
+            do {
+                try persistAttempt(verdict, row.scheduledFor)
+                logger.info("flushPendingAttempts: flushed verdict=\(row.verdictRawValue, privacy: .public) retryCount=\(row.retryCount, privacy: .public)")
+            } catch {
+                var bumped = row
+                bumped.retryCount += 1
+                logger.warning("flushPendingAttempts: retry \(bumped.retryCount, privacy: .public) for verdict=\(row.verdictRawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                survivors.append(bumped)
+            }
+        }
+        await pendingAttemptQueue.replace(with: survivors)
+    }
+
+    private func enqueuePendingAttempt(verdict: WakeAttempt.Verdict, scheduledFor: Date) {
+        let pending = PendingWakeAttempt(
+            verdictRawValue: verdict.rawValue,
+            scheduledFor: scheduledFor
+        )
+        let queue = pendingAttemptQueue
+        Task.detached {
+            await queue.enqueue(pending)
+        }
     }
 }
