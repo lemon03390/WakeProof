@@ -120,9 +120,18 @@ struct AlarmSchedulerView: View {
                 // installs with no attempts) so the user discovers the
                 // calendar before their first fire; an empty grid with all
                 // gray days is still an accurate reflection of state.
+                //
+                // Wave 5 H4: "Your commitment" row — entry to the investment
+                // dashboard. Sibling to the calendar link because both are
+                // secondary surfaces that read (not write) state; grouping
+                // them under "Streak" keeps the scheduler list scannable
+                // and avoids a stray single-row Section per screen.
                 Section("Streak") {
                     NavigationLink("View streak calendar") {
                         StreakCalendarView(attempts: wakeAttempts)
+                    }
+                    NavigationLink("Your commitment") {
+                        InvestmentDashboardView()
                     }
                 }
 
