@@ -16,11 +16,14 @@
 //    UserDefaults blob bounded).
 //  - Per-row retry cap of 5. A row that can't flush after 5 attempts gets
 //    dropped with an .error log — memory is ancillary, unlike audit rows.
-//  - `@Observable` sidecar (MemoryWriteBacklog) exposes `count` for UI banners.
+//  - SQ1 (Stage 4): the `MemoryWriteBacklog` @Observable sidecar was removed
+//    as dead code. It existed to drive an AlarmSchedulerView banner that was
+//    never actually wired — updates happened but no view ever read `.count`.
+//    Backlog visibility is still available via `queue.count()` on the actor
+//    if a UI consumer ever needs it.
 //
 
 import Foundation
-import Observation
 import os
 
 /// One failed memory write pending re-flush. Codable so it survives across
@@ -40,21 +43,6 @@ struct PendingMemoryWrite: Codable, Equatable, Sendable {
     }
 }
 
-/// @Observable sidecar. VisionVerifier owns an instance; AlarmSchedulerView
-/// reads `.count` via a @MainActor-isolated hop off the queue actor and
-/// publishes a banner when the backlog exceeds 5. Kept separate from the
-/// queue actor itself because SwiftUI's observation machinery requires
-/// MainActor-isolated @Observable classes; actors cannot conform.
-@Observable
-@MainActor
-final class MemoryWriteBacklog {
-    private(set) var count: Int = 0
-
-    func update(_ newCount: Int) {
-        count = newCount
-    }
-}
-
 /// Actor owning the pending-memory-write queue. Same isolation rationale as
 /// `PendingWakeAttemptQueue`: called from VisionVerifier (@MainActor) on
 /// persist-failure and from the app bootstrap on launch-flush.
@@ -65,7 +53,7 @@ actor PendingMemoryWriteQueue {
     static let maxRetryAttempts = 5
 
     private let defaults: UserDefaults
-    private let logger = Logger(subsystem: "com.wakeproof.memory", category: "pending-write-queue")
+    private let logger = Logger(subsystem: LogSubsystem.memory, category: "pending-write-queue")
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -134,10 +122,8 @@ actor PendingMemoryWriteQueue {
 
     private func loadQueue() -> [PendingMemoryWrite] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
         do {
-            return try decoder.decode([PendingMemoryWrite].self, from: data)
+            return try SharedJSON.iso8601Decoder.decode([PendingMemoryWrite].self, from: data)
         } catch {
             logger.error("Pending-memory queue decode failed, wiping: \(error.localizedDescription, privacy: .public)")
             defaults.removeObject(forKey: Self.defaultsKey)
@@ -150,10 +136,8 @@ actor PendingMemoryWriteQueue {
             defaults.removeObject(forKey: Self.defaultsKey)
             return
         }
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
         do {
-            let data = try encoder.encode(queue)
+            let data = try SharedJSON.iso8601Encoder.encode(queue)
             defaults.set(data, forKey: Self.defaultsKey)
         } catch {
             logger.error("Pending-memory queue encode failed: \(error.localizedDescription, privacy: .public)")

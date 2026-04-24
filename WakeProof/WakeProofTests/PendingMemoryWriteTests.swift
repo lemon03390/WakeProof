@@ -176,16 +176,12 @@ final class PendingMemoryWriteTests: XCTestCase {
     }
 
     // MARK: - MemoryWriteBacklog sidecar
-
-    @MainActor
-    func testBacklogUpdateReflectsNewCount() {
-        let backlog = MemoryWriteBacklog()
-        XCTAssertEqual(backlog.count, 0)
-        backlog.update(7)
-        XCTAssertEqual(backlog.count, 7)
-        backlog.update(0)
-        XCTAssertEqual(backlog.count, 0)
-    }
+    //
+    // SQ1 (Stage 4): the `MemoryWriteBacklog` @Observable sidecar was deleted as
+    // dead code — no view ever read it. Its only test (`testBacklogUpdateReflectsNewCount`)
+    // was removed with it. Queue-size verification now lives in the
+    // `testFlushSuccessDrainsQueue` / `testFlushFailureRetainsEntriesAndBumpsRetryCount`
+    // tests above, which read `queue.count()` directly on the underlying actor.
 }
 
 // MARK: - VisionVerifier integration
@@ -238,7 +234,10 @@ final class VisionVerifierPendingMemoryQueueTests: XCTestCase {
 
         let postCount = await queue.count()
         XCTAssertEqual(postCount, 0, "successful flush must drain the queue")
-        XCTAssertEqual(verifier.memoryWriteBacklog.count, 0, "backlog count must update to 0")
+        // SQ1 (Stage 4): dropped the `memoryWriteBacklog.count == 0` assertion.
+        // The @Observable sidecar was deleted; the underlying `queue.count()`
+        // assertion immediately above covers the same invariant (and more
+        // directly, since the sidecar's only job was to mirror that value).
 
         // Sanity: the entry actually landed in MemoryStore.
         let snapshot = try await store.read()

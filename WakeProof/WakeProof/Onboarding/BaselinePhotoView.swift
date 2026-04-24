@@ -20,7 +20,7 @@ struct BaselinePhotoView: View {
     @State private var showCamera: Bool = false
     @State private var errorMessage: String?
 
-    private let logger = Logger(subsystem: "com.wakeproof.onboarding", category: "baseline")
+    private let logger = Logger(subsystem: LogSubsystem.onboarding, category: "baseline")
 
     var body: some View {
         VStack(spacing: 20) {

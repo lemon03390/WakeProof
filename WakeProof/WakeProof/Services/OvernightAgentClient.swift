@@ -92,7 +92,7 @@ actor OvernightAgentClient {
     private let proxyToken: String
     private let beta: String
     private let defaults: UserDefaults
-    private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "agent-client")
+    private let logger = Logger(subsystem: LogSubsystem.overnight, category: "agent-client")
 
     init(
         session: URLSession = OvernightAgentClient.defaultSession,
@@ -128,16 +128,13 @@ actor OvernightAgentClient {
         // loudly on the same allowlist; overnight agent did not).
         guard let url = URL(string: Secrets.claudeEndpoint),
               let host = url.host,
-              let scheme = url.scheme,
-              let derived = URL(string: "\(scheme)://\(host)") else {
+              let scheme = url.scheme else {
             preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
         }
-        do {
-            _ = try EndpointGuard.validate(derived)
-        } catch {
-            preconditionFailure("OvernightAgentClient endpoint rejected by EndpointGuard: \(error.localizedDescription)")
-        }
-        return derived
+        // SR7 (Stage 4): validateOrCrash replaces the inline catch → preconditionFailure
+        // block. The derived URL string is `scheme://host` (no path); validateOrCrash
+        // parses + allowlist-checks it and returns the URL.
+        return EndpointGuard.validateOrCrash(urlString: "\(scheme)://\(host)", label: "Overnight agent endpoint")
     }
 
     private static var defaultSession: URLSession {
@@ -192,7 +189,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try JSONDecoder().decode(Resp.self, from: data)
+            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
         } catch {
             logger.error("startSession: response decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -249,17 +246,19 @@ actor OvernightAgentClient {
     func fetchLatestAgentMessage(sessionID: String) async throws -> String {
         let url = baseURL.appendingPathComponent("v1/sessions/\(sessionID)/events")
         let data = try await getJSON(url: url)
+        // SR5 (Stage 4): reuse the shared `TextBlock` shape for the per-event
+        // content array. The outer `data: [Event]` shape is Managed-Agents-
+        // specific so it stays local.
         struct EventsResponse: Decodable {
             struct Event: Decodable {
-                struct Block: Decodable { let type: String; let text: String? }
                 let type: String
-                let content: [Block]?
+                let content: [AnthropicResponseDecoding.TextBlock]?
             }
             let data: [Event]?
         }
         let parsed: EventsResponse
         do {
-            parsed = try JSONDecoder().decode(EventsResponse.self, from: data)
+            parsed = try SharedJSON.plainDecoder.decode(EventsResponse.self, from: data)
         } catch {
             logger.error("fetchLatestAgentMessage: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -271,8 +270,13 @@ actor OvernightAgentClient {
             logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) no agent.message events found (data count=\(parsed.data?.count ?? 0, privacy: .public))")
             throw OvernightAgentError.noAgentResponse
         }
-        guard let text = latest.content?.first(where: { $0.type == "text" })?.text else {
-            // Agent message exists but no text block — likely tool_use only.
+        // SR5 (Stage 4): shared text-block lookup with the emptyContent re-map.
+        // Preserves the distinct `.agentMessageMissingTextBlock` error code —
+        // the "agent responded but only with tool_use" signal callers rely on.
+        let text: String
+        do {
+            text = try AnthropicResponseDecoding.firstTextBlock(from: latest.content)
+        } catch AnthropicResponseDecodingError.emptyContent {
             let blockTypes = (latest.content ?? []).map { $0.type }.joined(separator: ",")
             logger.info("fetchLatestAgentMessage session=\(sessionID.prefix(12), privacy: .private) agent.message had no text block; types=\(blockTypes, privacy: .public)")
             throw OvernightAgentError.agentMessageMissingTextBlock
@@ -305,7 +309,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try JSONDecoder().decode(Resp.self, from: data)
+            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
         } catch {
             logger.error("createAgent: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -325,7 +329,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try JSONDecoder().decode(Resp.self, from: data)
+            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
         } catch {
             logger.error("createEnvironment: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -373,10 +377,10 @@ actor OvernightAgentClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(proxyToken, forHTTPHeaderField: "x-wakeproof-token")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue(beta, forHTTPHeaderField: "anthropic-beta")
+        // SR8 (Stage 4): shared header extension. Managed Agents surface requires
+        // the `anthropic-beta` header — the only one of the three clients to
+        // use it.
+        request.setWakeProofHeaders(token: proxyToken, beta: beta)
         let bodyBytes: Int
         if let body {
             do {

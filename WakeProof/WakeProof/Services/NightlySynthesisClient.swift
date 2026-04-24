@@ -39,7 +39,7 @@ struct NightlySynthesisClient {
     let endpoint: URL
     let model: String
     private let proxyToken: String
-    private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "nightly-synthesis")
+    private let logger = Logger(subsystem: LogSubsystem.overnight, category: "nightly-synthesis")
 
     init(
         session: URLSession = Self.defaultSession,
@@ -58,16 +58,12 @@ struct NightlySynthesisClient {
         // full messages URL (the proxy already publishes `.../v1/messages`).
         //
         // Wave 2.1 / R4 fix: validate via the shared `EndpointGuard` allowlist.
-        // Previously this code silently accepted any parse-able URL, so a tampered
-        // Secrets value would route nightly-synthesis traffic to an attacker host.
+        // SR7 (Stage 4): `validateOrCrash` replaces the inline do/catch pattern
+        // — same fail-closed semantic with a uniform crash message.
         let base = Secrets.claudeEndpoint.isEmpty
             ? "https://api.anthropic.com/v1/messages"
             : Secrets.claudeEndpoint
-        do {
-            return try EndpointGuard.validate(urlString: base)
-        } catch {
-            preconditionFailure("Nightly synthesis endpoint rejected by EndpointGuard: \(error.localizedDescription)")
-        }
+        return EndpointGuard.validateOrCrash(urlString: base, label: "Nightly synthesis endpoint")
     }
 
     private static var defaultSession: URLSession {
@@ -115,9 +111,10 @@ struct NightlySynthesisClient {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(proxyToken, forHTTPHeaderField: "x-wakeproof-token")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        // SR8 (Stage 4): headers via shared extension — no beta on nightly
+        // synthesis (routes through /v1/messages, not the Managed Agents
+        // surface).
+        request.setWakeProofHeaders(token: proxyToken)
         request.httpBody = bodyData
 
         logger.info("Nightly synthesis: model=\(self.model, privacy: .public) memory=\(memoryProfile != nil, privacy: .public) priorCount=\(priorBriefings.count, privacy: .public)")
@@ -146,20 +143,21 @@ struct NightlySynthesisClient {
             throw NightlySynthesisError.httpError(status: http.statusCode, snippet: snippet)
         }
 
-        struct Body: Decodable {
-            struct Block: Decodable { let type: String; let text: String? }
-            let content: [Block]?
-        }
-        let parsed: Body
+        // SR5 (Stage 4): delegate to the shared AnthropicResponseDecoding helper.
+        // Preserves the existing NightlySynthesisError surface:
+        //   - `DecodingError` → `.decodingFailed(underlying:)`
+        //   - `.emptyContent` → `.emptyResponse`
+        // so callers (MorningBriefingView, OvernightScheduler.classify) don't
+        // need to change their error-mapping switch.
+        let text: String
         do {
-            parsed = try JSONDecoder().decode(Body.self, from: data)
+            text = try AnthropicResponseDecoding.firstTextBlock(from: data)
+        } catch AnthropicResponseDecodingError.emptyContent {
+            logger.error("Nightly synthesis: no text block in content array")
+            throw NightlySynthesisError.emptyResponse
         } catch {
             logger.error("Nightly synthesis: response body decode failed — \(error.localizedDescription, privacy: .public)")
             throw NightlySynthesisError.decodingFailed(underlying: error)
-        }
-        guard let text = parsed.content?.first(where: { $0.type == "text" })?.text, !text.isEmpty else {
-            logger.error("Nightly synthesis: no text block in content array")
-            throw NightlySynthesisError.emptyResponse
         }
 
         logger.info("Nightly synthesis OK in \(elapsed, privacy: .public)s, response \(text.count, privacy: .public) chars")

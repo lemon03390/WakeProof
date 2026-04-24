@@ -56,7 +56,7 @@ actor PendingWakeAttemptQueue {
     static let maxQueueEntries = 32
 
     private let defaults: UserDefaults
-    private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "pending-attempt-queue")
+    private let logger = Logger(subsystem: LogSubsystem.alarm, category: "pending-attempt-queue")
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -100,10 +100,8 @@ actor PendingWakeAttemptQueue {
 
     private func loadQueue() -> [PendingWakeAttempt] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
         do {
-            return try decoder.decode([PendingWakeAttempt].self, from: data)
+            return try SharedJSON.iso8601Decoder.decode([PendingWakeAttempt].self, from: data)
         } catch {
             // Decoding failure = queue format drift from an older build. Log +
             // wipe so we don't loop trying to decode the same bad bytes every
@@ -120,10 +118,8 @@ actor PendingWakeAttemptQueue {
             defaults.removeObject(forKey: Self.defaultsKey)
             return
         }
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
         do {
-            let data = try encoder.encode(queue)
+            let data = try SharedJSON.iso8601Encoder.encode(queue)
             defaults.set(data, forKey: Self.defaultsKey)
         } catch {
             // Encoding a small Codable struct array cannot fail in normal use —

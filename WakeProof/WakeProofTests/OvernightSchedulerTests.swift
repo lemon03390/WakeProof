@@ -136,7 +136,6 @@ final class OvernightSchedulerTests: XCTestCase {
             source: source,
             sleepReader: sleepReader,
             memoryStore: memoryStore ?? makeMemoryStore(),
-            modelContainer: container,
             defaults: suiteDefaults
         )
     }

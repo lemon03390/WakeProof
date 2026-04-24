@@ -44,7 +44,7 @@ actor HealthKitSleepReader: SleepReading {
     }
 
     private let healthStore: HKHealthStore
-    private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "sleep-reader")
+    private let logger = Logger(subsystem: LogSubsystem.overnight, category: "sleep-reader")
 
     init(healthStore: HKHealthStore = HKHealthStore()) {
         self.healthStore = healthStore

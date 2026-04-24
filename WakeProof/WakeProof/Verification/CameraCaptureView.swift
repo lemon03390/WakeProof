@@ -147,19 +147,19 @@ private final class CameraHostController: UIViewController,
                                            UINavigationControllerDelegate {
 
     var onCaptured: (CameraCaptureResult) -> Void = { _ in
-        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+        Logger(subsystem: LogSubsystem.verification, category: "cameraHost")
             .fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
     }
     var onCancelled: () -> Void = {
-        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+        Logger(subsystem: LogSubsystem.verification, category: "cameraHost")
             .fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
     }
     var onFailed: (CameraCaptureError) -> Void = { _ in
-        Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+        Logger(subsystem: LogSubsystem.verification, category: "cameraHost")
             .fault("onFailed fired but no handler wired — alarm will hang in .capturing")
     }
 
-    private let logger = Logger(subsystem: "com.wakeproof.verification", category: "cameraHost")
+    private let logger = Logger(subsystem: LogSubsystem.verification, category: "cameraHost")
     private var didPresentPicker = false
     private var hasReportedTerminalOutcome = false
     /// Set when the picker handed us a video and we kicked off frame extraction. While true,

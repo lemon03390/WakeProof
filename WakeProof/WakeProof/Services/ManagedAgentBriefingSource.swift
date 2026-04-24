@@ -19,7 +19,7 @@ import os
 actor ManagedAgentBriefingSource: OvernightBriefingSource {
 
     private let client: OvernightAgentClient
-    private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "managed-agent-source")
+    private let logger = Logger(subsystem: LogSubsystem.overnight, category: "managed-agent-source")
 
     init(client: OvernightAgentClient = OvernightAgentClient()) {
         self.client = client

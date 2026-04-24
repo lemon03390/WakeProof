@@ -26,7 +26,7 @@ struct OnboardingFlowView: View {
     @State private var step: Step = .welcome
     @State private var saveError: String?
 
-    private let logger = Logger(subsystem: "com.wakeproof.onboarding", category: "flow")
+    private let logger = Logger(subsystem: LogSubsystem.onboarding, category: "flow")
 
     enum Step: CaseIterable {
         case welcome, notifications, camera, health, bedtime, baseline, done

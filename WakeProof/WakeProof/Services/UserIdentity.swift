@@ -20,7 +20,7 @@ struct UserIdentity {
     static let shared = UserIdentity()
 
     private static let key = "com.wakeproof.user.uuid"
-    private static let logger = Logger(subsystem: "com.wakeproof.memory", category: "identity")
+    private static let logger = Logger(subsystem: LogSubsystem.memory, category: "identity")
 
     /// R15 (Wave 2.5): injectable UserDefaults so tests use a per-run suite
     /// (`UserDefaults(suiteName:)`) instead of mutating `.standard` — which

@@ -41,8 +41,11 @@ struct BriefingDTO: Sendable {
 /// The enum forces the caller to handle each case and lets the View render a
 /// distinct message per failure mode. The `failure` payload carries a
 /// user-visible message and a machine-readable reason code for DEBUG overlays.
+///
+/// SQ2 (Stage 4): removed dead `noSessionConfigured` case. `BriefingResult.noSession`
+/// already carries the "no active session" semantic — the removed case was never
+/// constructed anywhere.
 enum BriefingFailureReason: String, Sendable {
-    case noSessionConfigured
     case fetchTransportFailed
     case fetchHTTPError
     case agentEmptyResponse

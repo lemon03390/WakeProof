@@ -33,7 +33,7 @@ final class PermissionsManager {
 
     // MARK: - Private
 
-    private let logger = Logger(subsystem: "com.wakeproof.permissions", category: "manager")
+    private let logger = Logger(subsystem: LogSubsystem.permissions, category: "manager")
     private let healthStore = HKHealthStore()
 
     // MARK: - Individual requests

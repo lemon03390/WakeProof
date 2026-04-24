@@ -72,7 +72,7 @@ final class AlarmScheduler {
 
     // MARK: - Private
 
-    private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "scheduler")
+    private let logger = Logger(subsystem: LogSubsystem.alarm, category: "scheduler")
     private let notificationCenter = UNUserNotificationCenter.current()
     private let backupNotificationIdentifier = "com.wakeproof.alarm.next"
     private static let lastFireAtDefaultsKey = "com.wakeproof.alarm.lastFireAt"

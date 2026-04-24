@@ -34,7 +34,7 @@ struct WakeProofApp: App {
     private let sleepReader = HealthKitSleepReader()
     private let overnightScheduler: OvernightScheduler
 
-    private static let logger = Logger(subsystem: "com.wakeproof.app", category: "root")
+    private static let logger = Logger(subsystem: LogSubsystem.app, category: "root")
     /// Weak bridge between `init()`'s synchronously-registered BGTask launch handler and
     /// the scheduler instance. `nonisolated static` so the handler closure can capture
     /// it without reaching into `self` (which the closure can't safely hold at register
@@ -61,11 +61,14 @@ struct WakeProofApp: App {
         // Phase B.5 wired `ManagedAgentBriefingSource` (primary path, chosen by the
         // B.3 decision gate) as the live source — each bedtime starts a real Managed
         // Agents session; each wake fetches the final agent.message.
+        // SQ3 (Stage 4): dropped `modelContainer:` argument — unused inside the
+        // scheduler actor after the R5 DTO refactor. Main-actor ModelContext work
+        // happens in RootView's onChange handler; the scheduler produces Sendable
+        // BriefingDTOs instead.
         let scheduler = OvernightScheduler(
             source: briefingSource,
             sleepReader: sleepReader,
-            memoryStore: memoryStore,
-            modelContainer: modelContainer
+            memoryStore: memoryStore
         )
         self.overnightScheduler = scheduler
         Self.schedulerBox.value = scheduler
@@ -343,7 +346,7 @@ struct RootView: View {
     @State private var latestBriefingResult: BriefingResult?
     @State private var showBriefing = false
 
-    private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "briefing-view")
+    private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
         ZStack {

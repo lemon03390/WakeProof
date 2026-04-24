@@ -82,12 +82,9 @@ enum ClaudeAPIError: LocalizedError {
 
 struct ClaudeAPIClient: ClaudeVisionClient {
 
-    /// HTTP header names the client uses. One place to rename / add.
-    enum Header {
-        static let contentType = "Content-Type"
-        static let clientToken = "x-wakeproof-token"
-        static let anthropicVersion = "anthropic-version"
-    }
+    /// SR8 (Stage 4): the prior inline `enum Header` moved to shared
+    /// `Services/ProxyHeader.swift` so the three outbound clients agree on
+    /// header names + install them via a single `URLRequest` extension.
 
     /// Injectable for tests — production uses `.shared`.
     let session: URLSession
@@ -98,7 +95,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// Private so logging / debug dumps elsewhere can't accidentally surface it.
     private let proxyToken: String
 
-    private let logger = Logger(subsystem: "com.wakeproof.verification", category: "claude")
+    private let logger = Logger(subsystem: LogSubsystem.verification, category: "claude")
 
     init(
         session: URLSession = Self.defaultSession,
@@ -127,14 +124,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// unit tests can still exercise `EndpointGuard.validate` directly on its
     /// throwing surface.
     private static let defaultEndpoint: URL = {
+        // SR7 (Stage 4): `validateOrCrash` replaces the inline do/catch →
+        // preconditionFailure pattern. Same fail-closed semantic, single
+        // shared formatting for the crash message.
         let endpointString = Secrets.claudeEndpoint.isEmpty
             ? "https://api.anthropic.com/v1/messages"
             : Secrets.claudeEndpoint
-        do {
-            return try EndpointGuard.validate(urlString: endpointString)
-        } catch {
-            preconditionFailure("Claude endpoint rejected by EndpointGuard: \(error.localizedDescription)")
-        }
+        return EndpointGuard.validateOrCrash(urlString: endpointString, label: "Vision endpoint")
     }()
 
     private static var defaultSession: URLSession {
@@ -183,9 +179,8 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: Header.contentType)
-        request.setValue(proxyToken, forHTTPHeaderField: Header.clientToken)
-        request.setValue("2023-06-01", forHTTPHeaderField: Header.anthropicVersion)
+        // SR8 (Stage 4): headers via shared extension — no beta on vision.
+        request.setWakeProofHeaders(token: proxyToken)
         request.httpBody = bodyData
 
         let start = Date()
@@ -234,7 +229,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 struct Inner: Decodable { let type: String?; let message: String? }
                 let error: Inner?
             }
-            if let body = try? JSONDecoder().decode(ProxyError.self, from: data),
+            if let body = try? SharedJSON.plainDecoder.decode(ProxyError.self, from: data),
                let type = body.error?.type,
                ["upstream_fetch_failed", "upload_timeout", "body_too_large"].contains(type) {
                 logger.error("Proxy-layer failure type=\(type, privacy: .public) status=\(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s")
@@ -506,17 +501,18 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// Extract `response["content"][0]["text"]` — the only shape we act on today.
     /// M2 (Wave 2.6): converted to `nonisolated static` so `decodeVerificationBody`
     /// can call it from a detached Task without pulling actor context.
+    ///
+    /// SR5 (Stage 4): delegates to the shared `AnthropicResponseDecoding.firstTextBlock`.
+    /// The empty-content case is remapped to `.emptyResponse` here to preserve the
+    /// existing `ClaudeAPIError` surface expected by `VisionVerifier.handleAPIError`.
+    /// `DecodingError` propagates as-is so the caller's `describeDecodingErrorField`
+    /// diagnostic still names the failing field.
     private static func extractTextBlock(from data: Data) throws -> String {
-        struct Body: Decodable {
-            struct Block: Decodable { let type: String; let text: String? }
-            let content: [Block]?
-        }
-        let body = try JSONDecoder().decode(Body.self, from: data)
-        guard let block = body.content?.first(where: { $0.type == "text" }),
-              let text = block.text else {
+        do {
+            return try AnthropicResponseDecoding.firstTextBlock(from: data)
+        } catch AnthropicResponseDecodingError.emptyContent {
             throw ClaudeAPIError.emptyResponse
         }
-        return text
     }
 }
 

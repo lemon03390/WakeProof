@@ -29,9 +29,15 @@ struct AlarmSchedulerView: View {
     /// retry next launch". Refreshed on view appear. A successful
     /// `startOvernightSession` clears the actor's copy; we refresh on next
     /// app-active bounce so the banner clears without a manual reload.
-    @State private var overnightStartError: String?
+    ///
+    /// SQ5 (Stage 4): renamed from `overnightStartError` to match the scheduler
+    /// actor's accessor (`lastSessionStartError()`). AlarmSchedulerView is
+    /// already scoped to the overnight domain — the `overnight` prefix was
+    /// redundant and made grep harder when tracing the value through storage →
+    /// accessor → View.
+    @State private var lastSessionStartError: String?
 
-    private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "schedulerView")
+    private let logger = Logger(subsystem: LogSubsystem.alarm, category: "schedulerView")
 
     var body: some View {
         NavigationStack {
@@ -116,7 +122,7 @@ struct AlarmSchedulerView: View {
     /// tab". Extracted as its own method so tests can exercise it without
     /// reaching into `body`.
     private func refreshOvernightStartError() async {
-        overnightStartError = await overnightScheduler.lastSessionStartError()
+        lastSessionStartError = await overnightScheduler.lastSessionStartError()
     }
 
     /// Composite "the alarm contract is partially broken" banner. Surfaces the highest-impact
@@ -149,7 +155,7 @@ struct AlarmSchedulerView: View {
         // alarm still fires, the user still verifies, they just don't get
         // Claude's morning prose. Message ends with the retry hint so the
         // user knows no manual action is required.
-        if let overnightErr = overnightStartError {
+        if let overnightErr = lastSessionStartError {
             return "Overnight analysis couldn't start tonight: \(overnightErr). We'll retry next launch."
         }
         return nil

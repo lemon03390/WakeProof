@@ -74,11 +74,11 @@ final class AudioSessionKeepalive {
 
     // MARK: - Private
 
-    private let logger = Logger(subsystem: "com.wakeproof.audio", category: "session")
+    private let logger = Logger(subsystem: LogSubsystem.audio, category: "session")
     /// Nonisolated mirror of `logger` for closures that need to log from non-MainActor
     /// contexts without forcing a MainActor.assumeIsolated bridge (e.g. the route-change
     /// observer, which does no state mutation). Logger is thread-safe by Apple's contract.
-    private nonisolated static let nonisolatedLogger = Logger(subsystem: "com.wakeproof.audio", category: "session")
+    private nonisolated static let nonisolatedLogger = Logger(subsystem: LogSubsystem.audio, category: "session")
     private var silentPlayer: AVAudioPlayer?
     /// Tokens returned by NotificationCenter.addObserver(forName:...). Stored so
     /// `removeInterruptionObservers()` can clean them up — without this, every `start()`

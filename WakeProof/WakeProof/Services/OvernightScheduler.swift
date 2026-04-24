@@ -56,15 +56,8 @@ actor OvernightScheduler {
     // wire-up site.
     private let sleepReader: any SleepReading
     private let memoryStore: MemoryStore
-    /// Retained on the scheduler for call-site compatibility (WakeProofApp +
-    /// tests), but **no longer used inside the scheduler actor** after the R5
-    /// fix. SwiftData `ModelContext` construction moved to the main actor's
-    /// `onChange` handler; the scheduler returns a `BriefingDTO` instead.
-    /// Removing this property would be a source-breaking change for tests
-    /// without any functional benefit, so the container is held here passively.
-    private let modelContainer: ModelContainer
     private let defaults: UserDefaults
-    private let logger = Logger(subsystem: "com.wakeproof.overnight", category: "scheduler")
+    private let logger = Logger(subsystem: LogSubsystem.overnight, category: "scheduler")
 
     /// Re-entrancy guard for `startOvernightSession` (B3 fix). Set atomically on
     /// entry; cleared on return. Prevents two concurrent callers (auto-trigger +
@@ -81,17 +74,19 @@ actor OvernightScheduler {
     /// Cleared on the next successful start.
     private var _lastSessionStartError: String?
 
+    /// SQ3 (Stage 4): `modelContainer` parameter was removed. After the R5 DTO
+    /// refactor, SwiftData `ModelContext` construction moved to the main actor's
+    /// `onChange` handler; nothing inside the scheduler actor used the container.
+    /// Call sites updated: `WakeProofApp.init()` + `OvernightSchedulerTests.makeScheduler`.
     init(
         source: any OvernightBriefingSource,
         sleepReader: any SleepReading,
         memoryStore: MemoryStore,
-        modelContainer: ModelContainer,
         defaults: UserDefaults = .standard
     ) {
         self.source = source
         self.sleepReader = sleepReader
         self.memoryStore = memoryStore
-        self.modelContainer = modelContainer
         self.defaults = defaults
     }
 
@@ -436,7 +431,7 @@ actor OvernightScheduler {
             using: nil
         ) { task in
             guard let processing = task as? BGProcessingTask else {
-                Logger(subsystem: "com.wakeproof.overnight", category: "scheduler")
+                Logger(subsystem: LogSubsystem.overnight, category: "scheduler")
                     .error("registerBackgroundTask: received unexpected BGTask subclass \(type(of: task), privacy: .public); marking failed")
                 task.setTaskCompleted(success: false)
                 return

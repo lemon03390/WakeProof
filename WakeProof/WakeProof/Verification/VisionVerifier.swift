@@ -62,15 +62,13 @@ final class VisionVerifier {
     /// Wave 2.4 R14 fix: retry queue for failed memory writes. Default uses the shared
     /// UserDefaults store; tests inject a mock. Not `Optional` — the queue itself is
     /// always available; a nil memoryStore simply means no writes ever get enqueued.
+    ///
+    /// SQ1 (Stage 4): the old `memoryWriteBacklog` @Observable sidecar was removed
+    /// because no view ever read it — dead code. Backlog counts remain reachable
+    /// via `memoryWriteQueue.count()` if a UI consumer is wired later.
     var memoryWriteQueue: PendingMemoryWriteQueue = PendingMemoryWriteQueue()
 
-    /// @Observable sidecar for the AlarmSchedulerView system-banner. Updated via
-    /// `refreshMemoryWriteBacklog()` after each enqueue and after flush. Backlog of
-    /// >5 entries surfaces a "Memory writes are backlogged (N pending) — calibration
-    /// may be stale" banner (threshold defined in AlarmSchedulerView).
-    let memoryWriteBacklog = MemoryWriteBacklog()
-
-    private let logger = Logger(subsystem: "com.wakeproof.verification", category: "verifier")
+    private let logger = Logger(subsystem: LogSubsystem.verification, category: "verifier")
 
     private static let antiSpoofBank = [
         "Blink twice",
@@ -101,12 +99,10 @@ final class VisionVerifier {
             logger.info("flushMemoryWriteQueue: no memoryStore wired — leaving queue intact")
             return
         }
-        let backlog = memoryWriteBacklog
         let queue = memoryWriteQueue
         let remaining = await queue.flush { entry, profileDelta in
             try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
         }
-        await MainActor.run { backlog.update(remaining) }
         logger.info("flushMemoryWriteQueue: flushed backlog; remaining=\(remaining, privacy: .public)")
     }
 
@@ -245,8 +241,13 @@ final class VisionVerifier {
             // calibration data — degrading Layer 2 fidelity over time with no signal.
             // The retry queue (PendingMemoryWriteQueue, UserDefaults-backed) gives a
             // next-launch flush a chance to land the write.
+            //
+            // SE3 (Stage 4): the outer Task inherits @MainActor from VisionVerifier.
+            // No redundant `MainActor.run` hop needed after enqueue — the previous
+            // hop existed only to update the now-deleted `MemoryWriteBacklog` sidecar
+            // (SQ1). Queue counts remain reachable via `queue.count()` if a future
+            // UI banner needs them.
             let queue = memoryWriteQueue
-            let backlog = memoryWriteBacklog
             Task { [logger] in
                 do {
                     try await memoryStore.writeVerdictRow(entry: entry, profileDelta: profileDelta)
@@ -254,8 +255,6 @@ final class VisionVerifier {
                     logger.error("MemoryStore write failed — enqueueing for retry: \(error.localizedDescription, privacy: .public)")
                     let pending = PendingMemoryWrite(entry: entry, profileDelta: profileDelta)
                     await queue.enqueue(pending)
-                    let newCount = await queue.count()
-                    await MainActor.run { backlog.update(newCount) }
                 }
             }
         }

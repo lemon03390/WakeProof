@@ -24,7 +24,7 @@ final class AlarmSoundEngine {
     /// reliability floor (we never deadlock a demo device).
     static let ringCeiling: Duration = .seconds(10 * 60)
 
-    private let logger = Logger(subsystem: "com.wakeproof.alarm", category: "soundEngine")
+    private let logger = Logger(subsystem: LogSubsystem.alarm, category: "soundEngine")
     private var escalationTask: Task<Void, Never>?
     private var ceilingTask: Task<Void, Never>?
 

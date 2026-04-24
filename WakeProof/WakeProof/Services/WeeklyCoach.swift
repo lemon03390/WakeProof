@@ -33,7 +33,7 @@ final class WeeklyCoach {
     }
 
     private(set) var wrapper: Wrapper?
-    private let logger = Logger(subsystem: "com.wakeproof.coach", category: "weekly")
+    private let logger = Logger(subsystem: LogSubsystem.coach, category: "weekly")
 
     /// Injectable for tests — production uses the bundle resource. Referencing the
     /// concrete type (not `Self`) in the default argument sidesteps the Swift
@@ -64,9 +64,7 @@ final class WeeklyCoach {
         }
         do {
             let data = try Data(contentsOf: resourceURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let parsed = try decoder.decode(Wrapper.self, from: data)
+            let parsed = try SharedJSON.iso8601Decoder.decode(Wrapper.self, from: data)
 
             // Validate the insight's `seedChecksum` matches the live seed file
             // unless the caller opted out. A mismatch means someone edited the

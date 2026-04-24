@@ -25,7 +25,7 @@ struct MorningBriefingView: View {
     let result: BriefingResult?
     let onDismiss: () -> Void
 
-    private static let logger = Logger(subsystem: "com.wakeproof.overnight", category: "briefing-view")
+    private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
         ZStack {

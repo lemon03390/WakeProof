@@ -102,4 +102,24 @@ nonisolated enum EndpointGuard {
         }
         return try validate(url)
     }
+
+    /// SR7 (Stage 4): the original static-init pattern at all three client
+    /// call sites was identical: `do { return try validate(...) } catch {
+    /// preconditionFailure("<label> rejected by EndpointGuard: ...") }`.
+    /// This helper collapses that boilerplate to a single call so the
+    /// preconditionFailure message stays uniformly formatted and the
+    /// fail-closed invariant can't diverge by accident.
+    ///
+    /// `label` is prefixed to the crash message so the logged reason names
+    /// which client hit the wall ("Vision endpoint", "Overnight agent",
+    /// "Nightly synthesis"). Crash is `preconditionFailure` (same as before)
+    /// — an invalid Secrets value is a programmer error on deploy, not a
+    /// recoverable runtime error.
+    static func validateOrCrash(urlString: String, label: String) -> URL {
+        do {
+            return try validate(urlString: urlString)
+        } catch {
+            preconditionFailure("\(label) rejected by EndpointGuard: \(error.localizedDescription)")
+        }
+    }
 }

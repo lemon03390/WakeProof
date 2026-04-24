@@ -43,7 +43,7 @@ struct CameraCaptureFlow: View {
         self.onSuccess = onSuccess
     }
 
-    private let logger = Logger(subsystem: "com.wakeproof.verification", category: "captureFlow")
+    private let logger = Logger(subsystem: LogSubsystem.verification, category: "captureFlow")
 
     /// Holds the watchdog task + a flag that a terminal callback has already
     /// fired. Using a class so multiple nested closures can share mutable

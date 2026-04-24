@@ -24,14 +24,14 @@ struct WakeWindow: Codable, Equatable {
     )
 
     private static let key = "com.wakeproof.alarm.wakeWindow"
-    private static let logger = Logger(subsystem: "com.wakeproof.alarm", category: "wakeWindow")
+    private static let logger = Logger(subsystem: LogSubsystem.alarm, category: "wakeWindow")
 
     static func load(from defaults: UserDefaults = .standard) -> WakeWindow {
         guard let data = defaults.data(forKey: key) else {
             return .defaultWindow
         }
         do {
-            return try JSONDecoder().decode(WakeWindow.self, from: data)
+            return try SharedJSON.plainDecoder.decode(WakeWindow.self, from: data)
         } catch {
             logger.error("Failed to decode WakeWindow — falling back to default: \(error.localizedDescription, privacy: .public)")
             return .defaultWindow
@@ -44,7 +44,7 @@ struct WakeWindow: Codable, Equatable {
     @discardableResult
     func save(to defaults: UserDefaults = .standard) -> Bool {
         do {
-            let data = try JSONEncoder().encode(self)
+            let data = try SharedJSON.plainEncoder.encode(self)
             defaults.set(data, forKey: Self.key)
             return true
         } catch {

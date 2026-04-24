@@ -38,7 +38,19 @@ actor MemoryStore {
     // forcing a public getter into the production surface. The setter stays private
     // — configuration is assigned once in init and never mutated afterwards.
     private(set) var configuration: Configuration
-    private let logger = Logger(subsystem: "com.wakeproof.memory", category: "store")
+    private let logger = Logger(subsystem: LogSubsystem.memory, category: "store")
+
+    /// SE1 (Stage 4): actor-local cache of `history.jsonl` line count so
+    /// `appendHistory`'s "over-cap?" probe doesn't re-parse ~100 KB of JSONL on
+    /// every verify. Seeded lazily from disk via a byte-scan (no JSON decode)
+    /// on first write; incremented on successful append. `nil` means "not yet
+    /// seeded — the next read will initialise it from disk".
+    ///
+    /// Rebuild cadence: only from disk on the first use and after a seed-from-
+    /// disk path re-observes the file. `loadHistory` (the authoritative read
+    /// path on `read()`) also opportunistically refreshes the cache so a crash
+    /// that landed a partial line doesn't leave the count off forever.
+    private var cachedHistoryLineCount: Int?
 
     // MARK: - Public API
 
@@ -61,7 +73,7 @@ actor MemoryStore {
             // tmp so the app continues to launch without crashing — reads will
             // return .empty, writes will discard cleanly, and the logger surfaces
             // the root cause for triage.
-            Logger(subsystem: "com.wakeproof.memory", category: "store")
+            Logger(subsystem: LogSubsystem.memory, category: "store")
                 .fault("Documents directory unavailable, memory will be ephemeral: \(error.localizedDescription, privacy: .public)")
             docs = FileManager.default.temporaryDirectory
         }
@@ -139,6 +151,12 @@ actor MemoryStore {
         try fm.createDirectory(at: userDir, withIntermediateDirectories: true)
         let file = userDir.appendingPathComponent("history.jsonl", isDirectory: false)
 
+        // SR4 note (Stage 4): this encoder intentionally stays per-call —
+        // `outputFormatting = [.sortedKeys]` is specific to the JSONL row
+        // write path (deterministic field order → clean diffs when the file
+        // is inspected with `git diff` or `jq`). The shared
+        // `SharedJSON.iso8601Encoder` has no such option, so sharing would
+        // silently change the on-disk JSONL shape.
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
@@ -174,11 +192,47 @@ actor MemoryStore {
         // mutation, no disk round-trip on a no-op), so safe to run on every write.
         file.markingExcludedFromBackup()
 
-        // Capacity probe — log only. Rotation is Day 5.
-        let (_, total) = loadHistory(in: userDir)
+        // SE1 (Stage 4): capacity probe now uses the actor-local cached line
+        // count, not a full `loadHistory` re-read. Previously every append
+        // parsed ~100 KB of JSONL just to log "rotation deferred" — wasting
+        // 10-40 ms on the verify hot path for a warning that fires zero
+        // times today. Seed the cache on first write via a cheap newline-
+        // byte-scan (no JSON decode); increment on each success thereafter.
+        let total = incrementedHistoryLineCount(for: file)
         if total > configuration.historyMaxEntries {
             logger.warning("history.jsonl over cap (\(total, privacy: .public) > \(self.configuration.historyMaxEntries, privacy: .public)); rotation deferred to Day 5")
         }
+    }
+
+    /// SE1 (Stage 4): returns the post-increment line count for the caller's
+    /// capacity check. Seeds `cachedHistoryLineCount` from disk on first call
+    /// (byte scan — no JSON decode). Subsequent calls bump the cached value
+    /// without touching disk.
+    ///
+    /// The `file` parameter is the same URL `appendHistory` just wrote to —
+    /// we pass it in rather than re-deriving so this helper stays independent
+    /// of the directory-resolution logic.
+    private func incrementedHistoryLineCount(for file: URL) -> Int {
+        if cachedHistoryLineCount == nil {
+            cachedHistoryLineCount = Self.countLines(in: file)
+        }
+        let incremented = (cachedHistoryLineCount ?? 0) + 1
+        cachedHistoryLineCount = incremented
+        return incremented
+    }
+
+    /// SE1 (Stage 4): cheap line count by counting newline bytes. Returns 0
+    /// if the file is missing or unreadable. No JSON parsing, no Data-to-
+    /// String conversion — just a byte scan over the file contents. For the
+    /// typical 100-KB log this is ~200× faster than the full-decode
+    /// `loadHistory` path that previously serviced the capacity check.
+    private static func countLines(in file: URL) -> Int {
+        guard let data = try? Data(contentsOf: file) else { return 0 }
+        var count = 0
+        for byte in data where byte == UInt8(ascii: "\n") {
+            count += 1
+        }
+        return count
     }
 
     /// Replace profile.md with new markdown. Oversized markdown is truncated to
@@ -260,8 +314,11 @@ actor MemoryStore {
         }
         let lines = raw.split(whereSeparator: \.isNewline).map(String.init)
         let total = lines.count
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // SE1 (Stage 4): opportunistically re-seed the cached line count here
+        // on every authoritative read path. If a crash between write + cache-
+        // bump ever left the cache one off, the next `read()` resets it to the
+        // real on-disk value.
+        cachedHistoryLineCount = total
         // Decode all so partial corruption in older entries doesn't crater the
         // most-recent read; per-line decode failures are logged at .error
         // because with the v0-format churn period behind us, a row failing to
@@ -269,17 +326,23 @@ actor MemoryStore {
         let entries: [MemoryEntry] = lines.compactMap { line in
             guard !line.isEmpty,
                   let data = line.data(using: .utf8) else { return nil }
-            do { return try decoder.decode(MemoryEntry.self, from: data) }
+            do { return try SharedJSON.iso8601Decoder.decode(MemoryEntry.self, from: data) }
             catch {
                 logger.error("history.jsonl line decode failed, skipping: \(error.localizedDescription, privacy: .public)")
                 return nil
             }
         }
-        .sorted { $0.timestamp < $1.timestamp }
-        // Sort before slicing: concurrent appendHistory calls can interleave
-        // bytes on disk in non-timestamp order. Claude's calibration depends on
-        // chronological ordering, so guarantee it at read time rather than
-        // assuming file position happens to match.
+        // SE5 (Stage 4): file is chronologically appended (`appendHistory`
+        // seeks-to-end before writing each line), and there is no
+        // interleaving problem because every write goes through this actor's
+        // serial executor — one `writeVerdictRow` fully completes before the
+        // next starts. So lines are already in timestamp order on disk, and
+        // `.suffix(5)` is O(5) instead of the previous O(N log N) full sort.
+        // Clock-skew caveat: if the system clock jumps backwards between two
+        // successive writes the older-timestamp row lands later in the file,
+        // but Claude reads "the last 5 rows" here — the ordering is file-
+        // position (i.e., write order), which is the actually-meaningful
+        // sequence for calibration. Wall-clock sort would be misleading.
         let recent = Array(entries.suffix(configuration.historyReadLimit))
         return (recent, total)
     }
