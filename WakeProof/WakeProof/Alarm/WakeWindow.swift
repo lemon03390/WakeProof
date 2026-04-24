@@ -16,6 +16,41 @@ struct WakeWindow: Codable, Equatable {
     var endHour: Int
     var endMinute: Int
     var isEnabled: Bool
+    /// Wave 5 H2 (§12.3-H2): optional one-line commitment note — "the first
+    /// thing tomorrow-you needs to do". Surfaced in MorningBriefingView post-
+    /// verified as a self-authored anchor alongside Claude's H1 observation.
+    /// Declared without a `= nil` property-level default so synthesized
+    /// Decodable conformance reads it from JSON (matching VerificationResult.
+    /// memoryUpdate / .observation pattern). The memberwise `init` below gives
+    /// it a `nil` default so existing pre-H2 call sites keep compiling, and
+    /// the JSON decoder's tolerance for absent-optional keys means pre-H2
+    /// UserDefaults blobs still decode (the missing key → nil).
+    ///
+    /// Absorbs G6 (bedtime contract re-sign): the user's own sentence is
+    /// strictly stronger psychology than a `[Confirm 06:30] [Skip]` yes/no,
+    /// so no separate confirmation screen is scheduled.
+    var commitmentNote: String?
+
+    /// 60 char cap — applied both at the TextField UI layer (truncate-on-change)
+    /// and wherever a test invariant needs to reference "the limit". Single
+    /// source of truth so UI + tests stay synchronized if the cap ever moves.
+    static let commitmentNoteMaxLength: Int = 60
+
+    init(
+        startHour: Int,
+        startMinute: Int,
+        endHour: Int,
+        endMinute: Int,
+        isEnabled: Bool,
+        commitmentNote: String? = nil
+    ) {
+        self.startHour = startHour
+        self.startMinute = startMinute
+        self.endHour = endHour
+        self.endMinute = endMinute
+        self.isEnabled = isEnabled
+        self.commitmentNote = commitmentNote
+    }
 
     static let defaultWindow = WakeWindow(
         startHour: 6, startMinute: 30,

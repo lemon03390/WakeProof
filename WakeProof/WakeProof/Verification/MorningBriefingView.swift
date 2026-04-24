@@ -32,6 +32,16 @@ struct MorningBriefingView: View {
     /// content under a "Claude noticed" label to deliver HOOK_S4_2 /
     /// HOOK_S7_5 variable-reward insight.
     let observation: String?
+
+    /// Wave 5 H2 (§12.3-H2): the pre-sleep commitment note the user typed when
+    /// they armed the alarm — "the first thing tomorrow-you needs to do". This
+    /// is the user's own voice to themselves and takes visual prominence over
+    /// Claude's observation (the note is BIG, 28pt semibold; the observation
+    /// stays small-italic). Nil when the user left the field empty. Sourced
+    /// from `scheduler.window.commitmentNote` via RootView's plumbing — the
+    /// snapshot is passed in rather than read from the WakeAttempt row because
+    /// the note lives with the current wake intent, not the per-fire record.
+    let commitmentNote: String?
     let onDismiss: () -> Void
 
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
@@ -47,6 +57,24 @@ struct MorningBriefingView: View {
                 Text(Date.now.formatted(date: .complete, time: .omitted))
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.7))
+                // Wave 5 H2: the user's pre-sleep commitment note in LARGE type.
+                // Sits between "Good morning"/date and the briefing content so
+                // the user sees their own sentence first thing — before Claude's
+                // prose, before any briefing failure branch. Only renders when
+                // non-nil and non-empty (empty post-trim won't happen because
+                // the save() path coerces whitespace-only to nil, but the check
+                // is defensive for any future callers that forget). 28pt
+                // semibold at 0.95 opacity is deliberately heavier than the
+                // briefing text (title3 / 0.9 opacity) — this is "you told
+                // yourself to do this", the briefing is context.
+                if let commitmentNote, !commitmentNote.isEmpty {
+                    Text(commitmentNote)
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.95))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
+                }
                 Spacer()
                 content
                 // Wave 5 H1: optional observation block below the briefing content.
@@ -172,6 +200,7 @@ struct MorningBriefingView: View {
         MorningBriefingView(
             result: .success(dto),
             observation: "window light 30 minutes earlier than last Tuesday",
+            commitmentNote: "Call Mom back",
             onDismiss: {}
         )
     } else {
@@ -183,7 +212,7 @@ struct MorningBriefingView: View {
 }
 
 #Preview("No session") {
-    MorningBriefingView(result: .noSession, observation: nil, onDismiss: {})
+    MorningBriefingView(result: .noSession, observation: nil, commitmentNote: nil, onDismiss: {})
 }
 
 #Preview("Transport failure") {
@@ -191,10 +220,11 @@ struct MorningBriefingView: View {
         result: .failure(reason: .fetchTransportFailed,
                          message: "Couldn't reach Claude tonight — your alarm still verified. Try tomorrow."),
         observation: nil,
+        commitmentNote: nil,
         onDismiss: {}
     )
 }
 
 #Preview("Nil result (defensive)") {
-    MorningBriefingView(result: nil, observation: nil, onDismiss: {})
+    MorningBriefingView(result: nil, observation: nil, commitmentNote: nil, onDismiss: {})
 }

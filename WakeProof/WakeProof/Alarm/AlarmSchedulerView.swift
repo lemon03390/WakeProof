@@ -31,6 +31,15 @@ struct AlarmSchedulerView: View {
     @State private var startTime: Date = .now
     @State private var isEnabled: Bool = false
 
+    /// Wave 5 H2 (§12.3-H2): optional pre-sleep commitment note, surfaced on
+    /// MorningBriefingView post-verified as the user's self-authored anchor
+    /// (HOOK_S0_6 / HOOK_S2_5 / HOOK_S7_5). Stored as `String` (not `String?`)
+    /// because TextField binds cleanly to non-optional; empty-after-trim →
+    /// persists as nil in `save()` so the downstream briefing render treats
+    /// "unset" and "cleared" the same way. Loaded from `scheduler.window.commitmentNote`
+    /// on appear so the TextField reflects the previously-saved note.
+    @State private var commitmentNote: String = ""
+
     /// R9 fix: mirrors the actor-local error from OvernightScheduler so the
     /// banner can surface "overnight analysis couldn't start tonight — we'll
     /// retry next launch". Refreshed on view appear. A successful
@@ -77,6 +86,33 @@ struct AlarmSchedulerView: View {
                 Section("Wake window") {
                     DatePicker("Start", selection: $startTime, displayedComponents: .hourAndMinute)
                     Toggle("Alarm enabled", isOn: $isEnabled)
+                }
+
+                // Wave 5 H2: pre-sleep commitment note. Positioned between the wake
+                // window and the save button so setting the time naturally flows
+                // into "and what will you do when you wake up". Char counter in
+                // footnote gray below the field; truncation enforced on-change
+                // against the shared WakeWindow.commitmentNoteMaxLength constant
+                // so UI + tests can't drift.
+                Section("First thing tomorrow") {
+                    TextField(
+                        "First thing tomorrow-you needs to do (optional)",
+                        text: $commitmentNote
+                    )
+                    .onChange(of: commitmentNote) { _, newValue in
+                        // Cap using `.count` (grapheme-cluster measure) — matches
+                        // user intuition for emoji / CJK, same measure used by
+                        // the test invariant. Trim off the tail on overflow so
+                        // the binding stays in-sync; IME pushes that exceed the
+                        // cap truncate silently (expected — the TextField's
+                        // visible content matches what will be saved).
+                        if newValue.count > WakeWindow.commitmentNoteMaxLength {
+                            commitmentNote = String(newValue.prefix(WakeWindow.commitmentNoteMaxLength))
+                        }
+                    }
+                    Text("\(commitmentNote.count)/\(WakeWindow.commitmentNoteMaxLength)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
@@ -238,6 +274,10 @@ struct AlarmSchedulerView: View {
         let w = scheduler.window
         startTime = WakeWindow.composeTime(hour: w.startHour, minute: w.startMinute)
         isEnabled = w.isEnabled
+        // H2: mirror the persisted note (nil → empty string for the TextField's
+        // non-optional binding). If the user had saved a note on a previous
+        // launch, the field repopulates so they can see / edit / keep it.
+        commitmentNote = w.commitmentNote ?? ""
     }
 
     private func save() {
@@ -255,6 +295,12 @@ struct AlarmSchedulerView: View {
             hour = 6
             minute = 30
         }
+        // H2: trim the TextField value; an all-whitespace note is semantically
+        // "none" (same as the user never typing anything). Persist as `nil`
+        // rather than an empty / whitespace-only string so the briefing-render
+        // branch treats cleared and never-set identically.
+        let trimmedNote = commitmentNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let noteToPersist: String? = trimmedNote.isEmpty ? nil : trimmedNote
         let w = WakeWindow(
             startHour: hour,
             startMinute: minute,
@@ -263,7 +309,8 @@ struct AlarmSchedulerView: View {
             // forward so the JSON-encoded UserDefaults blob stays decodable.
             endHour: scheduler.window.endHour,
             endMinute: scheduler.window.endMinute,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            commitmentNote: noteToPersist
         )
         // P5 (Stage 6 Wave 1): consume the Bool return from `updateWindow`. On failure
         // show an inline warning so the user knows the setting didn't persist; on

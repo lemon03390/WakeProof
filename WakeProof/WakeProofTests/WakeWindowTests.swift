@@ -94,6 +94,77 @@ final class WakeWindowTests: XCTestCase {
         XCTAssertTrue(WakeWindow.defaultWindow.save(to: defaults))
     }
 
+    // MARK: - Wave 5 H2 commitment note
+
+    /// H2: a commitment note must round-trip through the UserDefaults-backed
+    /// Codable boundary. If it didn't, `save(...) / load(...)` would silently
+    /// drop the user's typed sentence between launches — the briefing cover
+    /// would read `nil` the morning after they armed the alarm with a note.
+    func testRoundTripsCommitmentNote() throws {
+        let defaults = ephemeralDefaults()
+        let original = WakeWindow(
+            startHour: 6, startMinute: 30,
+            endHour: 7, endMinute: 0,
+            isEnabled: true,
+            commitmentNote: "Finish the hackathon submission"
+        )
+        XCTAssertTrue(original.save(to: defaults))
+        let loaded = WakeWindow.load(from: defaults)
+        XCTAssertEqual(loaded.commitmentNote, "Finish the hackathon submission")
+        XCTAssertEqual(loaded, original, "all fields including commitmentNote should round-trip")
+    }
+
+    /// H2: an explicit nil must survive Codable — the decoder doesn't invent
+    /// a default value for an absent Optional, but the encoded form of `nil`
+    /// (a JSON `null` under PlainJSON's policy) should decode back as `nil`,
+    /// not an empty string.
+    func testRoundTripsNilCommitmentNote() throws {
+        let defaults = ephemeralDefaults()
+        let original = WakeWindow(
+            startHour: 6, startMinute: 30,
+            endHour: 7, endMinute: 0,
+            isEnabled: true,
+            commitmentNote: nil
+        )
+        XCTAssertTrue(original.save(to: defaults))
+        let loaded = WakeWindow.load(from: defaults)
+        XCTAssertNil(loaded.commitmentNote)
+    }
+
+    /// H2: pre-H2 payloads on disk (written by earlier app versions) omit the
+    /// `commitmentNote` key entirely. The decoder must tolerate the absence
+    /// and synthesize `nil` — otherwise the first launch after updating
+    /// would fall back to `defaultWindow` and silently discard the user's
+    /// previously-configured alarm time. This is the backwards-compat contract
+    /// the controller decision calls out (§decision-1: missing field → nil).
+    func testLegacyDecodeWithoutCommitmentNote() throws {
+        let defaults = ephemeralDefaults()
+        let legacyJSON = #"{"startHour":6,"startMinute":30,"endHour":7,"endMinute":0,"isEnabled":true}"#
+        defaults.set(Data(legacyJSON.utf8), forKey: "com.wakeproof.alarm.wakeWindow")
+        let loaded = WakeWindow.load(from: defaults)
+        XCTAssertEqual(loaded.startHour, 6)
+        XCTAssertEqual(loaded.startMinute, 30)
+        XCTAssertEqual(loaded.endHour, 7)
+        XCTAssertEqual(loaded.endMinute, 0)
+        XCTAssertTrue(loaded.isEnabled)
+        XCTAssertNil(loaded.commitmentNote, "pre-H2 payloads without the key must decode as nil")
+    }
+
+    /// H2: a fresh install / first-run default must have a nil note so the
+    /// briefing cover doesn't render a stale placeholder before the user has
+    /// typed anything.
+    func testDefaultWindowHasNilCommitmentNote() {
+        XCTAssertNil(WakeWindow.defaultWindow.commitmentNote)
+    }
+
+    /// H2: 60-char cap is the contract — both the TextField truncation logic
+    /// and any test invariant read through this constant. A future drift (e.g.
+    /// someone silently bumps it to 80 in WakeWindow but not in the UI) is
+    /// caught by this assertion.
+    func testCommitmentNoteMaxLengthIsSixty() {
+        XCTAssertEqual(WakeWindow.commitmentNoteMaxLength, 60)
+    }
+
     // MARK: - Helpers
 
     private func calendarHongKong() -> Calendar {

@@ -395,9 +395,20 @@ struct RootView: View {
             // is the most recent VERIFIED row per the @Query sort; at the
             // moment the cover opens it's this morning's attempt. Nil when
             // Claude didn't emit one, or when the pre-H1 row has no field.
+            // Wave 5 H2: the user's pre-sleep commitment note piggybacks on
+            // the same cover presentation. Read directly from
+            // `scheduler.window.commitmentNote` at present-time — the value
+            // snapshots into MorningBriefingView's `let` parameter so if the
+            // user clears the note mid-morning after waking (e.g. they open
+            // AlarmSchedulerView and delete the text before dismissing the
+            // briefing), the cover keeps rendering the value that was in
+            // effect when the alarm fired. The note lives with the current
+            // wake intent, NOT the per-fire WakeAttempt row — deliberate:
+            // tomorrow's note is tomorrow's intent.
             MorningBriefingView(
                 result: latestBriefingResult,
-                observation: verifiedAttempts.first?.observation
+                observation: verifiedAttempts.first?.observation,
+                commitmentNote: scheduler.window.commitmentNote
             ) {
                 showBriefing = false
                 latestBriefingResult = nil
