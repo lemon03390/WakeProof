@@ -69,19 +69,34 @@ struct MorningBriefingView: View {
     /// reason to stay visible until the briefing cover dismisses.
     @State private var shareCardFailed: Bool = false
 
+    /// Task 4.1: drives the sunrise gradient opacity on VERIFIED — starts at 0
+    /// and animates to 1 over 1200ms easeOut on .onAppear, creating a warm
+    /// background reveal rather than a jarring hard-cut to the gradient.
+    @State private var revealOpacity: Double = 0
+
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Task 4.1: VERIFIED gets the sunrise gradient (opacity-animated in
+            // from .onAppear); all other cases use wpChar900 — warm charcoal,
+            // never pure black per design-system non-negotiable #1.
+            if case .success = result {
+                LinearGradient.wpSunrise
+                    .ignoresSafeArea()
+                    .opacity(revealOpacity)
+                    .animation(.easeOut(duration: 1.2), value: revealOpacity)
+            } else {
+                Color.wpChar900.ignoresSafeArea()
+            }
             VStack(spacing: 24) {
                 Spacer()
                 Text("Good morning")
                     .font(.system(size: 40, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.wpCream50)
                 Text(Date.now.formatted(date: .complete, time: .omitted))
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Color.wpCream50.opacity(0.7))
                 // Wave 5 H2: the user's pre-sleep commitment note in LARGE type.
                 // Sits between "Good morning"/date and the briefing content so
                 // the user sees their own sentence first thing — before Claude's
@@ -95,7 +110,7 @@ struct MorningBriefingView: View {
                 if let commitmentNote, !commitmentNote.isEmpty {
                     Text(commitmentNote)
                         .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
+                        .foregroundStyle(Color.wpCream50.opacity(0.95))
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                         .padding(.top, 16)
@@ -112,12 +127,12 @@ struct MorningBriefingView: View {
                     VStack(spacing: 8) {
                         Text("Claude noticed")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(Color.wpCream50.opacity(0.65))
                         Text(observation)
                             .font(.footnote)
                             .italic()
                             .multilineTextAlignment(.center)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(Color.wpCream50.opacity(0.65))
                             .padding(.horizontal, 28)
                     }
                     .padding(.top, 16)
@@ -130,7 +145,7 @@ struct MorningBriefingView: View {
                 if let reasonTag {
                     Text(reasonTag)
                         .font(.caption2.monospaced())
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(Color.wpCream50.opacity(0.35))
                         .padding(.top, 4)
                 }
                 #endif
@@ -169,7 +184,7 @@ struct MorningBriefingView: View {
                     ) {
                         Text(ShareCardModel.shareButtonCopy)
                             .font(.callout)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .foregroundStyle(Color.wpCream50.opacity(0.6))
                             .underline()
                     }
                     .padding(.bottom, 40)
@@ -186,6 +201,13 @@ struct MorningBriefingView: View {
         }
         .onAppear {
             Self.logger.info("MorningBriefingView appeared resultTag=\(Self.tag(result), privacy: .public)")
+            // Task 4.1: trigger the sunrise reveal on VERIFIED. Non-success
+            // paths have a solid wpChar900 background so the opacity change
+            // is a no-op for them — the `if case .success` branch never
+            // renders on those paths, so revealOpacity assignment is harmless.
+            withAnimation(.easeOut(duration: 1.2)) {
+                revealOpacity = 1
+            }
         }
     }
 
@@ -240,7 +262,7 @@ struct MorningBriefingView: View {
             Text(dto.briefingText)
                 .font(.title3)
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(Color.wpCream50.opacity(0.9))
                 .padding(.horizontal, 28)
         case .noSession, .none:
             // Fresh install / bedtime never armed. The encouragement copy is
@@ -249,10 +271,10 @@ struct MorningBriefingView: View {
             VStack(spacing: 8) {
                 Text("No briefing this morning")
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text("Sleep well tonight — Claude will prepare one.")
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(Color.wpCream50.opacity(0.5))
             }
         case .failure(_, let message):
             // Pipeline wired, something went wrong. `message` is copy from
@@ -261,10 +283,10 @@ struct MorningBriefingView: View {
             VStack(spacing: 8) {
                 Text("Briefing unavailable")
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text(message)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(Color.wpCream50.opacity(0.5))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 28)
             }
