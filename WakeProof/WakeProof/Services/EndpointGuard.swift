@@ -115,11 +115,41 @@ nonisolated enum EndpointGuard {
     /// "Nightly synthesis"). Crash is `preconditionFailure` (same as before)
     /// — an invalid Secrets value is a programmer error on deploy, not a
     /// recoverable runtime error.
+    ///
+    /// P12 (Stage 6 Wave 2): the crash message used to embed
+    /// `error.localizedDescription`, which for the `hostNotAllowed` case
+    /// contains the raw rejected URL (the `validate(_:)` throw wraps the
+    /// full `url.absoluteString`). A URL containing credentials in
+    /// `userinfo` form (e.g. `https://user:pass@host/...`) would land in
+    /// iOS's crash reporter verbatim. This fix routes the rejected URL
+    /// through `redact(_:)` — which strips the `userinfo` component — so
+    /// tampered-Secrets callers that happen to include credentials don't
+    /// leak them into the crash log. Behaviour for the common case (no
+    /// credentials, plain `https://host/path`) is unchanged.
     static func validateOrCrash(urlString: String, label: String) -> URL {
         do {
             return try validate(urlString: urlString)
         } catch {
-            preconditionFailure("\(label) rejected by EndpointGuard: \(error.localizedDescription)")
+            let redacted = redact(URL(string: urlString))
+            preconditionFailure("\(label) rejected by EndpointGuard — url=\(redacted), reason=\(error.localizedDescription)")
         }
+    }
+
+    /// P12 (Stage 6 Wave 2): strip `user` + `password` from a URL so its
+    /// string form is safe to embed in crash messages / logs. Returns a
+    /// placeholder string for unparseable inputs so call sites don't have to
+    /// branch.
+    ///
+    /// Deliberately a plain string (not URL) return: the caller is always a
+    /// diagnostic format context, not a network path. Using
+    /// `URLComponents.url?.absoluteString` preserves scheme/host/port/path/
+    /// query but drops credentials cleanly — this matches the "log the
+    /// URL without its secrets" intent exactly.
+    private static func redact(_ url: URL?) -> String {
+        guard let url else { return "<unparseable>" }
+        var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        comps?.user = nil
+        comps?.password = nil
+        return comps?.url?.absoluteString ?? "<redacted>"
     }
 }

@@ -448,12 +448,23 @@ actor OvernightScheduler {
         // purely a cost-safety decision (continue charging the meter vs.
         // abandon and rely on Anthropic's 24h ceiling).
         await terminateOrRetain(handle: handle)
-        return .success(BriefingDTO(
+        // P19 (Stage 6 Wave 2): BriefingDTO's failable init returns nil for
+        // empty / whitespace-only text. If the agent produced a non-throwing
+        // reply with the BRIEFING: marker but no actual prose, `text` here is
+        // the empty string — previously we'd write an empty MorningBriefing
+        // row and the UI would render "No briefing this morning" as if Layer 3
+        // had never run. Route to `.failure(.agentEmptyResponse)` instead so
+        // MorningBriefingView picks a descriptive user message.
+        guard let dto = BriefingDTO(
             briefingText: text,
             forWakeDate: wakeDate,
             sourceSessionID: handle,
             memoryUpdateApplied: memoryUpdateApplied
-        ))
+        ) else {
+            logger.error("finalizeBriefing: agent reply decoded but briefing trimmed to empty — routing to .failure(.agentEmptyResponse)")
+            return .failure(reason: .agentEmptyResponse, message: "Briefing came back empty after trim")
+        }
+        return .success(dto)
     }
 
     /// B5.2 helper: map a `fetchBriefing` error to a `BriefingFailureReason` +

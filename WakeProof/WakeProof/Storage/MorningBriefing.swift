@@ -18,11 +18,36 @@ import SwiftData
 /// *inside* the scheduler actor's non-main executor and returning the resulting
 /// `@Model` instance back to the main actor — that was undefined behaviour because
 /// SwiftData's model contexts are tied to the executor that constructed them.
+///
+/// P19 (Stage 6 Wave 2): the initializer is failable — constructing a DTO
+/// with empty or whitespace-only `briefingText` returns `nil`. Previously
+/// the "briefing non-empty" invariant was convention-only, enforced at the
+/// call site (`finalizeBriefing` asserted the text was non-empty). Moving
+/// the check into the constructor makes the invariant compile-time: the
+/// type system rejects an empty DTO at construction, so callers can't
+/// accidentally route an empty-string briefing onto disk, which would
+/// render as "No briefing this morning" in the UI.
 struct BriefingDTO: Sendable {
     let briefingText: String
     let forWakeDate: Date
     let sourceSessionID: String
     let memoryUpdateApplied: Bool
+
+    /// Failable init — returns nil when `briefingText` trims to empty.
+    /// Callers must handle the nil return explicitly (route to a
+    /// `.failure(.agentEmptyResponse, ...)` in the briefing result).
+    init?(briefingText: String, forWakeDate: Date, sourceSessionID: String, memoryUpdateApplied: Bool) {
+        let trimmed = briefingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // P19 note: retain the original (un-trimmed) text so downstream
+        // formatting (paragraph breaks, intentional leading/trailing
+        // whitespace) is preserved. The trim check is only a guard against
+        // the pathological "agent emitted only whitespace" case.
+        self.briefingText = briefingText
+        self.forWakeDate = forWakeDate
+        self.sourceSessionID = sourceSessionID
+        self.memoryUpdateApplied = memoryUpdateApplied
+    }
 }
 
 /// B5 fix: Why the scheduler's return type expanded from `BriefingDTO?` to

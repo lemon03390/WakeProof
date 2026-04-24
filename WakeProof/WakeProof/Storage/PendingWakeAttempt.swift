@@ -38,6 +38,12 @@ import os
 /// One failed-persist row pending re-save. Codable into a JSON array stored in
 /// UserDefaults. The struct is Sendable so the retry queue actor can vend
 /// values across isolation boundaries.
+///
+/// P20 (Stage 6 Wave 2): `retryCount` is `let` (previously `var`). See
+/// `PendingMemoryWrite` for the rationale — the old `var retryCount +=` site
+/// in `AlarmScheduler.flushPendingAttempts` now uses `bumpingRetry()` which
+/// returns a new instance. Keeps the type fully immutable and prevents an
+/// accidentally-shared mutable copy across actor boundaries.
 struct PendingWakeAttempt: Codable, Equatable, Sendable {
 
     /// Raw string — matches `WakeAttempt.verdict` on disk. Stored as String so a
@@ -46,13 +52,25 @@ struct PendingWakeAttempt: Codable, Equatable, Sendable {
     let verdictRawValue: String
     let scheduledFor: Date
     let enqueuedAt: Date
-    var retryCount: Int
+    let retryCount: Int
 
     init(verdictRawValue: String, scheduledFor: Date, enqueuedAt: Date = .now, retryCount: Int = 0) {
         self.verdictRawValue = verdictRawValue
         self.scheduledFor = scheduledFor
         self.enqueuedAt = enqueuedAt
         self.retryCount = retryCount
+    }
+
+    /// P20 (Stage 6 Wave 2): return a copy with `retryCount` bumped by 1.
+    /// The AlarmScheduler flush loop uses this in place of the old
+    /// `var bumped = row; bumped.retryCount += 1` pattern.
+    func bumpingRetry() -> Self {
+        Self(
+            verdictRawValue: verdictRawValue,
+            scheduledFor: scheduledFor,
+            enqueuedAt: enqueuedAt,
+            retryCount: retryCount + 1
+        )
     }
 }
 
@@ -172,7 +190,7 @@ actor PendingWakeAttemptQueue {
     private nonisolated func loadQueueUnsafe() -> [PendingWakeAttempt] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
         do {
-            return try SharedJSON.iso8601Decoder.decode([PendingWakeAttempt].self, from: data)
+            return try SharedJSON.decodeISO8601([PendingWakeAttempt].self, from: data)
         } catch {
             // Decoding failure = queue format drift from an older build. Log +
             // wipe so we don't loop trying to decode the same bad bytes every
@@ -191,7 +209,7 @@ actor PendingWakeAttemptQueue {
             return
         }
         do {
-            let data = try SharedJSON.iso8601Encoder.encode(queue)
+            let data = try SharedJSON.encodeISO8601(queue)
             defaults.set(data, forKey: Self.defaultsKey)
         } catch {
             // Encoding a small Codable struct array cannot fail in normal use —

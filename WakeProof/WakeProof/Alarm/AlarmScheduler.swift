@@ -487,8 +487,11 @@ final class AlarmScheduler {
                 try persistAttempt(verdict, row.scheduledFor)
                 logger.info("flushPendingAttempts: flushed verdict=\(row.verdictRawValue, privacy: .public) retryCount=\(row.retryCount, privacy: .public)")
             } catch {
-                var bumped = row
-                bumped.retryCount += 1
+                // P20 (Stage 6 Wave 2): `bumpingRetry()` returns a new instance
+                // with retryCount+1 — the struct is now fully immutable (let
+                // retryCount) so the previous `var bumped = row; bumped.retryCount += 1`
+                // pattern no longer compiles.
+                let bumped = row.bumpingRetry()
                 logger.warning("flushPendingAttempts: retry \(bumped.retryCount, privacy: .public) for verdict=\(row.verdictRawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 survivors.append(bumped)
             }

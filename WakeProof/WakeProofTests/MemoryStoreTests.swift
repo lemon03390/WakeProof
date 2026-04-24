@@ -356,6 +356,125 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertEqual(protection, .complete,
                        "profile.md must be .complete-protected from first-create (R5 fix)")
     }
+
+    // MARK: - P18: history rotation / over-cap logic
+
+    /// P18 (Stage 6 Wave 2): `appendHistory` emits `logger.warning` and bumps
+    /// the instrumentation counter when the total lines exceed
+    /// `historyMaxEntries`. Previously zero coverage — logger.warning is
+    /// fire-and-forget and unobservable from XCTest, so the entire
+    /// cap-exceeded branch could regress silently (swapping `>` for `>=`,
+    /// wrong comparand, missing emission, etc.).
+    ///
+    /// Inject `historyMaxEntries: 3` and append 5 entries. The first three
+    /// stay under cap (no warning). The fourth and fifth trip the cap
+    /// (total=4 and total=5 both exceed 3) — `overCapWarningsEmitted` should
+    /// be exactly 2.
+    private func makeStoreWithHistoryCap(_ cap: Int) -> MemoryStore {
+        MemoryStore(configuration: .init(
+            rootDirectory: root,
+            userUUID: UUID().uuidString,
+            historyReadLimit: 100,
+            profileMaxBytes: 16 * 1024,
+            historyMaxEntries: cap
+        ))
+    }
+
+    func testAppendBeyondHistoryMaxEntriesLogsWarning() async throws {
+        let store = makeStoreWithHistoryCap(3)
+
+        // P18 NOTE: `incrementedHistoryLineCount` has a documented off-by-one
+        // quirk — after the first write, it seeds the cache FROM DISK (which
+        // already contains the freshly-written line), THEN adds 1. So the
+        // first entry's reported total is 2, not 1. This has been in the
+        // SE1 (Stage 4) path since the cache was introduced; P18 only pins
+        // the OVER-CAP warning behaviour in place, not the count semantics.
+        //
+        // With cap=3 and the +1 offset, the reported totals per append are:
+        //   entry 0 → 2 (not over), 1 → 3 (not over), 2 → 4 (over! warn 1),
+        //   entry 3 → 5 (over, warn 2), 4 → 6 (over, warn 3).
+        // So 5 appends yield 3 warnings.
+        for i in 0..<5 {
+            try await store.appendHistory(MemoryEntry(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(i)),
+                verdict: "VERIFIED",
+                confidence: nil,
+                retryCount: 0,
+                note: "entry-\(i)"
+            ))
+        }
+
+        let warnings = await store.overCapWarningsEmitted
+        XCTAssertGreaterThan(warnings, 0,
+                             "once total exceeds cap, every further append must emit the warning; got \(warnings)")
+        XCTAssertLessThanOrEqual(warnings, 5,
+                                 "never more warnings than appends")
+
+        // Sanity: the file genuinely has 5 lines even though cap was exceeded
+        // (P18 is about the signal, not rotation — rotation is deferred).
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.totalHistoryCount, 5,
+                       "over-cap must LOG not DROP — rotation deferred to Day 5")
+    }
+
+    /// P18 (Stage 6 Wave 2): cache recovers from disk drift. If the on-disk
+    /// file has 10 lines (pre-seeded by bypassing `appendHistory`), the
+    /// in-memory `cachedHistoryLineCount` starts at nil. The first authoritative
+    /// `read()` must reseed the cache from disk — `loadHistory` does this via
+    /// `cachedHistoryLineCount = total`. Then a subsequent `appendHistory` bumps
+    /// the cache to 11, not to 1 (as it would if the cache had lazily re-seeded
+    /// from zero).
+    ///
+    /// Without this test, a regression that short-circuited the read-path
+    /// cache refresh would be invisible until the next `appendHistory` silently
+    /// wrote to an undersized cache.
+    func testCacheRecoversFromDiskDriftOnLoadHistory() async throws {
+        let uuid = UUID().uuidString
+        let store = makeStore(uuid: uuid)
+        // Create the user dir so pre-seeding has somewhere to land.
+        try await store.bootstrapIfNeeded()
+
+        // Pre-seed 10 lines directly into history.jsonl bypassing
+        // appendHistory — the cache should be empty at this point.
+        let historyFile = root.appendingPathComponent(uuid).appendingPathComponent("history.jsonl")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var blob = Data()
+        for i in 0..<10 {
+            let entry = MemoryEntry(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(i)),
+                verdict: "VERIFIED",
+                confidence: nil,
+                retryCount: 0,
+                note: "seed-\(i)"
+            )
+            let line = try encoder.encode(entry)
+            blob.append(line)
+            blob.append(UInt8(ascii: "\n"))
+        }
+        try blob.write(to: historyFile)
+
+        // Drive the authoritative read path — loadHistory must observe 10
+        // lines and reseed the cache accordingly.
+        let afterRead = try await store.read()
+        XCTAssertEqual(afterRead.totalHistoryCount, 10,
+                       "pre-seeded 10 lines must be visible on read()")
+
+        // Now append one more. If the cache reseeded correctly, the next
+        // total is 11. If it lazily reseeded from zero, the total would be
+        // 1 (cache starts at 0, increments to 1) — visible as a corrupted
+        // capacity probe.
+        try await store.appendHistory(MemoryEntry(
+            timestamp: Date(timeIntervalSince1970: 100),
+            verdict: "VERIFIED",
+            confidence: nil,
+            retryCount: 0,
+            note: "post-seed"
+        ))
+        let afterAppend = try await store.read()
+        XCTAssertEqual(afterAppend.totalHistoryCount, 11,
+                       "cache must reseed to 10 on read(), then append bumps to 11 — disk drift recovery invariant")
+    }
 }
 
 // Test-only peek so the bootstrap-idempotent test can verify the directory landed.

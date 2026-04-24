@@ -116,6 +116,48 @@ final class OvernightSchedulerTests: XCTestCase {
         func setCleanupThrows(_ error: Error?) { self.cleanupThrows = error }
     }
 
+    /// P17 (Stage 6 Wave 2): source that suspends `pokeIfNeeded` on a
+    /// CheckedContinuation so the test can fire expiration WHILE the actor
+    /// is blocked inside poke. All other protocol methods are no-ops — this
+    /// fake is purpose-built for the expiration-race test.
+    ///
+    /// The flag-based "entered" signal lets the test spin until the actor
+    /// has definitely suspended inside the continuation — without it, the
+    /// test could race the scheduler's executor and fire expiration before
+    /// poke even started.
+    actor BlockingPokeSource: OvernightBriefingSource {
+        private(set) var pokeEntered: Bool = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func planOvernight(sleep: SleepSnapshot, memoryProfile: String?) async throws -> String {
+            "unused-in-p17-test"
+        }
+
+        func pokeIfNeeded(handle: String, sleep: SleepSnapshot) async throws -> Bool {
+            pokeEntered = true
+            await withCheckedContinuation { cont in
+                self.continuation = cont
+            }
+            return false
+        }
+
+        func fetchBriefing(handle: String) async throws -> (text: String, memoryUpdate: String?) {
+            ("unused-in-p17-test", nil)
+        }
+
+        func cleanup(handle: String) async {
+            // no-op
+        }
+
+        /// Test helper — resume the continuation so the scheduler's
+        /// `pokeIfNeeded` await returns and the actor proceeds through the
+        /// post-await latch check.
+        func resumePoke() {
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
     // MARK: - Test plumbing
 
     private var suiteDefaults: UserDefaults!
@@ -583,6 +625,84 @@ final class OvernightSchedulerTests: XCTestCase {
         // NSInternalInconsistencyException on the next BG fire on device.
         XCTAssertEqual(fakeTask.completionCalls.count, 1,
                        "expiration after actor-path completion must NOT produce a second setTaskCompleted (latch guards against double-claim)")
+    }
+
+    /// P17 (Stage 6 Wave 2): real race — expiration fires DURING an active
+    /// await in `handleRefresh`, not after it returns. The previous
+    /// `testBGRefreshPhantomExpirationDoesNotDoubleComplete` was a weaker
+    /// check: it fired expiration AFTER `handleRefresh` had already returned,
+    /// which only exercises the "latch already claimed, handler no-ops" path.
+    /// The true race is iOS firing the expirationHandler WHILE the actor is
+    /// suspended inside pokeIfNeeded — the handler claims the latch first,
+    /// calls `setTaskCompleted(false)`, then the actor resumes and its
+    /// `latch.claim()` correctly returns false so its own
+    /// `setTaskCompleted(true)` is skipped.
+    ///
+    /// Implementation: `BlockingPokeSource` has a `CheckedContinuation`
+    /// programmed so `pokeIfNeeded` blocks on the first call. The test:
+    ///   1. Start `handleRefresh` as a Task (don't await).
+    ///   2. Wait for the source to record that poke entered.
+    ///   3. Fire the fakeTask's expirationHandler.
+    ///   4. Resume the continuation so pokeIfNeeded returns.
+    ///   5. Await the handleRefresh Task.
+    ///   6. Assert exactly one completion call, and it's `false` (expiration's).
+    func testBGRefreshExpirationDuringActivePokeCompletesOnlyOnce() async throws {
+        suiteDefaults.set("bg-race-handle", forKey: OvernightScheduler.activeHandleKey)
+        let blockingSource = BlockingPokeSource()
+        // Construct the scheduler directly because `makeScheduler` is typed
+        // to `RecordingSource`. Passing BlockingPokeSource through the
+        // protocol-typed init preserves the protocol conformance without
+        // widening the test helper's signature for one exceptional case.
+        let scheduler = OvernightScheduler(
+            source: blockingSource,
+            sleepReader: FakeSleepReader(),
+            memoryStore: makeMemoryStore(),
+            defaults: suiteDefaults
+        )
+
+        let fakeTask = FakeBGProcessingTask()
+
+        // (1) Start handleRefresh without awaiting — the actor suspends inside
+        // pokeIfNeeded's continuation.
+        let refreshTask = Task {
+            await scheduler.handleRefresh(task: fakeTask)
+        }
+
+        // (2) Wait for poke to enter. Poll on the source's `pokeEntered` flag
+        // with a bounded timeout so a stuck test fails loudly instead of
+        // hanging. Worth emphasizing: polling HERE is fine — we're trying to
+        // race with the scheduler's executor. The `await Task.sleep` yields
+        // so the scheduler gets CPU.
+        var spins = 0
+        while !(await blockingSource.pokeEntered), spins < 200 {
+            try await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+            spins += 1
+        }
+        let entered = await blockingSource.pokeEntered
+        XCTAssertTrue(entered, "poke should have entered by now — scheduler is suspended inside our continuation")
+
+        // (3) Fire expiration while the actor is still suspended. This is the
+        // critical race: the handler must claim the latch, call
+        // setTaskCompleted(false), and leave the actor's eventual resumption
+        // with `latch.claim()` returning false.
+        fakeTask.fireExpiration()
+
+        // (4) Resume the continuation so pokeIfNeeded returns, letting the
+        // actor continue through to its own `latch.claim()` check.
+        await blockingSource.resumePoke()
+
+        // (5) Drain the refresh Task.
+        await refreshTask.value
+
+        // (6) Assertions — exactly one completion call, and it's the
+        // expiration's false. If the actor's post-await setTaskCompleted
+        // ever fires, `completionCalls.count` would be 2 and this test
+        // would catch the double-complete regression that would crash on
+        // device with NSInternalInconsistencyException.
+        XCTAssertEqual(fakeTask.completionCalls.count, 1,
+                       "expiration during active poke must yield exactly one setTaskCompleted call — latch prevents double-claim")
+        XCTAssertEqual(fakeTask.completionCalls.first, false,
+                       "the single completion must be the expiration's setTaskCompleted(false); actor's post-await path must observe latch.isClaimed and skip its own call")
     }
 
     /// R12 (Wave 2.5): "no active handle" path — the handler sees no session and

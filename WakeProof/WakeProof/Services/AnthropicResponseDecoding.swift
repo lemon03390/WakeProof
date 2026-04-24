@@ -57,10 +57,10 @@ enum AnthropicResponseDecoding {
     /// `.emptyContent` when the JSON parses but no text block is present
     /// (or the `text` field is nil/empty).
     ///
-    /// The SharedJSON `.plainDecoder` is used — Anthropic response bodies
-    /// carry no Date fields.
+    /// The SharedJSON plain decoder wrapper is used — Anthropic response
+    /// bodies carry no Date fields.
     static func firstTextBlock(from data: Data) throws -> String {
-        let body = try SharedJSON.plainDecoder.decode(MessageBody.self, from: data)
+        let body = try SharedJSON.decodePlain(MessageBody.self, from: data)
         return try firstTextBlock(from: body.content)
     }
 

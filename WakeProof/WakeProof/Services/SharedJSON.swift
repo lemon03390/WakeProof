@@ -15,18 +15,28 @@
 //  configured here, they are never mutated — safe to share across actors and
 //  concurrent calls.
 //
+//  P22 (Stage 6 Wave 2): the decoder/encoder instances are now PRIVATE. The
+//  previous `static let iso8601Decoder: JSONDecoder` surface made them
+//  publicly READABLE, which means publicly MUTABLE too — a caller could
+//  silently set `SharedJSON.iso8601Decoder.dateDecodingStrategy =
+//  .secondsSince1970` and cascade the change to every other call site. The
+//  wrapper API below (`decodeISO8601` / `encodeISO8601` / `decodePlain` /
+//  `encodePlain`) exposes the *behaviour* without exposing the *instance*.
+//  Callers get the same allocation-amortisation benefit; no-one can mutate
+//  configuration from outside this file.
+//
 //  Variants:
-//  - `.iso8601Decoder` / `.iso8601Encoder`  — date strategy `.iso8601`. Used
+//  - `.decodeISO8601` / `.encodeISO8601`  — date strategy `.iso8601`. Used
 //    by MemoryEntry, PendingMemoryWrite, PendingWakeAttempt, and any code
 //    path that round-trips timestamps as strings.
-//  - `.plainDecoder` / `.plainEncoder`      — default date strategy
+//  - `.decodePlain` / `.encodePlain`      — default date strategy
 //    (`deferredToDate`, i.e. timeInterval-since-reference-date). Used by API
 //    response parsing where the server emits numeric Unix timestamps or no
 //    dates at all (Anthropic message envelopes, proxy error envelopes).
 //
 //  When in doubt, match the writer's strategy. MemoryEntry writes with
 //  `.iso8601`, so readers must also use `.iso8601`; Anthropic's Messages API
-//  body has no Date fields at all, so `.plainDecoder` is fine there.
+//  body has no Date fields at all, so `.decodePlain` is fine there.
 //
 
 import Foundation
@@ -40,29 +50,52 @@ import Foundation
 // default-actor-isolation setting — explicitly marking `nonisolated` overrides
 // that inference here so file-local access stays cheap.
 nonisolated enum SharedJSON {
-    /// JSON decoder with `.iso8601` date-decoding strategy. Used for
-    /// UserDefaults queue blobs, MemoryEntry + sidecar round-trips, and any
-    /// WakeProof-authored JSON that serialises Dates as ISO-8601 strings.
-    static let iso8601Decoder: JSONDecoder = {
+    /// JSON decoder with `.iso8601` date-decoding strategy. Private — P22
+    /// (Stage 6 Wave 2) removed the public instance surface so callers can't
+    /// mutate configuration across paths. Use `decodeISO8601(_:from:)` below.
+    private static let iso8601DecoderInstance: JSONDecoder = {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
     }()
 
-    /// JSON encoder with `.iso8601` date-encoding strategy. Pair with the
-    /// matching decoder above.
-    static let iso8601Encoder: JSONEncoder = {
+    /// JSON encoder with `.iso8601` date-encoding strategy. Private — see
+    /// `iso8601DecoderInstance` comment. Use `encodeISO8601(_:)` below.
+    private static let iso8601EncoderInstance: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         return e
     }()
 
-    /// Default-strategy JSON decoder. Used for API response envelopes (Claude
-    /// Messages body, Anthropic error shapes, Managed Agents event lists)
-    /// which carry no Date fields.
-    static let plainDecoder = JSONDecoder()
+    /// Default-strategy JSON decoder. Private — see `iso8601DecoderInstance`
+    /// comment. Use `decodePlain(_:from:)` below.
+    private static let plainDecoderInstance = JSONDecoder()
 
-    /// Default-strategy JSON encoder. Used for WakeWindow + BedtimeSettings
-    /// UserDefaults blobs (both are date-free value types).
-    static let plainEncoder = JSONEncoder()
+    /// Default-strategy JSON encoder. Private — see `iso8601DecoderInstance`
+    /// comment. Use `encodePlain(_:)` below.
+    private static let plainEncoderInstance = JSONEncoder()
+
+    /// Decode `data` using the shared `.iso8601` decoder. Amortises the per-
+    /// call `JSONDecoder()` allocation; no caller can mutate configuration.
+    static func decodeISO8601<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        try iso8601DecoderInstance.decode(type, from: data)
+    }
+
+    /// Encode `value` using the shared `.iso8601` encoder. Pair with the
+    /// matching decoder above.
+    static func encodeISO8601<T: Encodable>(_ value: T) throws -> Data {
+        try iso8601EncoderInstance.encode(value)
+    }
+
+    /// Decode `data` using the default-strategy decoder. Use for server
+    /// responses that carry no Date fields.
+    static func decodePlain<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        try plainDecoderInstance.decode(type, from: data)
+    }
+
+    /// Encode `value` using the default-strategy encoder. Use for Date-free
+    /// value types destined for UserDefaults.
+    static func encodePlain<T: Encodable>(_ value: T) throws -> Data {
+        try plainEncoderInstance.encode(value)
+    }
 }

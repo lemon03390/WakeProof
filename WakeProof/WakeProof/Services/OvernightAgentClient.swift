@@ -155,6 +155,22 @@ actor OvernightAgentClient {
 
     /// Ensure the agent + environment resources exist. Reuses cached IDs in
     /// UserDefaults; creates new ones on first call. Idempotent.
+    ///
+    /// P15 (Stage 6 Wave 2) — partial-failure invariant:
+    ///   Before: `createAgent()` succeeded → `defaults.set(agentID, ...)` →
+    ///           `createEnvironment()` threw → next call saw `cached agent ∧
+    ///           missing env`, fell into the create-fresh branch, and made
+    ///           ANOTHER agent. The original agent was orphaned (billing
+    ///           still accrues on every orphan up to Anthropic's 24h ceiling).
+    ///   After:  persist NEITHER id until BOTH resources land cleanly. If
+    ///           `createEnvironment()` throws after `createAgent()` succeeded,
+    ///           we log and re-throw without touching defaults. The next call
+    ///           creates a fresh agent + env pair cleanly.
+    ///
+    ///   Corruption recovery: if one key is present but the other is missing
+    ///   (reached here via a pre-P15 build, or direct UserDefaults mutation),
+    ///   treat it as corrupt state — wipe both keys and recreate. Avoids
+    ///   leaking the stale id while keeping the happy-path simple.
     func ensureAgentAndEnvironment() async throws -> (agentID: String, environmentID: String) {
         let cachedAgent = defaults.string(forKey: Self.agentIDKey)
         let cachedEnv = defaults.string(forKey: Self.environmentIDKey)
@@ -162,14 +178,35 @@ actor OvernightAgentClient {
             logger.info("Reusing cached agent+environment IDs agent=\(a.prefix(12), privacy: .private) env=\(e.prefix(12), privacy: .private)")
             return (a, e)
         }
+        // P15: XOR — exactly one side is present. Pre-P15 partial persist,
+        // or direct defaults tamper. Wipe both and continue into the create
+        // branch so we never return a half-populated pair.
+        if cachedAgent != nil || cachedEnv != nil {
+            logger.warning("Partial cached state detected (cachedAgent=\(cachedAgent != nil, privacy: .public) cachedEnv=\(cachedEnv != nil, privacy: .public)) — clearing both and recreating")
+            defaults.removeObject(forKey: Self.agentIDKey)
+            defaults.removeObject(forKey: Self.environmentIDKey)
+        }
 
-        logger.info("Cached agent/environment IDs missing; creating fresh resources (cachedAgent=\(cachedAgent != nil, privacy: .public) cachedEnv=\(cachedEnv != nil, privacy: .public))")
-        let agentID = try await createAgent()
-        defaults.set(agentID, forKey: Self.agentIDKey)
-        let envID = try await createEnvironment()
-        defaults.set(envID, forKey: Self.environmentIDKey)
-        logger.info("Fresh agent+environment created agent=\(agentID.prefix(12), privacy: .private) env=\(envID.prefix(12), privacy: .private)")
-        return (agentID, envID)
+        logger.info("Cached agent/environment IDs missing; creating fresh resources")
+        let newAgentID = try await createAgent()
+        do {
+            let newEnvID = try await createEnvironment()
+            // P15: persist BOTH keys together. If we crash between these two
+            // sets, the next call will see the XOR state above and wipe +
+            // recreate — same clean outcome.
+            defaults.set(newAgentID, forKey: Self.agentIDKey)
+            defaults.set(newEnvID, forKey: Self.environmentIDKey)
+            logger.info("Fresh agent+environment created agent=\(newAgentID.prefix(12), privacy: .private) env=\(newEnvID.prefix(12), privacy: .private)")
+            return (newAgentID, newEnvID)
+        } catch {
+            // P15: env-create failed AFTER agent-create succeeded. Do NOT
+            // persist the agent id — otherwise the next call's cached-agent
+            // path would hit the XOR branch above and wipe it anyway, just
+            // with extra churn and an intermediate "we orphaned an agent but
+            // don't know about it" window.
+            logger.warning("Environment create failed after agent create; agent \(newAgentID.prefix(12), privacy: .private) will not be persisted to avoid leak on retry: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
     }
 
     /// Start a new session for tonight. Returns the session id + the attached
@@ -196,7 +233,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
+            parsed = try SharedJSON.decodePlain(Resp.self, from: data)
         } catch {
             logger.error("startSession: response decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -265,7 +302,7 @@ actor OvernightAgentClient {
         }
         let parsed: EventsResponse
         do {
-            parsed = try SharedJSON.plainDecoder.decode(EventsResponse.self, from: data)
+            parsed = try SharedJSON.decodePlain(EventsResponse.self, from: data)
         } catch {
             logger.error("fetchLatestAgentMessage: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -307,6 +344,17 @@ actor OvernightAgentClient {
 
     private func createAgent() async throws -> String {
         let url = baseURL.appendingPathComponent("v1/agents")
+        // P13 (Stage 6 Wave 2): the agent name string below is LOAD-BEARING.
+        // The Vercel cron worker at
+        //   workers/wakeproof-proxy-vercel/api/cron/cleanup-stale-sessions.js
+        // filters sessions to clean up with
+        //   `agentName.startsWith("wakeproof-overnight")`
+        // (constant `WAKEPROOF_AGENT_PREFIX` in that file). If the name here
+        // drifts (renamed, versioned, suffixed, etc.) without a matching
+        // update in cleanup-stale-sessions.js, the cron stops sweeping our
+        // orphan sessions and $0.08/hr meters run up to Anthropic's 24h
+        // ceiling before auto-termination. When changing this value, grep
+        // the worker repo for `WAKEPROOF_AGENT_PREFIX` and keep them in sync.
         let body: [String: Any] = [
             "name": "wakeproof-overnight",
             "model": Secrets.visionModel,  // Opus 4.7 — same model as the vision call
@@ -316,7 +364,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
+            parsed = try SharedJSON.decodePlain(Resp.self, from: data)
         } catch {
             logger.error("createAgent: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)
@@ -336,7 +384,7 @@ actor OvernightAgentClient {
         struct Resp: Decodable { let id: String? }
         let parsed: Resp
         do {
-            parsed = try SharedJSON.plainDecoder.decode(Resp.self, from: data)
+            parsed = try SharedJSON.decodePlain(Resp.self, from: data)
         } catch {
             logger.error("createEnvironment: decode failed — \(error.localizedDescription, privacy: .public)")
             throw OvernightAgentError.decodingFailed(underlying: error)

@@ -20,6 +20,13 @@ struct AlarmSchedulerView: View {
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
     @Environment(PermissionsManager.self) private var permissions
     @Environment(WeeklyCoach.self) private var weeklyCoach
+    /// P14 (Stage 6 Wave 2): surfaces `VisionVerifier.requiresReinstall` to
+    /// the systemBanner so an `invalidUserUUID` MemoryStore read gets a user-
+    /// visible warning. Previously that error was silently swallowed in the
+    /// verify-time catch, indistinguishable from a fresh-install empty-memory
+    /// case. VisionVerifier is already wired into the app via
+    /// `.environment(visionVerifier)` — we just read the flag here.
+    @Environment(VisionVerifier.self) private var visionVerifier
 
     @State private var startTime: Date = .now
     @State private var isEnabled: Bool = false
@@ -45,6 +52,14 @@ struct AlarmSchedulerView: View {
     /// window already reflects the user's intent; the warning is just the nudge
     /// to retry so the setting survives next launch.
     @State private var windowSaveFailureMessage: String?
+
+    /// P10 (Stage 6 Wave 2): cumulative count of memory-write rows dropped
+    /// after exhausting the `PendingMemoryWriteQueue.maxRetryAttempts` cap.
+    /// Sourced from UserDefaults on view appear so the banner reflects every
+    /// drop since install (not just this session). Surfaces at the lowest
+    /// priority in `systemBanner` — the alarm itself isn't affected, only
+    /// Layer 2 memory fidelity.
+    @State private var droppedMemoryWrites: Int = 0
 
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "schedulerView")
 
@@ -131,6 +146,12 @@ struct AlarmSchedulerView: View {
             // view comes back into focus. Quick one-shot poll of the actor;
             // the property is actor-local so we have to hop.
             .task { await refreshOvernightStartError() }
+            // P10 (Stage 6 Wave 2): refresh the dropped-memory-writes counter
+            // so the lowest-priority banner reflects the latest count. Cheap
+            // UserDefaults read; no actor hop required. The counter itself is
+            // bumped from within the queue's flush path, so by the time this
+            // view is active we always see a current value.
+            .onAppear(perform: refreshDroppedMemoryCount)
         }
     }
 
@@ -152,19 +173,37 @@ struct AlarmSchedulerView: View {
         lastSessionStartError = await overnightScheduler.lastOvernightError()
     }
 
+    /// P10 (Stage 6 Wave 2): pull the UserDefaults-backed dropped-count the
+    /// retry queue maintains. Called `.onAppear` so the lowest-priority
+    /// banner surfaces the count without requiring a full-view refresh.
+    private func refreshDroppedMemoryCount() {
+        droppedMemoryWrites = PendingMemoryWriteQueue.droppedCount()
+    }
+
     /// Composite "the alarm contract is partially broken" banner. Surfaces the highest-impact
     /// problem first so the user knows what to fix; without this, denied notifications and
     /// dead audio sessions silently pretended the alarm was armed. Optional permissions land
     /// at the bottom — they degrade features but don't break the wake-up contract.
     ///
-    /// Priority order: alarm-breaking conditions first (notifications / audio),
-    /// then HealthKit (disables summary), then the overnight pipeline (Layer 3
-    /// analysis feature — failure is visible to the user only via the morning
-    /// briefing card, which is less immediate than the alarm itself). The
-    /// overnight error is surfaced so users know why the briefing card will
-    /// say "unavailable" — without this banner the failure is invisible until
-    /// the next wake.
+    /// Priority order:
+    ///  1. P14 (Stage 6 Wave 2): `requiresReinstall` — the stored user UUID
+    ///     was externally mutated. Highest priority because (a) it's
+    ///     security-relevant (path-traversal guard tripped) and (b) the
+    ///     remediation ("reinstall") is immediate and must not be buried
+    ///     under lower-priority messages.
+    ///  2. Notifications / audio — alarm-breaking.
+    ///  3. HealthKit — disables summary.
+    ///  4. Overnight pipeline (Layer 3 analysis) — briefing card degradation.
+    ///  5. P10 (Stage 6 Wave 2): dropped memory writes — Layer 2 fidelity
+    ///     degradation. Lowest priority because the alarm still works; memory
+    ///     drift is ancillary, visible only to insight quality over time.
     private var systemBanner: String? {
+        // P14 (Stage 6 Wave 2): reinstall warning pre-empts everything else.
+        // If the UUID is out of shape, memory is effectively gone and the
+        // user should know before the banner stack dilutes the signal.
+        if visionVerifier.requiresReinstall {
+            return "Security issue: reinstall WakeProof to regenerate identity."
+        }
         if permissions.notifications == .denied {
             return "Notifications are off — WakeProof can't reliably wake you. Open Settings → WakeProof → Notifications."
         }
@@ -184,6 +223,13 @@ struct AlarmSchedulerView: View {
         // user knows no manual action is required.
         if let overnightErr = lastSessionStartError {
             return "Overnight analysis couldn't start tonight: \(overnightErr). We'll retry next launch."
+        }
+        // P10 (Stage 6 Wave 2): memory calibration degradation. Lowest
+        // priority because the alarm still works — but silently dropping
+        // calibration rows over time degrades Claude's ability to profile
+        // the user, so the banner surfaces the count so it's not invisible.
+        if droppedMemoryWrites > 0 {
+            return "Memory calibration degraded: \(droppedMemoryWrites) write\(droppedMemoryWrites == 1 ? "" : "s") dropped."
         }
         return nil
     }

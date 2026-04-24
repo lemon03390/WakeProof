@@ -64,7 +64,7 @@ final class WeeklyCoach {
         }
         do {
             let data = try Data(contentsOf: resourceURL)
-            let parsed = try SharedJSON.iso8601Decoder.decode(Wrapper.self, from: data)
+            let parsed = try SharedJSON.decodeISO8601(Wrapper.self, from: data)
 
             // Validate the insight's `seedChecksum` matches the live seed file
             // unless the caller opted out. A mismatch means someone edited the

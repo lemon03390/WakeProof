@@ -413,6 +413,55 @@ final class VisionVerifierTests: XCTestCase {
         XCTAssertTrue(fake.lastMemoryContext!.contains("PROFILE_MARKER"))
     }
 
+    // MARK: - P14: requiresReinstall signal on MemoryStoreError.invalidUserUUID
+
+    /// P14 (Stage 6 Wave 2): the previous catch-all on `memoryStore.read()`
+    /// swallowed `MemoryStoreError.invalidUserUUID` the same way it swallowed
+    /// "file not found" (fresh install). That error is security-relevant —
+    /// it fires when the UserDefaults-backed UUID was externally mutated
+    /// (path-traversal guard refused to open the directory). Conflating the
+    /// two meant a tampered UUID silently degraded to "verify without
+    /// memory" with no user-visible signal.
+    ///
+    /// The fix splits the catch: `.invalidUserUUID` sets
+    /// `verifier.requiresReinstall = true` (AlarmSchedulerView's systemBanner
+    /// reads it as highest priority); all other errors keep the old behavior
+    /// (log + nil memoryContext, proceed with verification).
+    func testInvalidUserUUIDSetsRequiresReinstallFlag() async throws {
+        // Construct a MemoryStore with an invalid UUID so `userDirectoryURL()`
+        // throws `MemoryStoreError.invalidUserUUID`. The store itself is real;
+        // we just seed an out-of-shape UUID to trip the guard.
+        let tmp = tempMemoryStoreRoot()
+        let tamperedStore = MemoryStore(configuration: .init(
+            rootDirectory: tmp,
+            userUUID: "../../etc/passwd"  // triggers MemoryStoreError.invalidUserUUID
+        ))
+        let fake = RecordingClient(verdict: .verified)
+        let verifier = VisionVerifier(client: fake)
+        verifier.scheduler = scheduler
+        verifier.memoryStore = tamperedStore
+
+        // Precondition: flag starts false on a fresh verifier.
+        XCTAssertFalse(verifier.requiresReinstall, "fresh verifier must not have the flag set")
+
+        let attempt = makeAttempt()
+        context.insert(attempt)
+        scheduler.fireNow()
+        scheduler.beginCapturing()
+        await verifier.verify(attempt: attempt, baseline: baseline, context: context)
+
+        // Post: the specific error flipped the @Observable flag.
+        XCTAssertTrue(verifier.requiresReinstall,
+                      "invalidUserUUID must flip requiresReinstall so AlarmSchedulerView's banner surfaces the security warning")
+        // Verification must STILL have proceeded (memory is ancillary — a
+        // broken memory store must not brick the alarm).
+        XCTAssertEqual(fake.callCount, 1,
+                       "invalidUserUUID must not block the vision call — memory is ancillary; alarm must keep working")
+        // And memoryContext must be nil since the read failed.
+        XCTAssertNil(fake.lastMemoryContext,
+                     "invalidUserUUID path must skip memoryContext injection")
+    }
+
     func testVerifiedWithMemoryUpdateWritesHistoryAndProfile() async throws {
         let tmp = tempMemoryStoreRoot()
         let store = MemoryStore(configuration: .init(rootDirectory: tmp, userUUID: UUID().uuidString))

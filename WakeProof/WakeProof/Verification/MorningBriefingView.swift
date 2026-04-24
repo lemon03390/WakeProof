@@ -128,15 +128,25 @@ struct MorningBriefingView: View {
 }
 
 #Preview("Success") {
-    MorningBriefingView(
-        result: .success(BriefingDTO(
-            briefingText: "You slept 7h 15m — steady HR overnight. Expect a smooth verification today. Hydrate early; you were lighter on water yesterday evening.",
-            forWakeDate: .now,
-            sourceSessionID: "sesn_preview",
-            memoryUpdateApplied: false
-        )),
-        onDismiss: {}
-    )
+    // P19 (Stage 6 Wave 2): BriefingDTO is now failable on empty text. The
+    // preview passes a non-empty string so construction is guaranteed; we
+    // use an `if let` unwrap to satisfy the compiler without reaching for
+    // the banned force-unwrap. A nil here would indicate the preview string
+    // was accidentally blanked — a visible broken preview is the right
+    // diagnostic rather than a crash in SwiftUI's preview process.
+    if let dto = BriefingDTO(
+        briefingText: "You slept 7h 15m — steady HR overnight. Expect a smooth verification today. Hydrate early; you were lighter on water yesterday evening.",
+        forWakeDate: .now,
+        sourceSessionID: "sesn_preview",
+        memoryUpdateApplied: false
+    ) {
+        MorningBriefingView(result: .success(dto), onDismiss: {})
+    } else {
+        // Deliberately visible — if the preview text is ever emptied, the
+        // missing view surfaces the typo rather than silently passing a nil
+        // DTO into a `.success` case that construction invariant rejects.
+        Text("Preview broken: BriefingDTO construction returned nil — check briefingText isn't empty")
+    }
 }
 
 #Preview("No session") {

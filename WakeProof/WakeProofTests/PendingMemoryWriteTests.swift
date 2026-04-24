@@ -135,6 +135,71 @@ final class PendingMemoryWriteTests: XCTestCase {
                        "entry must drop after \(PendingMemoryWriteQueue.maxRetryAttempts) failed flushes")
     }
 
+    // MARK: - P10: dropped-counter UserDefaults surface
+
+    /// P10 (Stage 6 Wave 2): when a row exhausts its retry budget the queue
+    /// drops it AND bumps the UserDefaults-backed `droppedCount` so
+    /// AlarmSchedulerView's banner can surface "N writes dropped". Previously
+    /// the drop was logger.error only — silent from the user's side, which
+    /// is the banned pattern the promoted rule protects against.
+    ///
+    /// Pre-P10 behavior: count stayed at 0 even as entries vanished. Fix:
+    /// each drop increments the counter by 1. This test drives two entries
+    /// through the flush loop past maxRetryAttempts and asserts the
+    /// cumulative counter reflects both drops.
+    func testDroppedCounterIncrementsAfterMaxRetries() async {
+        let queue = PendingMemoryWriteQueue(defaults: defaults)
+        PendingMemoryWriteQueue.resetDroppedCount(on: defaults)
+
+        // Seed two entries so we can assert the counter accumulates.
+        let entryA = MemoryEntry(timestamp: Date(timeIntervalSince1970: 1), verdict: "VERIFIED",
+                                 confidence: nil, retryCount: 0, note: "A")
+        let entryB = MemoryEntry(timestamp: Date(timeIntervalSince1970: 2), verdict: "VERIFIED",
+                                 confidence: nil, retryCount: 0, note: "B")
+        await queue.enqueue(PendingMemoryWrite(entry: entryA, profileDelta: nil))
+        await queue.enqueue(PendingMemoryWrite(entry: entryB, profileDelta: nil))
+
+        // Precondition.
+        XCTAssertEqual(PendingMemoryWriteQueue.droppedCount(on: defaults), 0,
+                       "counter must start at zero before any exhaustion")
+
+        // Always-failing writer; run flush past maxRetryAttempts so both rows
+        // exhaust their budget in the final pass.
+        struct TestError: Error {}
+        let failingWriter: (MemoryEntry, String?) async throws -> Void = { _, _ in throw TestError() }
+        for _ in 0..<PendingMemoryWriteQueue.maxRetryAttempts {
+            _ = await queue.flush(using: failingWriter)
+        }
+
+        // Post: both entries should have dropped, counter bumps exactly by 2.
+        let remaining = await queue.count()
+        XCTAssertEqual(remaining, 0, "both rows must drop after retry exhaustion")
+        XCTAssertEqual(PendingMemoryWriteQueue.droppedCount(on: defaults), 2,
+                       "P10 counter must increment by 1 per dropped row — reflecting drops to the AlarmSchedulerView banner")
+    }
+
+    /// P10 (Stage 6 Wave 2): transient failures (below the retry cap) must
+    /// NOT bump the dropped counter. Only exhaustion-level drops are
+    /// user-visible; earlier retries are kept in the queue and remain
+    /// recoverable. This test fires one sub-cap flush and asserts the
+    /// counter stays at zero.
+    func testDroppedCounterStaysZeroOnSubCapFailures() async {
+        let queue = PendingMemoryWriteQueue(defaults: defaults)
+        PendingMemoryWriteQueue.resetDroppedCount(on: defaults)
+        let entry = MemoryEntry(timestamp: .now, verdict: "VERIFIED",
+                                confidence: nil, retryCount: 0, note: "retry")
+        await queue.enqueue(PendingMemoryWrite(entry: entry, profileDelta: nil))
+
+        struct TestError: Error {}
+        // Single failed flush: row bumps retryCount to 1 (< maxRetryAttempts),
+        // stays in queue, counter must NOT increment.
+        _ = await queue.flush { _, _ in throw TestError() }
+        XCTAssertEqual(PendingMemoryWriteQueue.droppedCount(on: defaults), 0,
+                       "counter must stay zero for sub-cap retries — only final-exhaustion drops count")
+        let count = await queue.count()
+        XCTAssertEqual(count, 1, "sub-cap retry must stay in queue")
+    }
+
     /// Partial success: some entries succeed, others fail — only the failing ones
     /// are retained with bumped retryCount.
     func testFlushPartialSuccess() async {

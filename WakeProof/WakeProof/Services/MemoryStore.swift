@@ -52,6 +52,18 @@ actor MemoryStore {
     /// that landed a partial line doesn't leave the count off forever.
     private var cachedHistoryLineCount: Int?
 
+    /// P18 (Stage 6 Wave 2): instrumentation counter for the over-cap branch.
+    /// Each `appendHistory` that pushes `total > historyMaxEntries` emits a
+    /// `logger.warning` AND bumps this counter. Tests read the counter to
+    /// assert the branch fired; previously there was zero coverage for the
+    /// cap-exceeded path because `logger.warning` is asynchronous and
+    /// unobservable from XCTest.
+    ///
+    /// Not exposed in production APIs — an @testable read-only accessor
+    /// lives in an extension so the signal stays test-only without
+    /// polluting the module's public surface.
+    private(set) var overCapWarningsEmitted: Int = 0
+
     // MARK: - Public API
 
     init(configuration: Configuration) {
@@ -155,8 +167,9 @@ actor MemoryStore {
         // `outputFormatting = [.sortedKeys]` is specific to the JSONL row
         // write path (deterministic field order → clean diffs when the file
         // is inspected with `git diff` or `jq`). The shared
-        // `SharedJSON.iso8601Encoder` has no such option, so sharing would
-        // silently change the on-disk JSONL shape.
+        // `SharedJSON.encodeISO8601` helper (P22, Stage 6 Wave 2) has no
+        // such option, so sharing would silently change the on-disk JSONL
+        // shape.
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
@@ -201,6 +214,10 @@ actor MemoryStore {
         let total = incrementedHistoryLineCount(for: file)
         if total > configuration.historyMaxEntries {
             logger.warning("history.jsonl over cap (\(total, privacy: .public) > \(self.configuration.historyMaxEntries, privacy: .public)); rotation deferred to Day 5")
+            // P18 (Stage 6 Wave 2): bump the instrumentation counter so tests
+            // can assert this branch fires. Logger.warning is fire-and-forget
+            // and unobservable from XCTest; the counter closes that gap.
+            overCapWarningsEmitted += 1
         }
     }
 
@@ -326,7 +343,7 @@ actor MemoryStore {
         let entries: [MemoryEntry] = lines.compactMap { line in
             guard !line.isEmpty,
                   let data = line.data(using: .utf8) else { return nil }
-            do { return try SharedJSON.iso8601Decoder.decode(MemoryEntry.self, from: data) }
+            do { return try SharedJSON.decodeISO8601(MemoryEntry.self, from: data) }
             catch {
                 logger.error("history.jsonl line decode failed, skipping: \(error.localizedDescription, privacy: .public)")
                 return nil

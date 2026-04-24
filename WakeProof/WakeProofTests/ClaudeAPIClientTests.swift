@@ -406,6 +406,30 @@ final class ClaudeAPIClientTests: XCTestCase {
                        """)
     }
 
+    /// P16 (Stage 6 Wave 2): computation-anchor test. The sibling
+    /// `testV3SystemPromptSHA256IsStable` snapshot-tests the prompt bytes, but
+    /// it's self-anchored: if someone typo'd `%01x` (truncated hex) or swapped
+    /// `SHA256.hash` for `SHA384.hash`, the test would ALSO capture the broken
+    /// output on the next `expected...` update and become unfalsifiable
+    /// forever.
+    ///
+    /// This anchor fixes that: the expected hash below is SHA-256 of the
+    /// static ASCII string "WakeProof" and is known-good (computed with
+    /// `printf '%s' "WakeProof" | shasum -a 256`). If the hashing code path
+    /// in the sibling test ever produces malformed output, this anchor test
+    /// fails IN ADDITION — flagging the regression independently of any
+    /// prompt edit. The two tests together pin both "format is right" (here)
+    /// and "bytes haven't changed" (sibling).
+    func testSHA256ComputationMatchesKnownAnchor() {
+        // Anchor: SHA-256 of "WakeProof" (UTF-8) — deterministic, public,
+        // verifiable via `printf '%s' "WakeProof" | shasum -a 256`.
+        let data = Data("WakeProof".utf8)
+        let digest = SHA256.hash(data: data)
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(hex, "bf50e90cc4de610a24caf457489b4e88297de25ebb42c22e4e483ab126858d8a",
+                       "SHA-256 computation format has changed — the hashing code path in the sibling prompt-checksum test is now untrustworthy")
+    }
+
     // MARK: - Layer 2 ClaudeAPIClient wiring
 
     func testDefaultTemplateIsV3() {

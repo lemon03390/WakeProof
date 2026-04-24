@@ -229,7 +229,7 @@ struct ClaudeAPIClient: ClaudeVisionClient {
                 struct Inner: Decodable { let type: String?; let message: String? }
                 let error: Inner?
             }
-            if let body = try? SharedJSON.plainDecoder.decode(ProxyError.self, from: data),
+            if let body = try? SharedJSON.decodePlain(ProxyError.self, from: data),
                let type = body.error?.type,
                ["upstream_fetch_failed", "upload_timeout", "body_too_large"].contains(type) {
                 logger.error("Proxy-layer failure type=\(type, privacy: .public) status=\(http.statusCode, privacy: .public) in \(elapsed, privacy: .public)s")

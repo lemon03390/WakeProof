@@ -472,4 +472,85 @@ final class OvernightAgentClientTests: XCTestCase {
             XCTFail("wrong error: \(error)")
         }
     }
+
+    // MARK: - P15: partial-failure agent-leak prevention
+
+    /// P15 (Stage 6 Wave 2): `createAgent()` succeeds, `createEnvironment()`
+    /// throws. Previously the agent ID was persisted BEFORE env-create ran, so
+    /// the next call's `cached agent ∧ missing env` guard failed, fell into the
+    /// create-fresh branch, and made ANOTHER agent — original one orphaned at
+    /// $0.08/hr until Anthropic's 24h ceiling kicked in. Fix: persist NEITHER
+    /// ID until BOTH resources land.
+    ///
+    /// Test: stub `/v1/agents` to 200 + id, stub `/v1/environments` to 500.
+    /// Call ensureAgentAndEnvironment, expect throw. Assert `agentIDKey` is
+    /// NOT set in defaults. Re-calling should create a fresh pair, not reuse
+    /// the orphaned agent.
+    func testPartialFailureDoesNotPersistAgentIDIfEnvCreateThrows() async {
+        StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/v1/agents") {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "agent_first"])
+                return (response, body)
+            } else if path.hasSuffix("/v1/environments") {
+                // 500 triggers OvernightAgentError.httpError in the client.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+                return (response, Data("{\"error\": \"env create failed\"}".utf8))
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        do {
+            _ = try await client.ensureAgentAndEnvironment()
+            XCTFail("env-create failure must propagate as a throw")
+        } catch {
+            // Expected — the env-create 500 bubbles up.
+        }
+
+        // P15 critical invariant: the orphaned agent must NOT be persisted.
+        // If this assertion flips, the next ensureAgentAndEnvironment call
+        // would see a cached agent but no env, and (pre-P15) would create
+        // another agent — silently leaking $0.08/hr until Anthropic 24h TTL.
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightAgentClient.agentIDKey),
+                     "agentID must NOT be persisted when env-create fails — prevents orphaned-agent leak")
+        XCTAssertNil(suiteDefaults.string(forKey: OvernightAgentClient.environmentIDKey),
+                     "envID obviously not persisted since env-create failed")
+    }
+
+    /// P15 (Stage 6 Wave 2): corruption recovery — if one key is present and
+    /// the other is missing (pre-P15 build, or direct defaults tamper), the
+    /// ensureAgentAndEnvironment call must wipe both and recreate cleanly.
+    /// Previously `if let a, let e` succeeded only on both-present, falling
+    /// through to the create branch on either-missing — but the create
+    /// branch re-persisted the missing side, leaving the STALE other side
+    /// in place. Result: a zombie pairing of new-agent + stale-env (or
+    /// inverse), which fails at the first use.
+    func testEnsureAgentAndEnvironmentWipesXORStateAndRecreates() async throws {
+        // Seed half the pair — agent present, env missing.
+        suiteDefaults.set("agent_stale", forKey: OvernightAgentClient.agentIDKey)
+
+        StubProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if path.hasSuffix("/v1/agents") {
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "agent_fresh"])
+                return (response, body)
+            } else if path.hasSuffix("/v1/environments") {
+                let body = try! JSONSerialization.data(withJSONObject: ["id": "env_fresh"])
+                return (response, body)
+            }
+            return (response, Data())
+        }
+        let client = makeClient()
+        let (agentID, envID) = try await client.ensureAgentAndEnvironment()
+
+        // Stale agent must be replaced, not reused.
+        XCTAssertEqual(agentID, "agent_fresh",
+                       "XOR-state detection must wipe stale agent and mint a fresh one")
+        XCTAssertEqual(envID, "env_fresh")
+        XCTAssertEqual(suiteDefaults.string(forKey: OvernightAgentClient.agentIDKey), "agent_fresh")
+        XCTAssertEqual(suiteDefaults.string(forKey: OvernightAgentClient.environmentIDKey), "env_fresh")
+    }
 }

@@ -34,18 +34,39 @@ import os
 
 /// One failed memory write pending re-flush. Codable so it survives across
 /// launches via UserDefaults.
+///
+/// P20 (Stage 6 Wave 2): `retryCount` is `let` (previously `var`) so the
+/// struct is fully immutable at the type level. The flush loop bumps the
+/// count via `bumpingRetry()` which returns a new value — matching the
+/// actor-safe copy-semantics the codebase prefers everywhere else. The
+/// previous `var retryCount` worked only because no code held a reference
+/// to the same instance across a mutation; making that an invariant of
+/// the type rather than a local-discipline concern closes that window
+/// before a future refactor can accidentally share a mutable copy.
 struct PendingMemoryWrite: Codable, Equatable, Sendable {
 
     let entry: MemoryEntry
     let profileDelta: String?
     let enqueuedAt: Date
-    var retryCount: Int
+    let retryCount: Int
 
     init(entry: MemoryEntry, profileDelta: String?, enqueuedAt: Date = .now, retryCount: Int = 0) {
         self.entry = entry
         self.profileDelta = profileDelta
         self.enqueuedAt = enqueuedAt
         self.retryCount = retryCount
+    }
+
+    /// P20 (Stage 6 Wave 2): return a copy with `retryCount` bumped by 1.
+    /// The flush loop uses this in place of the old `var bumped = pending;
+    /// bumped.retryCount += 1` pattern so the struct can stay immutable.
+    func bumpingRetry() -> Self {
+        Self(
+            entry: entry,
+            profileDelta: profileDelta,
+            enqueuedAt: enqueuedAt,
+            retryCount: retryCount + 1
+        )
     }
 }
 
@@ -63,6 +84,15 @@ actor PendingMemoryWriteQueue {
     static let defaultsKey = "com.wakeproof.pending.memory"
     static let maxQueueEntries = 16
     static let maxRetryAttempts = 5
+
+    /// P10 (Stage 6 Wave 2): UserDefaults key for the cumulative count of
+    /// memory-write rows dropped after exhausting `maxRetryAttempts`. The
+    /// value survives relaunches so AlarmSchedulerView's banner reflects
+    /// every drop since install, not just the current session. Prior to P10
+    /// the drop was logger-only — a row silently vanished with no user-
+    /// visible signal, which is the exact scenario the promoted rule ("no
+    /// silent catch") protects against.
+    static let droppedCountKey = "com.wakeproof.pending.memory.droppedCount"
 
     /// P8 (Stage 6 Wave 1): `nonisolated(unsafe)` so the sync enqueue path can
     /// reach the UserDefaults instance without an actor hop. See
@@ -115,21 +145,30 @@ actor PendingMemoryWriteQueue {
         let original = sharedLock.withLock { _ in loadQueueUnsafe() }
         guard !original.isEmpty else { return 0 }
         var survivors: [PendingMemoryWrite] = []
+        var droppedThisPass = 0
         for pending in original {
             do {
                 try await writer(pending.entry, pending.profileDelta)
                 logger.info("Flushed pending memory write (retryCount=\(pending.retryCount, privacy: .public))")
             } catch {
-                var bumped = pending
-                bumped.retryCount += 1
+                let bumped = pending.bumpingRetry()
                 if bumped.retryCount >= Self.maxRetryAttempts {
                     logger.error("Memory write retry exhausted after \(bumped.retryCount, privacy: .public) attempts — dropping: \(error.localizedDescription, privacy: .public)")
+                    // P10 (Stage 6 Wave 2): bump the UserDefaults-backed
+                    // counter so the AlarmSchedulerView banner can surface
+                    // "N writes dropped" to the user. Before P10 this drop
+                    // was logger.error only — silent from the user's side,
+                    // which is the banned pattern the promoted rule targets.
+                    droppedThisPass += 1
                     // drop — do NOT append to survivors
                 } else {
                     logger.warning("Memory write flush attempt \(bumped.retryCount, privacy: .public) failed, keeping in queue: \(error.localizedDescription, privacy: .public)")
                     survivors.append(bumped)
                 }
             }
+        }
+        if droppedThisPass > 0 {
+            Self.incrementDroppedCount(by: droppedThisPass, on: defaults)
         }
         // P8: merge any rows that landed during the await window. Without this,
         // a concurrent enqueue during flush would be clobbered by the save-back.
@@ -167,7 +206,44 @@ actor PendingMemoryWriteQueue {
     func reset() {
         sharedLock.withLock { _ in
             defaults.removeObject(forKey: Self.defaultsKey)
+            // P10 (Stage 6 Wave 2): also clear the dropped-count so tests
+            // start from a known-zero state. Production callers should use
+            // the static `resetDroppedCount(on:)` if they ever need this
+            // (e.g. a DEBUG "clear memory retry state" button).
+            defaults.removeObject(forKey: Self.droppedCountKey)
         }
+    }
+
+    /// P10 (Stage 6 Wave 2): total rows dropped across all flushes since
+    /// install. Reads from the default UserDefaults; see
+    /// `droppedCount(on:)` for the injected-suite variant tests can use.
+    /// Nonisolated + static so AlarmSchedulerView can read it without
+    /// hopping into the actor — the backing key is UserDefaults, which is
+    /// documented thread-safe for primitive reads.
+    nonisolated static func droppedCount() -> Int {
+        droppedCount(on: .standard)
+    }
+
+    /// Test-suite variant of `droppedCount()` that reads from an injected
+    /// UserDefaults. Same thread-safety guarantee as the default-suite form.
+    nonisolated static func droppedCount(on defaults: UserDefaults) -> Int {
+        defaults.integer(forKey: droppedCountKey)
+    }
+
+    /// P10 (Stage 6 Wave 2): test helper — wipe the dropped counter so tests
+    /// that assert on bumps start from zero. Production callers should never
+    /// need this.
+    nonisolated static func resetDroppedCount(on defaults: UserDefaults) {
+        defaults.removeObject(forKey: droppedCountKey)
+    }
+
+    /// Increment the persisted dropped-count under the shared UserDefaults
+    /// suite. Called from inside the flush loop when a row exhausts its
+    /// retry budget. Cheap — a single read + write under the default
+    /// isolation lock UserDefaults already provides.
+    fileprivate static func incrementDroppedCount(by delta: Int, on defaults: UserDefaults) {
+        let current = defaults.integer(forKey: droppedCountKey)
+        defaults.set(current + delta, forKey: droppedCountKey)
     }
 
     // MARK: - Private
@@ -194,7 +270,7 @@ actor PendingMemoryWriteQueue {
     private nonisolated func loadQueueUnsafe() -> [PendingMemoryWrite] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
         do {
-            return try SharedJSON.iso8601Decoder.decode([PendingMemoryWrite].self, from: data)
+            return try SharedJSON.decodeISO8601([PendingMemoryWrite].self, from: data)
         } catch {
             logger.error("Pending-memory queue decode failed, wiping: \(error.localizedDescription, privacy: .public)")
             defaults.removeObject(forKey: Self.defaultsKey)
@@ -209,7 +285,7 @@ actor PendingMemoryWriteQueue {
             return
         }
         do {
-            let data = try SharedJSON.iso8601Encoder.encode(queue)
+            let data = try SharedJSON.encodeISO8601(queue)
             defaults.set(data, forKey: Self.defaultsKey)
         } catch {
             logger.error("Pending-memory queue encode failed: \(error.localizedDescription, privacy: .public)")

@@ -30,6 +30,23 @@ final class VisionVerifier {
     private(set) var currentAttemptIndex: Int = 0        // 0 before first call, 1 after first, 2 after retry
     private(set) var currentAntiSpoofInstruction: String?
 
+    /// P14 (Stage 6 Wave 2): set to `true` when `MemoryStore.read()` throws
+    /// `.invalidUserUUID`. That error is the signal that the UserDefaults-
+    /// backed UUID was externally mutated (path-traversal guard refused to
+    /// open the directory) — a security-relevant state distinct from the
+    /// first-install "no memory yet" case, both of which previously collapsed
+    /// into a silent `memoryContext = nil`. AlarmSchedulerView's systemBanner
+    /// picks this up as the highest-priority surface so the user is prompted
+    /// to reinstall (regenerating identity wipes the stored UUID in the
+    /// process).
+    ///
+    /// Never flips back to false at runtime: once the UUID is out of shape
+    /// the only remediation is a reinstall. The DEBUG menu (if present)
+    /// could clear it manually, but the banner staying up until then is
+    /// intentional — a stale warning is better than a fixed one the user
+    /// dismissed and immediately forgot.
+    private(set) var requiresReinstall: Bool = false
+
     /// Derived from the scheduler's phase — `.verifying` is the only state in which a
     /// Claude call is pending. Eliminates the drift risk of maintaining a separate
     /// `isInFlight` flag alongside `scheduler.phase`: any future branch that forgot to
@@ -147,6 +164,18 @@ final class VisionVerifier {
                 let snapshot = try await memoryStore.read()
                 memoryContext = MemoryPromptBuilder.render(snapshot)
                 logger.info("Memory loaded: profile=\(snapshot.profile != nil, privacy: .public) history=\(snapshot.recentHistory.count, privacy: .public)/\(snapshot.totalHistoryCount, privacy: .public)")
+            } catch MemoryStoreError.invalidUserUUID {
+                // P14 (Stage 6 Wave 2): `.invalidUserUUID` means the stored UUID
+                // was externally mutated (path-traversal guard refused to open
+                // the directory). This is security-relevant — distinct from the
+                // first-install no-memory-yet case which also returns nil. Flip
+                // the @Observable flag so AlarmSchedulerView's banner can warn
+                // the user to reinstall. Verification still proceeds without
+                // memory context so the alarm itself isn't bricked (memory is
+                // ancillary), but the signal is no longer silent.
+                logger.fault("MemoryStore rejected UUID (invalidUserUUID) — reinstall recommended. Skipping memory context for this verify.")
+                requiresReinstall = true
+                memoryContext = nil
             } catch {
                 logger.fault("MemoryStore read failed, verifying without memory: \(error.localizedDescription, privacy: .public)")
                 memoryContext = nil

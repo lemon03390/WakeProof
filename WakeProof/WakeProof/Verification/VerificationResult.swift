@@ -153,7 +153,7 @@ struct VerificationResult: Codable, Equatable {
         guard let data = candidate.data(using: .utf8) else {
             throw VerificationParseError.invalidUTF8
         }
-        return try SharedJSON.plainDecoder.decode(VerificationResult.self, from: data)
+        return try SharedJSON.decodePlain(VerificationResult.self, from: data)
     }
 
     /// Find the first balanced `{ ... }` substring. Handles nested braces but not

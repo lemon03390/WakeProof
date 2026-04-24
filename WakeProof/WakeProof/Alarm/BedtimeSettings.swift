@@ -29,7 +29,7 @@ struct BedtimeSettings: Codable, Equatable {
     static func load(from defaults: UserDefaults = .standard) -> BedtimeSettings {
         guard let data = defaults.data(forKey: key) else { return .defaultSettings }
         do {
-            return try SharedJSON.plainDecoder.decode(BedtimeSettings.self, from: data)
+            return try SharedJSON.decodePlain(BedtimeSettings.self, from: data)
         } catch {
             logger.error("BedtimeSettings decode failed: \(error.localizedDescription, privacy: .public) — reverting to defaults")
             return .defaultSettings
@@ -44,7 +44,7 @@ struct BedtimeSettings: Codable, Equatable {
     @discardableResult
     func save(to defaults: UserDefaults = .standard) -> Bool {
         do {
-            let data = try SharedJSON.plainEncoder.encode(self)
+            let data = try SharedJSON.encodePlain(self)
             defaults.set(data, forKey: Self.key)
             Self.logger.info("BedtimeSettings saved: \(self.hour, privacy: .public):\(self.minute, privacy: .public) enabled=\(self.isEnabled, privacy: .public)")
             return true

@@ -31,7 +31,7 @@ struct WakeWindow: Codable, Equatable {
             return .defaultWindow
         }
         do {
-            return try SharedJSON.plainDecoder.decode(WakeWindow.self, from: data)
+            return try SharedJSON.decodePlain(WakeWindow.self, from: data)
         } catch {
             logger.error("Failed to decode WakeWindow — falling back to default: \(error.localizedDescription, privacy: .public)")
             return .defaultWindow
@@ -44,7 +44,7 @@ struct WakeWindow: Codable, Equatable {
     @discardableResult
     func save(to defaults: UserDefaults = .standard) -> Bool {
         do {
-            let data = try SharedJSON.plainEncoder.encode(self)
+            let data = try SharedJSON.encodePlain(self)
             defaults.set(data, forKey: Self.key)
             return true
         } catch {
