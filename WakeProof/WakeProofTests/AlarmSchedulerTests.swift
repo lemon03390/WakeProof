@@ -292,6 +292,54 @@ final class AlarmSchedulerTests: XCTestCase {
         XCTAssertNil(scheduler.nextFireAt)
     }
 
+    // MARK: - G3 (Wave 5): chained backup notifications
+
+    /// G3: the single backup `UNNotificationRequest` has been replaced with a chain of
+    /// three at fireAt + 0s / +90s / +180s so a force-quit mid-ring still leaves three
+    /// timed beeps on the phone. This test locks the count and the distinct-identifier
+    /// invariant — anyone refactoring the constants can't silently collapse them.
+    func testBackupIdentifiersAreThreeUnique() {
+        let identifiers = AlarmScheduler.backupNotificationIdentifiers
+        XCTAssertEqual(identifiers.count, 3, "G3 expects exactly three chained backup notifications")
+        XCTAssertEqual(Set(identifiers).count, 3, "backup identifiers must be distinct — iOS keys pending requests by identifier and duplicates would silently coalesce")
+        // Namespace check: all three must live under the agreed prefix so `cancel()`
+        // can't accidentally remove unrelated pending requests from other subsystems.
+        for identifier in identifiers {
+            XCTAssertTrue(identifier.hasPrefix("com.wakeproof.alarm.next.backup."),
+                          "identifier \(identifier) must use the .backup.N namespace")
+        }
+    }
+
+    /// G3: the offsets array drives the scheduling loop. Locking [0, 90, 180] prevents
+    /// a drive-by tweak to "a longer chain" or "closer-together beeps" without
+    /// reviewing the UX tradeoff (see docs/self-sabotage-defense-analysis.md §7.2).
+    func testBackupOffsetsAreZeroNinetyOneEighty() {
+        XCTAssertEqual(AlarmScheduler.backupOffsetsSeconds, [0, 90, 180],
+                       "G3 spec pins the chain to 0s / 90s / 180s — changes need a doc update")
+        // Parallel-array invariant: offsets.count must match identifiers.count
+        // because `scheduleBackupNotification` zips them by index.
+        XCTAssertEqual(AlarmScheduler.backupOffsetsSeconds.count,
+                       AlarmScheduler.backupNotificationIdentifiers.count,
+                       "offsets and identifiers arrays must have the same length — the scheduling loop indexes them together")
+    }
+
+    /// G3: body copy escalates across the three pings. Distinctness matters for UX
+    /// (iOS coalesces identical-body notifications in the Notification Center tray)
+    /// and for the demo narrative (three different messages across three minutes
+    /// reads as deliberate, not as one notification that kept repeating). The exact
+    /// strings are pinned so a copy-editing pass can't silently skip here.
+    func testBackupCopyIsDistinctPerOffset() {
+        let bodies = AlarmScheduler.backupNotificationBodies
+        XCTAssertEqual(bodies.count, 3, "three bodies for three backups")
+        XCTAssertEqual(Set(bodies).count, 3, "each backup must have distinct body copy")
+        XCTAssertEqual(bodies[0], "Time to prove you're awake.")
+        XCTAssertEqual(bodies[1], "Still sleeping? WakeProof needs your photo.")
+        XCTAssertEqual(bodies[2], "Your commitment expires soon.")
+        // Parallel-array invariant: bodies.count must match identifiers.count.
+        XCTAssertEqual(bodies.count, AlarmScheduler.backupNotificationIdentifiers.count,
+                       "bodies and identifiers must have matching counts")
+    }
+
     // MARK: - P5: updateWindow returns Bool
 
     /// P5 (Stage 6 Wave 1): `updateWindow` now returns Bool so AlarmSchedulerView's

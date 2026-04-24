@@ -74,7 +74,32 @@ final class AlarmScheduler {
 
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "scheduler")
     private let notificationCenter = UNUserNotificationCenter.current()
-    private let backupNotificationIdentifier = "com.wakeproof.alarm.next"
+    /// G3 (Wave 5): three chained backup notifications at fireAt + 0s / +90s / +180s.
+    /// See docs/self-sabotage-defense-analysis.md §7.2 + §12.4-G3. The force-quit
+    /// narrative requires that killing the app mid-ring still leaves timed beeps on
+    /// the phone — one beep is one beep; three beeps across 3 minutes is a meaningful
+    /// self-imposed cost. Identifiers are deliberately namespaced under `.backup.N`
+    /// so they don't collide with the pre-G3 `com.wakeproof.alarm.next` identifier
+    /// from earlier schema versions (if any survived into a user's pending tray
+    /// they're harmless stragglers, not duplicates of ours).
+    static let backupNotificationIdentifiers = [
+        "com.wakeproof.alarm.next.backup.1",
+        "com.wakeproof.alarm.next.backup.2",
+        "com.wakeproof.alarm.next.backup.3",
+    ]
+    /// Offsets in seconds from `fireAt` for each backup. Zipped with
+    /// `backupNotificationIdentifiers` + `backupNotificationBodies` to build
+    /// one UNNotificationRequest per iteration — keeps the scheduling loop
+    /// self-evident and the three arrays obviously parallel.
+    static let backupOffsetsSeconds: [TimeInterval] = [0, 90, 180]
+    /// Body copy per backup. Title stays "WakeProof" for all three; only the body
+    /// escalates in urgency to reinforce the contract language without breaking
+    /// brand voice. English-only per CLAUDE.md — localization is post-hackathon.
+    static let backupNotificationBodies = [
+        "Time to prove you're awake.",
+        "Still sleeping? WakeProof needs your photo.",
+        "Your commitment expires soon.",
+    ]
     private static let lastFireAtDefaultsKey = "com.wakeproof.alarm.lastFireAt"
     private var fireTask: Task<Void, Never>?
     private var backupScheduleTask: Task<Void, Never>?
@@ -198,7 +223,7 @@ final class AlarmScheduler {
         // fire task deterministically. `&+=` wraps safely; a 64-bit overflow at
         // one bump per fire is absurdly past device lifetime.
         schedulingGeneration &+= 1
-        notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
+        notificationCenter.removePendingNotificationRequests(withIdentifiers: Self.backupNotificationIdentifiers)
         // Intentionally NOT removing delivered notifications here — see fire(). Delivered
         // banners auto-dismiss when the user opens the app. Aggressive removal would kill
         // the iOS-side audible cue if the in-app alarm hasn't started yet.
@@ -232,9 +257,19 @@ final class AlarmScheduler {
             logger.warning("beginCapturing ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
+        // G3 (Wave 5): cancel the +90s / +180s chained backups the moment the user
+        // enters the camera flow. Without this, a user who takes >90s in the capture
+        // UI (perfectly plausible — anti-spoof re-prompts, lighting retries) gets the
+        // second and third notification pings firing on top of an already-open UI,
+        // which is annoying and (worse) breaks the contract language "WakeProof needs
+        // your photo" when WakeProof is literally mid-photo. We don't call the full
+        // `cancel()` because that tears down the fire task itself — wrong while we're
+        // actively mid-fire; the +0s banner has already been delivered and the rest
+        // are the ones we care about clearing.
+        notificationCenter.removePendingNotificationRequests(withIdentifiers: Self.backupNotificationIdentifiers)
         lastCaptureError = nil
         phase = .capturing
-        logger.info("Phase → capturing")
+        logger.info("Phase → capturing (pending backup notifications cleared)")
     }
 
     /// Transition capturing → ringing when the camera cancels, fails, or persistence fails.
@@ -379,48 +414,81 @@ final class AlarmScheduler {
     private func scheduleBackupNotification(fireAt: Date, generation: UInt64) async {
         let settings = await notificationCenter.notificationSettings()
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
-            logger.warning("Backup notification skipped — notifications not authorized (status=\(settings.authorizationStatus.rawValue, privacy: .public))")
+            logger.warning("Backup notifications skipped — not authorized (status=\(settings.authorizationStatus.rawValue, privacy: .public))")
             return
         }
-        let content = UNMutableNotificationContent()
-        content.title = "WakeProof"
-        content.body = "Time to prove you're awake."
-        // Custom notification sounds must be CAF/AIFF/WAV — .m4a is silently rejected. We ship
-        // alarm.caf (Int16 PCM) alongside alarm.m4a; the m4a is used by in-app AVAudioPlayer,
-        // the caf is used here for the notification banner sound. iOS caps this at 30 seconds.
-        content.sound = UNNotificationSound(named: UNNotificationSoundName("alarm.caf"))
-        content.interruptionLevel = .timeSensitive
-        // Sub-day fires use UNTimeIntervalNotificationTrigger so an overnight timezone change
-        // doesn't shift the wall-clock target. Day-spanning fires fall back to calendar
-        // matching, which Apple still re-evaluates against the active TZ at delivery, but
-        // that's the right default semantic for "wake me at 6:30 wherever I am tomorrow".
-        let interval = fireAt.timeIntervalSinceNow
-        let trigger: UNNotificationTrigger
-        if interval > 0, interval <= 23 * 60 * 60 {
-            trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
-        } else {
-            let triggerComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute],
-                from: fireAt
-            )
-            trigger = UNCalendarNotificationTrigger(dateMatching: triggerComponents, repeats: false)
-        }
-        let request = UNNotificationRequest(identifier: backupNotificationIdentifier, content: content, trigger: trigger)
-        do {
-            try await notificationCenter.add(request)
-            // UNUserNotificationCenter.add is not a cooperative cancellation point. Two ways
-            // a stale request can land after we no longer want it:
-            //   1. The cooperative cancel() ran before resolve.
-            //   2. fire() (or another scheduleNextFireIfEnabled) ran and bumped the generation.
-            // Both collapse to "my generation is no longer the active one".
+        // G3 (Wave 5): three chained backups at fireAt + 0s / +90s / +180s. The auth check
+        // + generation capture above happen ONCE — if auth is denied none of the three
+        // schedule; if auth flips mid-loop we keep going (the user having granted moments
+        // ago is the realistic window and partial scheduling is worse than full). The
+        // three arrays are parallel by construction (see static declarations).
+        let offsets = Self.backupOffsetsSeconds
+        let identifiers = Self.backupNotificationIdentifiers
+        let bodies = Self.backupNotificationBodies
+        for (index, offset) in offsets.enumerated() {
+            // Early-exit at the top of every iteration so we don't waste an .add() call
+            // on a generation that's already stale. Self-heal of previously-landed
+            // requests happens in the post-add branch below.
             if Task.isCancelled || generation != schedulingGeneration {
-                notificationCenter.removePendingNotificationRequests(withIdentifiers: [backupNotificationIdentifier])
-                logger.info("Backup notification self-healed after late-resolve (gen=\(generation, privacy: .public) current=\(self.schedulingGeneration, privacy: .public))")
+                notificationCenter.removePendingNotificationRequests(withIdentifiers: identifiers)
+                logger.info("Backup chain aborted pre-add at index \(index, privacy: .public) — generation changed (gen=\(generation, privacy: .public) current=\(self.schedulingGeneration, privacy: .public))")
                 return
             }
-            logger.info("Backup notification scheduled for \(fireAt.ISO8601Format(), privacy: .public)")
-        } catch {
-            logger.error("Failed to schedule backup notification: \(error.localizedDescription, privacy: .public)")
+            let identifier = identifiers[index]
+            let body = bodies[index]
+            let content = UNMutableNotificationContent()
+            content.title = "WakeProof"
+            content.body = body
+            // Custom notification sounds must be CAF/AIFF/WAV — .m4a is silently rejected. We ship
+            // alarm.caf (Int16 PCM) alongside alarm.m4a; the m4a is used by in-app AVAudioPlayer,
+            // the caf is used here for the notification banner sound. iOS caps this at 30 seconds.
+            content.sound = UNNotificationSound(named: UNNotificationSoundName("alarm.caf"))
+            content.interruptionLevel = .timeSensitive
+            let targetDate = fireAt.addingTimeInterval(offset)
+            // Sub-day fires use UNTimeIntervalNotificationTrigger so an overnight timezone change
+            // doesn't shift the wall-clock target. Day-spanning fires fall back to calendar
+            // matching, which Apple still re-evaluates against the active TZ at delivery, but
+            // that's the right default semantic for "wake me at 6:30 wherever I am tomorrow".
+            // UNTimeIntervalNotificationTrigger requires a strictly positive interval; if the
+            // +0s / +90s entries have already passed by the time we get here (e.g. the process
+            // was rehydrated post-fire) we fall back to calendar matching which iOS treats as
+            // "fire ASAP at the next matching minute". Acceptable degradation for the tail
+            // backups; the primary (+0s) is the one that matters for demo reliability.
+            let interval = targetDate.timeIntervalSinceNow
+            let trigger: UNNotificationTrigger
+            if interval > 0, interval <= 23 * 60 * 60 {
+                trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+            } else {
+                let triggerComponents = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute],
+                    from: targetDate
+                )
+                trigger = UNCalendarNotificationTrigger(dateMatching: triggerComponents, repeats: false)
+            }
+            let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+            do {
+                try await notificationCenter.add(request)
+                // UNUserNotificationCenter.add is not a cooperative cancellation point. Two ways
+                // a stale request can land after we no longer want it:
+                //   1. The cooperative cancel() ran before resolve.
+                //   2. fire() (or another scheduleNextFireIfEnabled) ran and bumped the generation.
+                // Both collapse to "my generation is no longer the active one". When we detect
+                // that, we rip out ALL three identifiers — partial state (e.g. the +0s landed but
+                // the +90s was cancelled) is worse than no backup at all, because the ringing UI
+                // + audio keepalive are still active and the inconsistent notification tail just
+                // confuses the user.
+                if Task.isCancelled || generation != schedulingGeneration {
+                    notificationCenter.removePendingNotificationRequests(withIdentifiers: identifiers)
+                    logger.info("Backup chain self-healed after late-resolve at index \(index, privacy: .public) (gen=\(generation, privacy: .public) current=\(self.schedulingGeneration, privacy: .public))")
+                    return
+                }
+                logger.info("Backup notification \(index + 1, privacy: .public)/3 scheduled for \(targetDate.ISO8601Format(), privacy: .public)")
+            } catch {
+                // Loop continues: one iteration failing shouldn't prevent the others from
+                // scheduling. E.g. if iOS is at the 64-pending-request cap on identifier 2,
+                // we still want the +0s that landed to ring the phone.
+                logger.error("Failed to schedule backup notification \(index + 1, privacy: .public)/3: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
