@@ -81,6 +81,12 @@ struct MorningBriefingView: View {
     @State private var commitmentNoteOffset: CGFloat = 24
     @State private var commitmentNoteOpacity: Double = 0
 
+    /// Task 4.3: observation block ceremony fade-in. Starts fully transparent
+    /// and fades to 1 over 600ms easeOut delayed 900ms after .onAppear — the
+    /// tail of the animation sequence, after sunrise (1.2s total) and commitment
+    /// note (400ms spring, lands ~900ms) have both resolved.
+    @State private var observationOpacity: Double = 0
+
     private static let logger = Logger(subsystem: LogSubsystem.overnight, category: "briefing-view")
 
     var body: some View {
@@ -133,18 +139,20 @@ struct MorningBriefingView: View {
                 // opacity so it reads as a secondary note rather than competing
                 // with the briefing's headline prose.
                 if let observation, !observation.isEmpty {
-                    VStack(spacing: 8) {
+                    VStack(spacing: WPSpacing.xs2) {
                         Text("Claude noticed")
-                            .font(.caption)
+                            .wpFont(.caption)
                             .foregroundStyle(Color.wpCream50.opacity(0.65))
                         Text(observation)
-                            .font(.footnote)
+                            .wpFont(.footnote)
                             .italic()
                             .multilineTextAlignment(.center)
                             .foregroundStyle(Color.wpCream50.opacity(0.65))
-                            .padding(.horizontal, 28)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, WPSpacing.xl2)
                     }
-                    .padding(.top, 16)
+                    .padding(.top, WPSpacing.md)
+                    .opacity(observationOpacity)
                 }
                 #if DEBUG
                 // Diagnostic surface for demo prep: the reason code lets you
@@ -223,6 +231,12 @@ struct MorningBriefingView: View {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.4)) {
                 commitmentNoteOffset = 0
                 commitmentNoteOpacity = 1
+            }
+            // Task 4.3: observation fades in at 900ms — after sunrise (1.2s) and
+            // commitment note (lands ~900ms) have resolved, the observation
+            // ceremony completes the sequence at 1.5s+ total.
+            withAnimation(.easeOut(duration: 0.6).delay(0.9)) {
+                observationOpacity = 1
             }
         }
     }
