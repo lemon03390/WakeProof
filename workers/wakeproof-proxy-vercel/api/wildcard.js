@@ -28,6 +28,20 @@
 //   - B1: request-count metrics log line emitted on every validated request
 //     so post-facto rate-limit abuse can be surfaced from Vercel logs.
 
+import { timingSafeEqual } from 'node:crypto';
+
+// L1 (Wave 2.7): constant-time token compare. See api/v1/messages.js for the
+// full rationale — same implementation mirrored here because Vercel route
+// files are independent modules.
+function tokensEqual(clientToken, expectedToken) {
+  if (typeof clientToken !== 'string' || typeof expectedToken !== 'string') return false;
+  if (clientToken.length !== expectedToken.length) return false;
+  const clientBuf = Buffer.from(clientToken, 'utf8');
+  const expectedBuf = Buffer.from(expectedToken, 'utf8');
+  if (clientBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(clientBuf, expectedBuf);
+}
+
 /**
  * R1 allowlist — only these beta header values round-trip to Anthropic.
  * Split by comma so multiple betas in a single header are each validated;
@@ -75,7 +89,7 @@ export default async function handler(req, res) {
   }
 
   const clientToken = req.headers['x-wakeproof-token'];
-  if (!clientToken || clientToken !== expectedToken) {
+  if (!clientToken || !tokensEqual(clientToken, expectedToken)) {
     res.status(401).json({
       error: { type: 'unauthorized', message: 'Missing or invalid x-wakeproof-token' },
     });
@@ -227,6 +241,14 @@ export default async function handler(req, res) {
     }
   }
 
+  // L4 (Wave 2.7) SECURITY INVARIANT: upstreamHeaders is built from scratch —
+  // do NOT spread req.headers into this object. Client-supplied x-api-key must
+  // never reach Anthropic's upstream; the proxy holds the only credential that
+  // flows to Anthropic, and it comes exclusively from ANTHROPIC_API_KEY env.
+  // A future refactor that spreads req.headers here and relies on later-keys-win
+  // ordering would regress the B1+B2 fix; if a future maintainer needs to forward
+  // additional headers, pick them explicitly (like anthropic-version and
+  // anthropic-beta below), never bulk-spread.
   const upstreamHeaders = {
     'x-api-key': anthropicKey,
     'anthropic-version': anthropicVersion,

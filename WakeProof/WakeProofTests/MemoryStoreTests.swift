@@ -253,6 +253,43 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertEqual(values.isExcludedFromBackup, true)
     }
 
+    /// L3 (Wave 2.7): the excluded-from-backup URL resource value is an inode-level
+    /// attribute. An iOS restore-from-iCloud lands files as NEW inodes with default
+    /// resource values — so the flag set on first-create doesn't automatically
+    /// survive. The fix re-asserts `markingExcludedFromBackup()` on EVERY append
+    /// path, not just first-create. Test: append to an existing file and force-
+    /// strip the attribute first to simulate a restored inode; assert the next
+    /// append re-asserts the flag.
+    func testAppendHistoryReAssertsBackupExclusionOnExistingFile() async throws {
+        let uuid = UUID().uuidString
+        let store = makeStore(uuid: uuid)
+        // First append — creates the file with the flag set.
+        try await store.appendHistory(
+            MemoryEntry(timestamp: Date(timeIntervalSince1970: 1_745_466_662),
+                        verdict: "VERIFIED", confidence: 0.9, retryCount: 0, note: "first")
+        )
+        let file = root.appendingPathComponent(uuid).appendingPathComponent("history.jsonl")
+
+        // Simulate a restored-from-iCloud inode: clear the flag so the file's
+        // resource values look like a fresh restore.
+        var mutable = file
+        var rv = URLResourceValues()
+        rv.isExcludedFromBackup = false
+        try mutable.setResourceValues(rv)
+        let preValues = try file.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(preValues.isExcludedFromBackup, false,
+                       "test precondition: attribute cleared so next append must re-assert")
+
+        // Second append — hits the existing-file branch.
+        try await store.appendHistory(
+            MemoryEntry(timestamp: Date(timeIntervalSince1970: 1_745_466_663),
+                        verdict: "VERIFIED", confidence: 0.9, retryCount: 0, note: "second")
+        )
+        let postValues = try file.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(postValues.isExcludedFromBackup, true,
+                       "append path must re-assert excluded-from-backup on every write, not just first-create")
+    }
+
     // MARK: - R3: UTF-8-safe truncation
 
     /// R3 fix: when the profile is oversized AND contains no newline to fall back on,

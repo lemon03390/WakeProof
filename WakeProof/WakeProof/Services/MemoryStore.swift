@@ -165,8 +165,14 @@ actor MemoryStore {
             guard created else {
                 throw MemoryStoreError.fileCreationFailed
             }
-            file.markingExcludedFromBackup()
         }
+        // L3 (Wave 2.7): re-assert backup-exclusion on EVERY write path, not just
+        // first-create. An iOS restore-from-iCloud can land an inode that doesn't
+        // carry our previously-set excluded-from-backup flag (the flag is a URL
+        // resource value, attached to the inode — a restored file is a new inode
+        // with default resource values). Idempotent + cheap (URL resource value
+        // mutation, no disk round-trip on a no-op), so safe to run on every write.
+        file.markingExcludedFromBackup()
 
         // Capacity probe — log only. Rotation is Day 5.
         let (_, total) = loadHistory(in: userDir)
@@ -206,6 +212,9 @@ actor MemoryStore {
             // applyFileProtection is a no-op upgrade when the file was
             // already .complete. Retaining the call is defensive — a prior
             // build may have created the file at the weaker default.
+            // L3 (Wave 2.7): applyFileProtection also re-asserts the
+            // excluded-from-backup URL resource value, so the overwrite path
+            // is covered without additional code here.
             try bounded.write(to: file, options: [.atomic])
             try applyFileProtection(to: file)
         } else {

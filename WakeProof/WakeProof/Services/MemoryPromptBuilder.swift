@@ -70,14 +70,23 @@ enum MemoryPromptBuilder {
         return "| \(when) | \(entry.verdict) | \(confidence) | \(entry.retryCount) | \(note) |"
     }
 
-    /// Replace `<` and `>` with their HTML-encoded equivalents so Claude-authored
+    /// Replace `&`, `<`, and `>` with their HTML-encoded equivalents so Claude-authored
     /// content round-tripped through the memory store can't inject synthetic
     /// closing tags that break out of `<profile>` / `<recent_history>` and smuggle
     /// new instructions into the next system prompt. The v3 prompt describes the
     /// memory block as observed patterns, so encoded brackets read as literal
     /// characters — no decoder consumes them.
+    ///
+    /// L2 (Wave 2.7): `&` MUST be escaped FIRST. If we escaped `<` → `&lt;` first,
+    /// then did `&` → `&amp;`, the already-encoded `&lt;` would become `&amp;lt;` —
+    /// double-encoding that would display to Claude as the literal text "&lt;"
+    /// rather than a less-than sign. Escaping `&` first avoids the double-escape:
+    /// any `&` in the input becomes `&amp;` (including raw ampersands that would
+    /// otherwise break XML entity parsing), and subsequent `<`/`>` → `&lt;`/`&gt;`
+    /// rewrites don't introduce any new `&` characters to re-process.
     private static func escapeForXML(_ text: String) -> String {
-        text.replacingOccurrences(of: "<", with: "&lt;")
+        text.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 

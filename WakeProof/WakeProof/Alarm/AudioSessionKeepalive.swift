@@ -125,22 +125,37 @@ final class AudioSessionKeepalive {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] note in
-            // queue: .main delivers on the main thread; MainActor.assumeIsolated bridges
-            // that into the @MainActor concurrency domain. This is correct on iOS 17+ where
-            // OperationQueue.main runs on the MainActor's executor, but the precondition
-            // would trap if Apple ever decoupled them. Acceptable for this scope.
-            MainActor.assumeIsolated {
+            // L5 (Wave 2.7): previously used `MainActor.assumeIsolated` to bridge the
+            // OperationQueue.main delivery into the @MainActor concurrency domain.
+            // That relied on an undocumented Apple invariant (OperationQueue.main
+            // shares the MainActor executor identity) — if iOS ever decoupled them,
+            // assumeIsolated would TRAP on the exact audio-interruption path the
+            // alarm's resume-after-phone-call recovery depends on (the loudest
+            // possible regression: alarm doesn't resume after a nightstand call).
+            // `Task { @MainActor in ... }` hops cooperatively, costs one scheduler
+            // hop per interruption event (a handful per alarm at most), and can
+            // never trap on an executor-identity mismatch. Cost is negligible
+            // against the crash-safety upside.
+            //
+            // Sendable discipline: we extract the two Sendable-safe UInts
+            // (interruption type + options raw) BEFORE the Task hop so the Task
+            // closure never captures the non-Sendable `Notification` or the
+            // `[AnyHashable: Any]` userInfo dictionary. The outer closure's
+            // `[weak self]` makes `self` already-Optional here; we re-bind it
+            // explicitly in the Task to avoid the Swift-6 "capture of captured var
+            // self in concurrently-executing code" warning.
+            let rawType = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+            let optionsRaw = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard let info = note.userInfo,
-                      let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-                      let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+                guard let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
                     return
                 }
                 switch type {
                 case .began:
                     self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
                 case .ended:
-                    self.handleInterruptionEnded(info: info)
+                    self.handleInterruptionEnded(optionsRaw: optionsRaw)
                 @unknown default:
                     break
                 }
@@ -169,7 +184,11 @@ final class AudioSessionKeepalive {
         }
     }
 
-    private func handleInterruptionEnded(info: [AnyHashable: Any]) {
+    /// L5 (Wave 2.7): parameter changed from `info: [AnyHashable: Any]` to the
+    /// already-extracted `optionsRaw: UInt` so the observer callback can hand us
+    /// Sendable-safe values across the Task boundary (the full userInfo dict isn't
+    /// Sendable under Swift 6 strict concurrency).
+    private func handleInterruptionEnded(optionsRaw: UInt) {
         logger.info("Audio session interruption ENDED — reactivating")
         do {
             try AVAudioSession.sharedInstance().setActive(true, options: [])
@@ -188,7 +207,6 @@ final class AudioSessionKeepalive {
         // a sleeper letting their alarm get silenced by an incoming nightstand call is the
         // exact loophole the contract exists to close. We still log the system's hint so we
         // can tell the difference in Console when debugging.
-        let optionsRaw = (info[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
         let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
         if let player = alarmPlayer, !player.isPlaying {
             logger.info("Resuming alarm player (system shouldResume hint=\(options.contains(.shouldResume), privacy: .public))")
@@ -238,6 +256,16 @@ final class AudioSessionKeepalive {
     }
 
     func setAlarmVolume(_ volume: Float) {
+        // L9 (Wave 2.7): optional chaining on `alarmPlayer?.volume = ...` silently
+        // no-ops when the player is nil (after stop). That's functionally fine —
+        // there's nothing to mutate — but a nil player while setAlarmVolume is
+        // still being called means the ramp task (AlarmSoundEngine) is outrunning
+        // the stop path. Log the short-circuit so volume-ramp-after-stop timing
+        // weirdness is diagnosable from Console without needing a debugger.
+        if alarmPlayer == nil {
+            logger.debug("setAlarmVolume(\(volume, privacy: .public)) called but alarmPlayer is nil — ramp outrunning stop")
+            return
+        }
         alarmPlayer?.volume = max(0.0, min(1.0, volume))
     }
 

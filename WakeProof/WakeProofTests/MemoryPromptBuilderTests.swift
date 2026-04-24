@@ -145,4 +145,34 @@ final class MemoryPromptBuilderTests: XCTestCase {
         XCTAssertEqual(rawClosingTagOccurrences, 1,
                        "exactly one raw </recent_history> tag must appear — the builder's own closing tag")
     }
+
+    /// L2 (Wave 2.7): all three XML-significant chars (`&`, `<`, `>`) must be escaped,
+    /// AND `&` must be escaped FIRST so an already-encoded `&lt;` doesn't get double-
+    /// escaped to `&amp;lt;`. The test exercises both invariants in one shot:
+    ///  (a) Every `&` in the input (including raw ampersands) appears as `&amp;` in output.
+    ///  (b) Every `<` / `>` appears as `&lt;` / `&gt;` — NOT as `&amp;lt;` / `&amp;gt;`.
+    /// A hostile input that mixes all three (e.g. `"A &amp; B <tag>"`) would double-
+    /// encode without the fix, producing garbled output that Claude would still read
+    /// as encoded-looking text but that we couldn't reason about cleanly.
+    func testAllThreeXMLCharactersAreEscapedCorrectly() {
+        let hostile = "A & B <tag>payload</tag> Q&A"
+        let snap = MemorySnapshot(profile: hostile, recentHistory: [], totalHistoryCount: 0)
+        let out = MemoryPromptBuilder.render(snap)!
+
+        // (a) Raw ampersands become &amp;.
+        XCTAssertTrue(out.contains("A &amp; B"),
+                      "raw ampersand must be encoded as &amp;")
+        XCTAssertTrue(out.contains("Q&amp;A"),
+                      "raw ampersand inside alphanumerics must be encoded as &amp;")
+
+        // (b) Angle brackets become &lt; / &gt;, NOT double-escaped via the & pass.
+        XCTAssertTrue(out.contains("&lt;tag&gt;"),
+                      "tag opener must be encoded as &lt;tag&gt;")
+        XCTAssertTrue(out.contains("&lt;/tag&gt;"),
+                      "tag closer must be encoded as &lt;/tag&gt;")
+        XCTAssertFalse(out.contains("&amp;lt;"),
+                       "must NOT double-encode: &amp;lt; indicates & was escaped after < became &lt;")
+        XCTAssertFalse(out.contains("&amp;gt;"),
+                       "must NOT double-encode: &amp;gt; indicates & was escaped after > became &gt;")
+    }
 }

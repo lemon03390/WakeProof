@@ -17,11 +17,28 @@
 // through to Anthropic unchanged (the request body is already valid JSON
 // when it leaves the iOS client; re-parsing would cost memory + latency
 // and risk subtle shape changes).
+import { timingSafeEqual } from 'node:crypto';
+
 export const config = {
   api: {
     bodyParser: false,
   },
 };
+
+// L1 (Wave 2.7): constant-time token compare. JS string `!==` short-circuits
+// on first mismatch so an attacker with timing telemetry could in principle
+// brute-force the token byte-by-byte. `timingSafeEqual` runs in constant time
+// but REQUIRES equal-length Buffers (else it throws), so we pre-check length
+// and bail on mismatch before allocating the second Buffer. Length of the
+// expected token is not secret (it's `openssl rand -hex 32` = 64 chars).
+function tokensEqual(clientToken, expectedToken) {
+  if (typeof clientToken !== 'string' || typeof expectedToken !== 'string') return false;
+  if (clientToken.length !== expectedToken.length) return false;
+  const clientBuf = Buffer.from(clientToken, 'utf8');
+  const expectedBuf = Buffer.from(expectedToken, 'utf8');
+  if (clientBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(clientBuf, expectedBuf);
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -48,7 +65,7 @@ export default async function handler(req, res) {
     return;
   }
   const clientToken = req.headers['x-wakeproof-token'];
-  if (!clientToken || clientToken !== expectedToken) {
+  if (!clientToken || !tokensEqual(clientToken, expectedToken)) {
     res.status(401).json({
       error: { type: 'unauthorized', message: 'Missing or invalid x-wakeproof-token' },
     });
@@ -101,6 +118,14 @@ export default async function handler(req, res) {
 
   let upstream;
   try {
+    // L4 (Wave 2.7) SECURITY INVARIANT: upstream headers are built from scratch —
+    // do NOT spread req.headers into this object. Client-supplied x-api-key must
+    // never reach Anthropic's upstream; the proxy holds the only credential that
+    // flows to Anthropic, and it comes exclusively from ANTHROPIC_API_KEY env.
+    // A future refactor that spreads req.headers here and relies on later-keys-win
+    // ordering would regress the B1+B2 fix; if a future maintainer needs to forward
+    // additional headers, pick them explicitly (like anthropic-version below),
+    // never bulk-spread.
     upstream = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {

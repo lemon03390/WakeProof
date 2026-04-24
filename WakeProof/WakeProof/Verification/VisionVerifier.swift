@@ -42,10 +42,21 @@ final class VisionVerifier {
     private let client: ClaudeVisionClient
     /// Late-bound scheduler hook — wired in WakeProofApp.bootstrapIfNeeded so the verifier
     /// stays free of `AlarmScheduler` import at type-level for tests.
+    ///
+    /// L7 (Wave 2.7) resolved by Wave 2.2's serialized bootstrap Task — both this
+    /// and `memoryStore` below are assigned inside a single @MainActor Task before
+    /// any fire path can reach verify() (see `WakeProofApp.bootstrapIfNeeded`). No
+    /// transient window where scheduler is wired but memoryStore isn't: the
+    /// serialized Task awaits `bootstrapMemoryStore()` (which wires `memoryStore`)
+    /// and only then proceeds; `scheduler` is wired in the same synchronous path
+    /// before that Task is spawned. The DEBUG "Fire now" button cannot race either
+    /// assignment because it fires through the scheduler, which is already wired
+    /// by the time its view is mounted.
     var scheduler: AlarmScheduler?
 
     /// Late-bound memory store — wired by WakeProofApp.bootstrapIfNeeded. Nil in tests
     /// unless explicitly set; nil-safe: a nil store means memory is never read or written.
+    /// See L7 comment on `scheduler` above for the Wave 2.2 serialization rationale.
     var memoryStore: MemoryStore?
 
     /// Wave 2.4 R14 fix: retry queue for failed memory writes. Default uses the shared
@@ -297,7 +308,19 @@ final class VisionVerifier {
         case .timeout, .transportFailed:
             userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
         case .httpError(let status, _):
-            userMessage = "Claude returned HTTP \(status) — tap \"Prove you're awake\" to retry."
+            // L10 (Wave 2.7): unify 502 messaging. Our Vercel proxy returns a 502 with
+            // `{error:{type:"upstream_fetch_failed"}}` when it can't reach Anthropic;
+            // ClaudeAPIClient already decodes that envelope and throws .transportFailed
+            // (handled above). An Anthropic-native 502 (non-envelope body) falls through
+            // here — same root cause (Anthropic unreachable) but different user message.
+            // Map 502 to the transport-equivalent copy so the user experience doesn't
+            // diverge based on WHICH layer of the chain was unreachable. Keep the
+            // httpError case distinct in logs (still `status=502` in the audit trail).
+            if status == 502 {
+                userMessage = "Couldn't reach Claude — tap \"Prove you're awake\" to retry."
+            } else {
+                userMessage = "Claude returned HTTP \(status) — tap \"Prove you're awake\" to retry."
+            }
         case .decodingFailed(let underlying):
             // Persist the underlying parse/shape error into reasoning so the audit trail
             // captures what went wrong at the protocol boundary (missing content block,

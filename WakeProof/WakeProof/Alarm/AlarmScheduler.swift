@@ -134,6 +134,17 @@ final class AlarmScheduler {
                 return
             }
             guard !Task.isCancelled else { return }
+            // L6 won't-fix (Wave 2.7): briefly strong `self` inside MainActor.run is a
+            // theoretical race window during SwiftUI teardown mid-fire — the closure
+            // unwraps `self`, pins it, and calls `self.fire()` all inside the
+            // MainActor hop. A real race requires SwiftUI to tear down the scheduler
+            // between the guard and the fire() call (tens of microseconds), which is
+            // exceedingly unlikely for a `@State` scheduler on `WakeProofApp`. The
+            // generation counter (`myGeneration == self.schedulingGeneration` check
+            // below) already neutralizes stale invocations regardless of whether
+            // self survived teardown. Restructuring to fully weak-chain the fire()
+            // path would force split-state reads across two MainActor hops and
+            // isn't worth the readability cost for a race we can't reproduce.
             await MainActor.run {
                 guard let self else { return }
                 // Re-check generation inside the actor hop — `cancel()` could have run between

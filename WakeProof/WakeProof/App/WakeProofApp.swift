@@ -513,6 +513,16 @@ struct RootView: View {
 /// inside the struct) so the launch-handler closure — which must be captured before
 /// the struct has any stable instance identity — can reference it without a `self`
 /// capture. Weak because this box should never extend the scheduler's lifetime.
-final class OvernightSchedulerBox {
-    weak var value: OvernightScheduler?
+///
+/// L8 (Wave 2.7): `@unchecked Sendable` + `nonisolated(unsafe)` is the standard
+/// Swift 6 migration pattern for single-assignment-at-init + ObjC-runtime-atomic
+/// weak references. Invariant: `value` is assigned exactly once during
+/// `WakeProofApp.init()` (synchronously, before any concurrent read path is
+/// wired), and all subsequent reads happen on the MainActor (the BGTask launch
+/// handler enters a `Task { }` which hops before touching `value`). Weak
+/// reference reads/writes are atomic under the ObjC runtime, so the race-free
+/// guarantee holds even without a lock. If future code ever mutates `value`
+/// post-init, this annotation becomes unsound and the lock must be added.
+final class OvernightSchedulerBox: @unchecked Sendable {
+    nonisolated(unsafe) weak var value: OvernightScheduler?
 }
