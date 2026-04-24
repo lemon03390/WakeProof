@@ -5,6 +5,12 @@
 //  The post-onboarding home screen: configure the wake window, toggle the alarm,
 //  and (DEBUG) fire immediately for demo video capture.
 //
+//  UI 3.1: Rewritten from Form to NavigationStack { ScrollView { VStack } }
+//  using design-system components (WPSection, WPCard, WPHeroTimeDisplay,
+//  WPStreakBadge). All Wave 5 wiring preserved byte-identically — no business
+//  logic was changed: G1 proxy Binding, H2 commitment-note truncation,
+//  H3 streak recompute, H5 share toggle, DEBUG bypass.
+//
 
 import SwiftData
 import SwiftUI
@@ -107,192 +113,249 @@ struct AlarmSchedulerView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                // Wave 5 H3: streak badge at the top of the Form. Only renders
-                // when there's something meaningful to show — the helper
-                // `StreakBadgeView.shouldRender(...)` returns false for a
-                // fresh install (both streaks 0) so the section is absent
-                // rather than showing a bleak "0-day streak" placeholder.
-                if StreakBadgeView.shouldRender(
-                    currentStreak: streakService.currentStreak,
-                    bestStreak: streakService.bestStreak
-                ) {
-                    Section {
-                        StreakBadgeView(
+            ScrollView {
+                VStack(spacing: WPSpacing.xl) {
+
+                    // MARK: — Banner strip
+                    // Priority chain defined by `systemBanner` (reinstall >
+                    // notifications > audio > HealthKit > overnight > memory).
+                    // Rendered at the very top so the user sees the most urgent
+                    // alarm-contract problem before interacting with controls.
+                    if let banner = systemBanner {
+                        WPCard(padding: WPSpacing.md) {
+                            Text(banner)
+                                .wpFont(.callout)
+                                .foregroundStyle(Color.wpAttempted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    // MARK: — Hero block
+                    // Live ticking clock, next-ring strip, streak badge.
+                    VStack(spacing: WPSpacing.sm) {
+                        WPHeroTimeDisplay(style: .medium, foreground: .wpChar900)
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        if let next = scheduler.nextFireAt {
+                            Text("Next ring \(next.formatted(date: .abbreviated, time: .shortened))")
+                                .wpFont(.footnote)
+                                .foregroundStyle(Color.wpChar500)
+                        }
+
+                        // Wave 5 H3: streak badge. Only renders when there's
+                        // something meaningful to show — the helper
+                        // `WPStreakBadge.shouldRender(...)` returns false for
+                        // a fresh install (both streaks 0) so the badge is
+                        // absent rather than showing a bleak "0-day streak".
+                        if WPStreakBadge.shouldRender(
                             currentStreak: streakService.currentStreak,
                             bestStreak: streakService.bestStreak
+                        ) {
+                            WPStreakBadge(
+                                currentStreak: streakService.currentStreak,
+                                bestStreak: streakService.bestStreak
+                            )
+                        }
+                    }
+
+                    // MARK: — First thing tomorrow (commitment note, Wave 5 H2)
+                    // Positioned above the wake-window controls so setting the
+                    // time naturally flows into "and what will you do when you
+                    // wake up". Char counter footnote right-aligned below field.
+                    WPSection("First thing tomorrow") {
+                        WPCard {
+                            VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+                                TextField(
+                                    "First thing tomorrow-you needs to do (optional)",
+                                    text: $commitmentNote
+                                )
+                                .wpFont(.body)
+                                // Wave 5 H2: Cap using `.count` (grapheme-cluster
+                                // measure) — matches user intuition for emoji / CJK,
+                                // same measure used by the test invariant. Trim off
+                                // the tail on overflow so the binding stays in-sync;
+                                // IME pushes that exceed the cap truncate silently
+                                // (expected — the TextField's visible content matches
+                                // what will be saved).
+                                .onChange(of: commitmentNote) { _, newValue in
+                                    if newValue.count > WakeWindow.commitmentNoteMaxLength {
+                                        commitmentNote = String(newValue.prefix(WakeWindow.commitmentNoteMaxLength))
+                                    }
+                                }
+                                Text("\(commitmentNote.count)/\(WakeWindow.commitmentNoteMaxLength)")
+                                    .wpFont(.footnote)
+                                    .foregroundStyle(Color.wpChar500)
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                        }
+                    }
+
+                    // MARK: — Wake window
+                    WPSection("Wake window") {
+                        WPCard {
+                            VStack(spacing: WPSpacing.xs2) {
+                                DatePicker(
+                                    "Start",
+                                    selection: $startTime,
+                                    displayedComponents: .hourAndMinute
+                                )
+                                .wpFont(.body)
+
+                                Divider()
+
+                                // Wave 5 G1 (§12.4-G1): the enabled toggle is no longer a
+                                // plain Binding — flipping OFF goes through the scheduler's
+                                // disable-challenge policy so evening-self can't silence
+                                // the contract without the same proof as morning-self. Flipping
+                                // ON is unchanged (the contract STARTS with user consent). The
+                                // proxy's `set` block is responsible for either propagating
+                                // the new value or calling `handleDisableRequest()`; in the
+                                // challenge-required case it leaves `isEnabled` at its
+                                // current value so the toggle visibly stays ON until the
+                                // challenge resolves (see `.onChange(of: scheduler.window.isEnabled)`
+                                // below which then syncs the local state).
+                                Toggle("Alarm enabled", isOn: Binding(
+                                    get: { isEnabled },
+                                    set: { newValue in
+                                        if newValue {
+                                            // Enabling is just the local state flip — the
+                                            // user still has to tap "Save & schedule" below
+                                            // to persist. This matches the prior behavior
+                                            // exactly; we only intercept the OFF path.
+                                            isEnabled = true
+                                        } else {
+                                            handleDisableRequest()
+                                        }
+                                    }
+                                ))
+                                .wpFont(.body)
+                            }
+                        }
+                    }
+
+                    // MARK: — Save & schedule
+                    VStack(spacing: WPSpacing.xs2) {
+                        Button("Save & schedule") { save() }
+                            .buttonStyle(.primaryConfirm)
+
+                        // P5 (Stage 6 Wave 1): inline warning rendered immediately
+                        // under the button so the user sees the failure at the
+                        // point of action. Cleared on the next successful save.
+                        if let windowSaveFailureMessage {
+                            Text(windowSaveFailureMessage)
+                                .wpFont(.footnote)
+                                .foregroundStyle(Color.wpAttempted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    // MARK: — Streak navigation (calendar + investment dashboard)
+                    // Wave 5 H3: secondary surfaces that read (not write) state.
+                    // Rendered unconditionally so the user discovers the calendar
+                    // before their first fire; an empty grid with all gray days
+                    // is still an accurate reflection of state.
+                    WPSection("Streak") {
+                        WPCard(padding: WPSpacing.md) {
+                            VStack(spacing: 0) {
+                                NavigationLink("View streak calendar") {
+                                    StreakCalendarView(attempts: wakeAttempts)
+                                }
+                                .wpFont(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Divider().padding(.vertical, WPSpacing.xs2)
+
+                                NavigationLink("Your commitment") {
+                                    InvestmentDashboardView()
+                                }
+                                .wpFont(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+
+                    // MARK: — Sharing (Wave 5 H5)
+                    // Copy deliberately names "manual" to pre-empt the user's
+                    // "does this auto-post?" question — per HOOK_S4_5, nothing
+                    // is auto-posted and we want that to be unambiguous in the
+                    // settings surface itself (not just the privacy policy).
+                    WPSection("Sharing") {
+                        WPCard {
+                            VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+                                Toggle("Allow sharing wake cards", isOn: $shareCardEnabled)
+                                    .wpFont(.body)
+                                Text("Generate a minimalist image of your streak + Claude's observation to share manually. Nothing auto-posts.")
+                                    .wpFont(.footnote)
+                                    .foregroundStyle(Color.wpChar500)
+                            }
+                        }
+                    }
+
+                    // MARK: — DEBUG section
+                    #if DEBUG
+                    WPSection("Debug") {
+                        WPCard {
+                            VStack(alignment: .leading, spacing: WPSpacing.sm) {
+                                // Wave 5 G1 (§12.4-G1): DEBUG-only bypass toggle. Lets demo
+                                // recordings flip the alarm off without the challenge. Ethics
+                                // boundary: this is a self-commitment-device — the bypass
+                                // MUST NOT ship in release builds. The `#if DEBUG` wrap on
+                                // the Section covers this UI, and `AlarmScheduler.isDisable
+                                // ChallengeBypassActive` (which reads the backing UserDefaults
+                                // key) is itself `#if DEBUG` so release builds cannot honor
+                                // the flag even if a prior DEBUG build wrote to the key.
+                                Toggle("Bypass disable challenge (DEV)", isOn: $disableChallengeBypassEnabled)
+                                Divider()
+                                Button("Fire alarm now") { scheduler.fireNow() }
+                                    .foregroundStyle(.red)
+                                Divider()
+                                Button("Start overnight session now") {
+                                    // B3: the scheduler now holds the single source of truth
+                                    // for "is a session already open" (sessionCreationInFlight
+                                    // + UserDefaults re-check on the actor). No pre-actor
+                                    // TOCTOU guard needed; calling this repeatedly is safe.
+                                    Task { await overnightScheduler.startOvernightSession() }
+                                }
+                                Divider()
+                                Button("Finalize briefing now") {
+                                    Task {
+                                        // B5: finalizeBriefing now returns a `BriefingResult`
+                                        // enum rather than `BriefingDTO?`. DEBUG logging
+                                        // mirrors the three cases so you can tell at a
+                                        // glance whether the pipeline succeeded, had no
+                                        // session, or hit a failure path.
+                                        let result = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
+                                        switch result {
+                                        case .success(let dto):
+                                            logger.info("Debug finalize: success briefingText=\(dto.briefingText, privacy: .public)")
+                                        case .noSession:
+                                            logger.info("Debug finalize: noSession (no active handle)")
+                                        case .failure(let reason, let message):
+                                            logger.info("Debug finalize: failure reason=\(reason.rawValue, privacy: .public) message=\(message, privacy: .public)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #endif
+
+                    // MARK: — Weekly insight
+                    WPSection("Weekly insight") {
+                        WeeklyInsightView(
+                            insight: weeklyCoach.currentInsight,
+                            generatedAt: weeklyCoach.generatedAt
                         )
                     }
-                }
 
-                if let banner = systemBanner {
-                    Section {
-                        Text(banner)
-                            .font(.callout)
-                            .foregroundStyle(.orange)
-                    }
                 }
-
-                // Wave 5 H3: "View streak calendar" row — entry to the month-
-                // grid surface. Rendered unconditionally (even for fresh
-                // installs with no attempts) so the user discovers the
-                // calendar before their first fire; an empty grid with all
-                // gray days is still an accurate reflection of state.
-                //
-                // Wave 5 H4: "Your commitment" row — entry to the investment
-                // dashboard. Sibling to the calendar link because both are
-                // secondary surfaces that read (not write) state; grouping
-                // them under "Streak" keeps the scheduler list scannable
-                // and avoids a stray single-row Section per screen.
-                Section("Streak") {
-                    NavigationLink("View streak calendar") {
-                        StreakCalendarView(attempts: wakeAttempts)
-                    }
-                    NavigationLink("Your commitment") {
-                        InvestmentDashboardView()
-                    }
-                }
-
-                Section("Wake window") {
-                    DatePicker("Start", selection: $startTime, displayedComponents: .hourAndMinute)
-                    // Wave 5 G1 (§12.4-G1): the enabled toggle is no longer a
-                    // plain Binding — flipping OFF goes through the scheduler's
-                    // disable-challenge policy so evening-self can't silence
-                    // the contract without the same proof as morning-self. Flipping
-                    // ON is unchanged (the contract STARTS with user consent). The
-                    // proxy's `set` block is responsible for either propagating
-                    // the new value or calling `handleDisableRequest()`; in the
-                    // challenge-required case it leaves `isEnabled` at its
-                    // current value so the toggle visibly stays ON until the
-                    // challenge resolves (see `.onChange(of: scheduler.window.isEnabled)`
-                    // below which then syncs the local state).
-                    Toggle("Alarm enabled", isOn: Binding(
-                        get: { isEnabled },
-                        set: { newValue in
-                            if newValue {
-                                // Enabling is just the local state flip — the
-                                // user still has to tap "Save & schedule" below
-                                // to persist. This matches the prior behavior
-                                // exactly; we only intercept the OFF path.
-                                isEnabled = true
-                            } else {
-                                handleDisableRequest()
-                            }
-                        }
-                    ))
-                }
-
-                // Wave 5 H2: pre-sleep commitment note. Positioned between the wake
-                // window and the save button so setting the time naturally flows
-                // into "and what will you do when you wake up". Char counter in
-                // footnote gray below the field; truncation enforced on-change
-                // against the shared WakeWindow.commitmentNoteMaxLength constant
-                // so UI + tests can't drift.
-                Section("First thing tomorrow") {
-                    TextField(
-                        "First thing tomorrow-you needs to do (optional)",
-                        text: $commitmentNote
-                    )
-                    .onChange(of: commitmentNote) { _, newValue in
-                        // Cap using `.count` (grapheme-cluster measure) — matches
-                        // user intuition for emoji / CJK, same measure used by
-                        // the test invariant. Trim off the tail on overflow so
-                        // the binding stays in-sync; IME pushes that exceed the
-                        // cap truncate silently (expected — the TextField's
-                        // visible content matches what will be saved).
-                        if newValue.count > WakeWindow.commitmentNoteMaxLength {
-                            commitmentNote = String(newValue.prefix(WakeWindow.commitmentNoteMaxLength))
-                        }
-                    }
-                    Text("\(commitmentNote.count)/\(WakeWindow.commitmentNoteMaxLength)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    Button("Save & schedule") { save() }
-                    // P5 (Stage 6 Wave 1): inline warning rendered immediately under
-                    // the button so the user sees the failure at the point of action.
-                    // Same shape as BedtimeStep.saveFailureMessage — yellow text, footnote
-                    // size, dismissed on next successful save.
-                    if let windowSaveFailureMessage {
-                        Text(windowSaveFailureMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.yellow)
-                    }
-                }
-
-                if let next = scheduler.nextFireAt {
-                    Section("Next fire") {
-                        Text(next.formatted(date: .abbreviated, time: .standard))
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
-                }
-
-                // Wave 5 H5: opt-in sharing toggle. Placed above DEBUG so it
-                // ships in release builds; the Weekly-insight card sits below
-                // this so Sharing doesn't split the two read-surfaces apart.
-                // Copy deliberately names "manual" to pre-empt the user's
-                // "does this auto-post?" question — per HOOK_S4_5, nothing
-                // is auto-posted and we want that to be unambiguous in the
-                // settings surface itself (not just the privacy policy).
-                Section("Sharing") {
-                    Toggle("Allow sharing wake cards", isOn: $shareCardEnabled)
-                    Text("Generate a minimalist image of your streak + Claude's observation to share manually. Nothing auto-posts.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                #if DEBUG
-                Section("DEBUG") {
-                    // Wave 5 G1 (§12.4-G1): DEBUG-only bypass toggle. Lets demo
-                    // recordings flip the alarm off without the challenge. Ethics
-                    // boundary: this is a self-commitment-device — the bypass
-                    // MUST NOT ship in release builds. The `#if DEBUG` wrap on
-                    // the Section covers this UI, and `AlarmScheduler.isDisable
-                    // ChallengeBypassActive` (which reads the backing UserDefaults
-                    // key) is itself `#if DEBUG` so release builds cannot honor
-                    // the flag even if a prior DEBUG build wrote to the key.
-                    Toggle("Bypass disable challenge (DEV)", isOn: $disableChallengeBypassEnabled)
-                    Button("Fire alarm now") { scheduler.fireNow() }
-                        .foregroundStyle(.red)
-                    Button("Start overnight session now") {
-                        // B3: the scheduler now holds the single source of truth
-                        // for "is a session already open" (sessionCreationInFlight
-                        // + UserDefaults re-check on the actor). No pre-actor
-                        // TOCTOU guard needed; calling this repeatedly is safe.
-                        Task { await overnightScheduler.startOvernightSession() }
-                    }
-                    Button("Finalize briefing now") {
-                        Task {
-                            // B5: finalizeBriefing now returns a `BriefingResult`
-                            // enum rather than `BriefingDTO?`. DEBUG logging
-                            // mirrors the three cases so you can tell at a
-                            // glance whether the pipeline succeeded, had no
-                            // session, or hit a failure path.
-                            let result = await overnightScheduler.finalizeBriefing(forWakeDate: .now)
-                            switch result {
-                            case .success(let dto):
-                                logger.info("Debug finalize: success briefingText=\(dto.briefingText, privacy: .public)")
-                            case .noSession:
-                                logger.info("Debug finalize: noSession (no active handle)")
-                            case .failure(let reason, let message):
-                                logger.info("Debug finalize: failure reason=\(reason.rawValue, privacy: .public) message=\(message, privacy: .public)")
-                            }
-                        }
-                    }
-                }
-                #endif
-
-                Section {
-                    WeeklyInsightView(
-                        insight: weeklyCoach.currentInsight,
-                        generatedAt: weeklyCoach.generatedAt
-                    )
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-                }
+                .padding(.horizontal, WPSpacing.xl2)
+                .padding(.top, WPSpacing.xl)
+                .padding(.bottom, WPSpacing.xl4)
             }
+            .scrollDismissesKeyboard(.interactively)
+            .background(Color.wpCream100)
+            .ignoresSafeArea(edges: .bottom)
             .navigationTitle("WakeProof")
             .onAppear(perform: loadFromScheduler)
             // R9: refresh the overnight error banner snapshot whenever the
@@ -503,3 +566,11 @@ struct AlarmSchedulerView: View {
     }
 
 }
+
+#if DEBUG
+#Preview {
+    Text("AlarmSchedulerView preview requires full @Environment harness; see WakeProofApp's RootView for the live render path.")
+        .padding()
+        .background(Color.wpCream100)
+}
+#endif
