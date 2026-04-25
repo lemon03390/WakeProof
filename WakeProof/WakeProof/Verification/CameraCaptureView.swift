@@ -179,14 +179,19 @@ private final class CameraRecorderViewController: UIViewController {
     /// in one place rather than three.
     private static let unwiredLog = Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
 
+    // Concrete class name (not Self) in these default-closure references —
+    // Swift forbids covariant Self in stored-property initializer expressions
+    // (the closure is the property's initial value). Simulator builds skip
+    // this whole #if !targetEnvironment(simulator) block so the error only
+    // surfaces on device compile.
     var onCaptured: (CameraCaptureResult) -> Void = { _ in
-        Self.unwiredLog.fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
+        CameraRecorderViewController.unwiredLog.fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
     }
     var onCancelled: () -> Void = {
-        Self.unwiredLog.fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
+        CameraRecorderViewController.unwiredLog.fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
     }
     var onFailed: (CameraCaptureError) -> Void = { _ in
-        Self.unwiredLog.fault("onFailed fired but no handler wired — alarm will hang in .capturing")
+        CameraRecorderViewController.unwiredLog.fault("onFailed fired but no handler wired — alarm will hang in .capturing")
     }
 
     /// Recording duration. 2.0s matches the docs/technical-decisions.md design
