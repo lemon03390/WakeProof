@@ -10,6 +10,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 extension Color {
     // Cream surface — the icon's background. NOT pure white.
@@ -31,4 +32,20 @@ extension Color {
     // Semantic supports — warm-shifted, no cold blues/greens.
     static let wpVerified  = Color(red: 0x4E / 255.0, green: 0x8F / 255.0, blue: 0x47 / 255.0) // #4E8F47
     static let wpAttempted = Color(red: 0xE0 / 255.0, green: 0x7A / 255.0, blue: 0x2E / 255.0) // #E07A2E
+}
+
+/// UIKit bridge for the wp* tokens. Used by the AVCaptureSession-backed
+/// camera VC and any other UIViewControllerRepresentable that needs UIKit
+/// colors. Keeps the CSS hex source-of-truth in one file rather than
+/// scattered as inline `UIColor(red:green:blue:alpha:)` literals.
+extension UIColor {
+    static let wpCream50   = UIColor(red: 0xFE / 255.0, green: 0xF8 / 255.0, blue: 0xED / 255.0, alpha: 1.0)
+    static let wpCream100  = UIColor(red: 0xFB / 255.0, green: 0xEE / 255.0, blue: 0xDB / 255.0, alpha: 1.0)
+    static let wpChar900   = UIColor(red: 0x2B / 255.0, green: 0x1F / 255.0, blue: 0x17 / 255.0, alpha: 1.0)
+    static let wpChar800   = UIColor(red: 0x3D / 255.0, green: 0x2D / 255.0, blue: 0x22 / 255.0, alpha: 1.0)
+    static let wpChar500   = UIColor(red: 0x8A / 255.0, green: 0x6B / 255.0, blue: 0x55 / 255.0, alpha: 1.0)
+    static let wpOrange    = UIColor(red: 0xFF / 255.0, green: 0xA0 / 255.0, blue: 0x47 / 255.0, alpha: 1.0)
+    static let wpCoral     = UIColor(red: 0xF5 / 255.0, green: 0x4F / 255.0, blue: 0x4F / 255.0, alpha: 1.0)
+    static let wpVerified  = UIColor(red: 0x4E / 255.0, green: 0x8F / 255.0, blue: 0x47 / 255.0, alpha: 1.0)
+    static let wpAttempted = UIColor(red: 0xE0 / 255.0, green: 0x7A / 255.0, blue: 0x2E / 255.0, alpha: 1.0)
 }

@@ -59,6 +59,26 @@ final class AudioSessionKeepalive {
         observeInterruptions()
     }
 
+    /// Restore the audio session category to the keepalive baseline
+    /// (.playback + .mixWithOthers) without restarting the silent loop or
+    /// touching active flags. Call this after temporarily reconfiguring the
+    /// session — most importantly after an AVCaptureSession switches to
+    /// .playAndRecord during camera capture. Without this restoration iOS
+    /// keeps the orange-dot mic indicator visible until next foreground
+    /// cycle, even though the app is no longer using the mic.
+    ///
+    /// Idempotent: safe to call from terminal callbacks even when the
+    /// camera teardown order is uncertain. Throws so the caller can decide
+    /// whether to log or recover; the keepalive's own interruption-end
+    /// handler will retry on the next event if this throws.
+    func restoreCategory() throws {
+        try AVAudioSession.sharedInstance().setCategory(
+            .playback,
+            mode: .default,
+            options: [.mixWithOthers]
+        )
+    }
+
     /// Stop the keepalive. Use when the user explicitly disables alarms.
     func stop() {
         silentPlayer?.stop()

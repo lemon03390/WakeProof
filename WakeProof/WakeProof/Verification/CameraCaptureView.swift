@@ -171,21 +171,24 @@ private struct DeviceCameraRecorder: UIViewControllerRepresentable {
 ///   - All UI mutations (preview layer, overlay state, callback invocations)
 ///     hop back to MainActor.
 ///   - Terminal callbacks fire exactly once via `reportTerminal(...)` latch,
-///     mirroring the prior CameraHostController contract.
+///     preventing re-entrant callbacks if teardown races with a delegate
+///     completion.
 @MainActor
 private final class CameraRecorderViewController: UIViewController {
 
+    /// Single source of truth for the unwired-callback log. All three
+    /// callback defaults reference this, so a category rename happens
+    /// in one place rather than three.
+    private static let unwiredLog = Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
+
     var onCaptured: (CameraCaptureResult) -> Void = { _ in
-        Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
-            .fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
+        Self.unwiredLog.fault("onCaptured fired but no handler wired — alarm will hang in .capturing")
     }
     var onCancelled: () -> Void = {
-        Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
-            .fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
+        Self.unwiredLog.fault("onCancelled fired but no handler wired — alarm will hang in .capturing")
     }
     var onFailed: (CameraCaptureError) -> Void = { _ in
-        Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
-            .fault("onFailed fired but no handler wired — alarm will hang in .capturing")
+        Self.unwiredLog.fault("onFailed fired but no handler wired — alarm will hang in .capturing")
     }
 
     /// Recording duration. 2.0s matches the docs/technical-decisions.md design
@@ -201,26 +204,21 @@ private final class CameraRecorderViewController: UIViewController {
     private let movieOutput = AVCaptureMovieFileOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var hasReportedTerminalOutcome = false
-    /// Set once the auto-stop timer has fired; foreground-return handler treats
-    /// this as "we're already in the success path, don't pre-empt".
-    private var processingCaptureResult = false
     /// Strong reference to the recording delegate. AVFoundation only weakly
     /// retains `AVCaptureFileOutputRecordingDelegate`, so a struct or local
     /// would dealloc before `didFinishRecordingTo` fires.
     private var recordingDelegate: RecordingDelegate?
-    /// Output URL the session writes to. Stored so the auto-stop path can
-    /// avoid re-deriving it and so reportTerminal can verify the file exists.
+    /// Output URL the session writes to. Stored so the cancel path can clean
+    /// up the in-flight file. Set to nil on the success path to transfer
+    /// ownership to CameraCaptureFlow (which moves the file into Documents)
+    /// — the nil acts as a "do not delete" signal to discardOutputFileIfNeeded.
     private var outputURL: URL?
 
     // MARK: - UIViewController lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // wpChar900 background — the camera preview fills the view, but the
-        // brief gap before the session starts (and any letterboxing on
-        // non-16:9 sensors) renders the warm-charcoal token instead of a
-        // black void.
-        view.backgroundColor = UIColor(red: 0x2B / 255.0, green: 0x1F / 255.0, blue: 0x17 / 255.0, alpha: 1.0)
+        view.backgroundColor = .wpChar900
         installCancelButton()
         installRecordingIndicator()
         // Detect "user backgrounded the app mid-capture, then returned" —
@@ -235,25 +233,40 @@ private final class CameraRecorderViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        // SwiftUI may tear down the UIViewControllerRepresentable without going
+        // through cancel/success (parent view removed mid-recording). Without
+        // explicit teardown the AVCaptureSession keeps running and the orange
+        // mic indicator stays on indefinitely. sessionQueue.async is safe in
+        // deinit because deinit holds the last strong reference — no
+        // re-entrancy risk on the captured queue.
+        let session = captureSession
+        sessionQueue.async {
+            if session.isRunning {
+                session.stopRunning()
+            }
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Configure the audio session BEFORE the capture session adds its
-        // microphone input. AVCaptureSession's audio-input wiring will
-        // negotiate against whatever category is currently active; setting
-        // .playAndRecord + .mixWithOthers here keeps the alarm audio audible
-        // through the recording instead of being silenced by the implicit
-        // .record category that the picker's flow used to force.
-        configureAudioSession()
+        // Audio session reconfigure + capture session config both run on
+        // sessionQueue — keeps the mediaserverd XPC traffic off the main
+        // thread (would otherwise jank the view-appear animation on a slow
+        // wake-up) and preserves the ordering invariant (audio category
+        // must be active before AVCaptureSession adds its mic input).
         sessionQueue.async { [weak self] in
+            self?.configureAudioSession()
             self?.configureAndStartSession()
         }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previewLayer?.frame = view.bounds
+        // Guard the assign so a layout-pass without a bounds change doesn't
+        // mark the layer dirty and trigger an unnecessary compositing pass.
+        if let previewLayer, previewLayer.frame != view.bounds {
+            previewLayer.frame = view.bounds
+        }
     }
 
     // MARK: - Audio session
@@ -283,20 +296,20 @@ private final class CameraRecorderViewController: UIViewController {
         }
     }
 
-    /// Restore the audio session category to AudioSessionKeepalive's baseline
-    /// (.playback + .mixWithOthers) after capture finishes. Without this iOS
-    /// keeps the .playAndRecord category active, which keeps the persistent
-    /// orange-dot mic indicator visible until next app foreground/background
-    /// cycle. Called from the cleanup path on every terminal outcome.
+    /// Restore the audio session category via AudioSessionKeepalive's
+    /// dedicated `restoreCategory()` helper so the wp* baseline lives in
+    /// one place. Falling back to the keepalive's interruption-end handler
+    /// on throw is acceptable — the next .interruptionEnded event will
+    /// re-establish .playback. Hops to MainActor because the singleton is
+    /// @MainActor-isolated.
     private func restoreAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            // No setActive(false) — the keepalive's silent loop is still
-            // running and a deactivation would race with its player.
-            logger.info("Audio session restored: .playback + .mixWithOthers (keepalive baseline)")
-        } catch {
-            logger.warning("Audio session restore failed: \(error.localizedDescription, privacy: .public). Keepalive's interruption-end handler will retry on next event.")
+        Task { @MainActor in
+            do {
+                try AudioSessionKeepalive.shared.restoreCategory()
+                Self.unwiredLog.info("Audio session restored to keepalive baseline")
+            } catch {
+                Self.unwiredLog.warning("Audio session restore failed: \(error.localizedDescription, privacy: .public). Keepalive's interruption-end handler will retry on next event.")
+            }
         }
     }
 
@@ -333,14 +346,19 @@ private final class CameraRecorderViewController: UIViewController {
         captureSession.beginConfiguration()
         defer { captureSession.commitConfiguration() }
 
-        captureSession.sessionPreset = .high
+        // .medium is sufficient for the vision prompt's face-in-frame check
+        // and cuts the .mov size by ~80% vs .high (480p ~1Mbps vs 1080p
+        // ~15Mbps), reducing both AVAssetImageGenerator decode time and the
+        // downstream upload payload to Claude. Adjust to .high if the vision
+        // team determines spoofing detection benefits from higher resolution.
+        captureSession.sessionPreset = .medium
 
         // Camera input — explicit .builtInWideAngleCamera + .back avoids the
         // BackTriple discovery path that crashes UIImagePickerController on
-        // iPhone 17 Pro / iOS 26.
-        let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-        guard let camera else {
+        // iPhone 17 Pro / iOS 26. No front-camera fallback: every iPhone
+        // capable of running iOS 17+ has a rear wide-angle camera; the
+        // .front fallback was unreachable dead code.
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             logger.error("No wide-angle camera available")
             DispatchQueue.main.async { [weak self] in
                 self?.reportTerminal { self?.onFailed(.cameraUnavailable) }
@@ -419,7 +437,7 @@ private final class CameraRecorderViewController: UIViewController {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "xmark.circle.fill",
                                withConfiguration: UIImage.SymbolConfiguration(pointSize: 32, weight: .regular))
-        config.baseForegroundColor = UIColor(red: 0xFE / 255.0, green: 0xF8 / 255.0, blue: 0xED / 255.0, alpha: 0.85)
+        config.baseForegroundColor = UIColor.wpCream50.withAlphaComponent(0.85)
         button.configuration = config
         button.translatesAutoresizingMaskIntoConstraints = false
         button.addTarget(self, action: #selector(handleCancelTap), for: .touchUpInside)
@@ -429,16 +447,18 @@ private final class CameraRecorderViewController: UIViewController {
     private lazy var recordingIndicator: UIView = {
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        container.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        // Warm-charcoal scrim instead of black so the indicator stays
+        // on-brand against the camera preview.
+        container.backgroundColor = UIColor.wpChar900.withAlphaComponent(0.5)
         container.layer.cornerRadius = 14
         let dot = UIView()
         dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.backgroundColor = UIColor(red: 0xF5 / 255.0, green: 0x4F / 255.0, blue: 0x4F / 255.0, alpha: 1.0)
+        dot.backgroundColor = .wpCoral
         dot.layer.cornerRadius = 5
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
         label.text = "Recording…"
-        label.textColor = UIColor(red: 0xFE / 255.0, green: 0xF8 / 255.0, blue: 0xED / 255.0, alpha: 1.0)
+        label.textColor = .wpCream50
         label.font = .systemFont(ofSize: 14, weight: .semibold)
         container.addSubview(dot)
         container.addSubview(label)
@@ -497,14 +517,8 @@ private final class CameraRecorderViewController: UIViewController {
         movieOutput.startRecording(to: url, recordingDelegate: delegate)
         logger.info("startRecording → \(url.lastPathComponent, privacy: .public)")
 
-        // Auto-stop after the configured duration. We wrap in Task with a
-        // weak self capture so a cancel-then-tap sequence doesn't keep the
-        // VC alive past its natural lifetime.
-        //
-        // Per CLAUDE.md auto-promoted rule (no `try?` swallowing errors),
-        // explicit do/catch on the sleep so a cancellation-mid-sleep is
-        // observable and doesn't trigger a stop on a no-longer-relevant
-        // session.
+        // Auto-stop after the configured duration. weak self so a
+        // cancel-then-tap sequence doesn't keep the VC alive.
         Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(Self.recordingDuration))
@@ -527,33 +541,28 @@ private final class CameraRecorderViewController: UIViewController {
         recordingIndicator.isHidden = true
         switch result {
         case .success(let url):
-            processingCaptureResult = true
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                defer {
-                    self.processingCaptureResult = false
-                    self.tearDownSession()
-                }
+                defer { self.tearDownSession() }
                 do {
                     let still = try await Self.extractMiddleFrame(videoURL: url)
-                    // Success: clear outputURL so the cleanup helper doesn't
-                    // delete a file that CameraCaptureFlow now owns.
+                    // Nil out before tearDown so discardOutputFileIfNeeded
+                    // (called from a parallel cancel race) doesn't delete the
+                    // file CameraCaptureFlow.persist now owns.
                     self.outputURL = nil
                     self.reportTerminal {
                         self.onCaptured(CameraCaptureResult(stillImage: still, videoURL: url))
                     }
                 } catch {
                     self.logger.error("Frame extraction failed: \(error.localizedDescription, privacy: .public)")
-                    // Frame extraction failed but the .mov is on disk —
-                    // clean it up to avoid tmpDir leak.
-                    self.cleanupOutputFileOnFailure()
+                    self.discardOutputFileIfNeeded()
                     self.reportTerminal {
                         self.onFailed(.frameExtractionFailed(underlying: error))
                     }
                 }
             }
         case .failure(let error):
-            cleanupOutputFileOnFailure()
+            discardOutputFileIfNeeded()
             tearDownSession()
             reportTerminal { onFailed(error) }
         }
@@ -569,44 +578,43 @@ private final class CameraRecorderViewController: UIViewController {
         recordingDelegate = nil
     }
 
-    /// Best-effort cleanup for the temporary recording file on failure paths.
-    /// Success paths hand the URL to CameraCaptureFlow.persist which moves
-    /// it into Documents/WakeAttempts; failure paths would otherwise leak
-    /// the .mov in tmpDir until iOS's eventual sweep. Tied to the captured
-    /// outputURL so cancel-during-recording cleans up its in-flight file too.
-    private func cleanupOutputFileOnFailure() {
+    /// Best-effort tmp file cleanup. Called on every non-success terminal
+    /// path (cancel + failure) since the success path transfers ownership
+    /// to CameraCaptureFlow.persist by setting outputURL = nil first.
+    /// Operates directly with try/catch on removeItem rather than a
+    /// fileExists pre-check (TOCTOU-safe + simpler).
+    private func discardOutputFileIfNeeded() {
         guard let url = outputURL else { return }
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else {
-            outputURL = nil
-            return
-        }
+        outputURL = nil
         do {
-            try fm.removeItem(at: url)
+            try FileManager.default.removeItem(at: url)
             logger.info("Cleaned up tmp capture file \(url.lastPathComponent, privacy: .public)")
+        } catch let error as NSError where error.code == NSFileNoSuchFileError {
+            // File never existed or was already gone — nothing to clean.
         } catch {
             logger.warning("Failed to clean up tmp capture file \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public). iOS will reclaim it eventually.")
         }
-        outputURL = nil
     }
 
     @objc private func handleCancelTap() {
         if movieOutput.isRecording {
+            // stopRecording fires fileOutput(_:didFinishRecordingTo:) shortly
+            // after; the reportTerminal latch ensures whichever side claims
+            // first wins. Discarding the file here covers the cancel-then-
+            // success-callback race so we don't leave a half-written .mov.
             movieOutput.stopRecording()
-            // stopRecording will trigger fileOutput(_:didFinishRecordingTo:...)
-            // shortly. That delegate path's success branch reports onCaptured,
-            // but the latch below makes that a no-op since we claim onCancelled
-            // here. The leftover .mov file is cleaned up by the delegate's
-            // failure path (or by cleanupOutputFileOnFailure here for safety).
         }
-        cleanupOutputFileOnFailure()
+        discardOutputFileIfNeeded()
         tearDownSession()
         reportTerminal { onCancelled() }
     }
 
     @objc private func handleAppDidBecomeActive() {
+        // captureSession.isRunning false + recording false means teardown ran
+        // (our own paths nil-out their work) — combined with !hasReportedTerminalOutcome
+        // this means the app backgrounded mid-capture and our terminal callbacks
+        // never fired.
         guard !hasReportedTerminalOutcome,
-              !processingCaptureResult,
               !movieOutput.isRecording,
               !captureSession.isRunning else { return }
         logger.warning("App returned to foreground but capture session isn't running — reporting dismissedWhileBackgrounded")
@@ -644,6 +652,7 @@ private final class CameraRecorderViewController: UIViewController {
 private final class RecordingDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
 
     private let completion: (Result<URL, CameraCaptureError>) -> Void
+    private let logger = Logger(subsystem: LogSubsystem.verification, category: "recordingDelegate")
 
     init(completion: @escaping (Result<URL, CameraCaptureError>) -> Void) {
         self.completion = completion
@@ -653,19 +662,10 @@ private final class RecordingDelegate: NSObject, AVCaptureFileOutputRecordingDel
                     didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection],
                     error: Error?) {
-        // AVCaptureMovieFileOutput error semantics: an error CAN be present
-        // even on a "successful" recording (e.g. -11810 "max length reached"
-        // when an explicit time limit is hit). We treat the file's existence
-        // + non-zero size as the success signal, mirroring what the prior
-        // UIImagePickerController flow accepted, and only fall through to
+        // AVCaptureMovieFileOutput can report an error even on a successful
+        // recording (e.g. -11810 "max length reached"). Treat file existence
+        // + non-zero size as the success signal; only fall through to
         // failure when the file is missing/empty.
-        //
-        // Per CLAUDE.md auto-promoted rule (no `try?` swallowing errors),
-        // explicit do/catch on attributesOfItem so a real filesystem failure
-        // (file gone, permission denied, FS unmounted) surfaces as a
-        // recordingFailed with the actual underlying error rather than a
-        // misleading noVideoURLReturned.
-        let logger = Logger(subsystem: LogSubsystem.verification, category: "recordingDelegate")
         let size: Int
         do {
             let attrs = try FileManager.default.attributesOfItem(atPath: outputFileURL.path)
