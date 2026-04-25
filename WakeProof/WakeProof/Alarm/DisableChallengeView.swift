@@ -40,13 +40,14 @@ struct DisableChallengeView: View {
             // disableChallenge doesn't flash a different palette. The
             // explainer reads as "you're about to do something serious"
             // rather than "you're inside a form setting".
-            Color.black.ignoresSafeArea()
+            Color.wpChar900.ignoresSafeArea()
             if showCapture {
                 CameraCaptureFlow(onSuccess: handleCapturedAttempt)
             } else {
                 explainer
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     /// Initial explainer surface. Copy intentionally echoes AlarmRingingView's
@@ -54,48 +55,48 @@ struct DisableChallengeView: View {
     /// alarm imposes the SAME proof burden as the morning ring, so the UX
     /// language is deliberately identical.
     private var explainer: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: WPSpacing.xl) {
             Spacer()
 
             Image(systemName: "lock.shield")
-                .font(.system(size: 72))
-                .foregroundStyle(.white)
+                .font(.system(size: 64))
+                .foregroundStyle(Color.wpCream50.opacity(0.9))
 
             Text("Prove you're awake to disable.")
-                .font(.title2.bold())
-                .foregroundStyle(.white)
+                .wpFont(.title2)
+                .foregroundStyle(Color.wpCream50)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                .padding(.horizontal, WPSpacing.xl2)
 
             if let location = baselines.first?.locationLabel {
                 Text("Meet yourself at \(location) first — same as a morning ring.")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .wpFont(.body)
+                    .foregroundStyle(Color.wpCream50.opacity(0.75))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
+                    .padding(.horizontal, WPSpacing.xl2)
             } else {
                 // Onboarding should have guaranteed a baseline before the
                 // scheduler view is reachable — if we somehow hit this
                 // branch, show a neutral message rather than a blank
                 // placeholder.
                 Text("Disabling requires the same proof as waking.")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .wpFont(.body)
+                    .foregroundStyle(Color.wpCream50.opacity(0.75))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
+                    .padding(.horizontal, WPSpacing.xl2)
             }
 
             if let error = scheduler.lastCaptureError {
                 Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .wpFont(.footnote)
+                    .foregroundStyle(Color.wpAttempted)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                    .padding(.horizontal, WPSpacing.xl2)
             }
 
             Spacer()
 
-            VStack(spacing: 12) {
+            VStack(spacing: WPSpacing.sm) {
                 Button("Prove you're awake → disable") {
                     showCapture = true
                 }
@@ -104,11 +105,11 @@ struct DisableChallengeView: View {
                 Button("Cancel") {
                     scheduler.cancelDisableChallenge()
                 }
-                .foregroundStyle(.white.opacity(0.7))
-                .padding(.top, 4)
+                .foregroundStyle(Color.wpCream50.opacity(0.7))
+                .padding(.top, WPSpacing.xs1)
             }
-            .padding(.horizontal)
-            .padding(.bottom, 40)
+            .padding(.horizontal, WPSpacing.xl2)
+            .padding(.bottom, WPSpacing.xl3)
         }
     }
 
