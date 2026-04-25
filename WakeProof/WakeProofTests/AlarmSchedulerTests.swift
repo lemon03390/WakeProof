@@ -486,8 +486,16 @@ final class AlarmSchedulerTests: XCTestCase {
     }
 
     /// G1: user cancels the capture flow before resolving. Distinguished
-    /// from a REJECTED verdict in that no error message surfaces — this
-    /// is an intentional back-out, not a failed proof.
+    /// from a REJECTED verdict in that no proof was attempted — this is an
+    /// intentional back-out.
+    ///
+    /// E-C5 (Wave 2.3, 2026-04-26): cancel now sets `lastCaptureError` to an
+    /// explanatory message so the user sees "Disable cancelled — alarm
+    /// stays enabled. Hold the toggle longer to retry." instead of a
+    /// totally-silent return to idle. Previously nil-cleared, which made
+    /// "I cancelled" look identical to "I tapped the wrong button" in the
+    /// UI. The error string is informational, not a failure marker — the
+    /// banner copy makes the contract visible.
     func testCancelDisableChallengeReturnsToIdle() {
         let enabled = WakeWindow(startHour: 7, startMinute: 0, endHour: 7, endMinute: 30, isEnabled: true)
         scheduler.updateWindow(enabled)
@@ -498,8 +506,12 @@ final class AlarmSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.phase, .idle)
         XCTAssertTrue(scheduler.window.isEnabled,
                       "cancel must keep the window enabled — no contract change")
-        XCTAssertNil(scheduler.lastCaptureError,
-                     "cancel is intentional, not a failure — no error message should surface")
+        // E-C5: lastCaptureError IS expected to be set with the contract-
+        // visibility copy. Assert presence + content rather than nil.
+        XCTAssertNotNil(scheduler.lastCaptureError,
+                        "E-C5: cancel must surface contract-explainer copy, not silent return")
+        XCTAssertTrue(scheduler.lastCaptureError?.contains("alarm stays enabled") ?? false,
+                      "E-C5: copy must explain the contract is still active")
     }
 
     // MARK: - Stage 8 CRITICAL 1: disableChallengeSucceeded save failure
@@ -653,6 +665,13 @@ final class AlarmSchedulerTests: XCTestCase {
     /// regardless of grace-window state. Demo recording only. A UIT launch
     /// argument does the same thing (`-disableBypassForUIT`). Both live in
     /// `#if DEBUG` so release builds can never honor them.
+    ///
+    /// S-I7 (Wave 2.1, 2026-04-26): the production bypass path now also
+    /// requires `isDebuggerAttached()` to be true (defence-in-depth even
+    /// inside DEBUG). xcodebuild test runs without a debugger attached, so
+    /// we use the test seam `bypassActive:` to inject the policy decision
+    /// directly. The seam itself is wrapped in `#if DEBUG` in production —
+    /// release builds can't reach the bypass branch at all.
     func testDebugBypassToggleAllowsDirectDisable() {
         // Seed past-grace so only the bypass can allow.
         let installedAt = Date()
@@ -660,18 +679,11 @@ final class AlarmSchedulerTests: XCTestCase {
         let now = installedAt.addingTimeInterval(25 * 60 * 60) // post-grace
 
         // Without bypass: challenge required.
-        XCTAssertFalse(suiteDefaults.bool(forKey: AlarmScheduler.disableChallengeBypassKey),
-                       "precondition: bypass key off")
-        XCTAssertEqual(scheduler.requestDisable(now: now), .challengeRequired)
+        XCTAssertEqual(scheduler.requestDisable(now: now, bypassActive: false), .challengeRequired)
 
         // With bypass on: allowed.
-        suiteDefaults.set(true, forKey: AlarmScheduler.disableChallengeBypassKey)
-        XCTAssertEqual(scheduler.requestDisable(now: now), .allowed,
+        XCTAssertEqual(scheduler.requestDisable(now: now, bypassActive: true), .allowed,
                        "DEBUG bypass flag must allow direct disable regardless of grace window")
-
-        // Clear for subsequent tests — the tearDown wipes the suite, but
-        // explicit reset makes the test readable.
-        suiteDefaults.set(false, forKey: AlarmScheduler.disableChallengeBypassKey)
     }
 
     /// G1: the UIT launch-arg pathway. Implementation inspects

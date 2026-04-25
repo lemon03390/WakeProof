@@ -92,8 +92,17 @@ nonisolated enum EndpointGuard {
     /// configuration — a future Info.plist edit could disable it. The guard's
     /// whole job is to fail before that becomes load-bearing. Accepts only
     /// `https`; rejects `http`, `ftp`, `file`, `data`, etc.
+    ///
+    /// Order: malformed (missing scheme entirely) → wrong scheme → malformed
+    /// host. A URL with no scheme at all is malformed input; one with a
+    /// concrete-but-wrong scheme (e.g. `http`, `file`, `ftp`) is a deliberate
+    /// reject path so the error surface stays distinct.
     static func validate(_ url: URL) throws -> URL {
-        let scheme = url.scheme?.lowercased() ?? ""
+        // No scheme at all = malformed input (URL parsed but has nothing).
+        guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
+            throw GuardError.malformedURL(urlString: url.absoluteString)
+        }
+        // Concrete-but-wrong scheme = schemeNotAllowed.
         guard scheme == "https" else {
             throw GuardError.schemeNotAllowed(scheme: scheme, url: url.absoluteString)
         }

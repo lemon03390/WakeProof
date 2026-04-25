@@ -223,13 +223,13 @@ final class MemoryStoreTests: XCTestCase {
             timestamp: Date(timeIntervalSince1970: 1_745_500_000),
             verdict: "VERIFIED", confidence: 0.9, retryCount: 0, note: "valid"
         ))
-        // Manually inject a corrupt line into the on-disk jsonl.
-        let docs = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
-        let userDir = docs.appendingPathComponent("memory/\(uuid)", isDirectory: true)
+        // Manually inject a corrupt line into the on-disk jsonl. The store
+        // uses the custom test `root` (set via setUp) — not Documents/.
+        // Path layout: <root>/<uuid>/history.jsonl per MemoryStore's
+        // `userDirectoryURL()` which composes `rootDirectory + userUUID`.
+        let userDir = root.appendingPathComponent(uuid, isDirectory: true)
         let historyFile = userDir.appendingPathComponent("history.jsonl", isDirectory: false)
         let existing = try Data(contentsOf: historyFile)
-        // Append "{not-json\n" — a line that fails JSON decode but doesn't
-        // crash the file reader (still UTF-8, still a complete line).
         var combined = Data()
         combined.append(existing)
         combined.append("{not-json}\n".data(using: .utf8)!)

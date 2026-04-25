@@ -671,9 +671,13 @@ final class ClaudeAPIClientTests: XCTestCase {
             antiSpoofInstruction: nil
         )
         let body = try XCTUnwrap(bodyCapture.body)
-        // 3-byte stub × base64 (4 chars) × 2 images + JSON wrapper ≈ <2 KB. Not a tight
-        // assertion, just enough to prove the stub didn't get rejected upstream.
-        XCTAssertLessThan(body.count, 5000)
+        // 3-byte stub × base64 (4 chars) × 2 images + JSON wrapper. Not a tight
+        // assertion, just enough to prove the stub didn't get rejected upstream
+        // OR get base64-blown to MB-size. 8 KB ceiling accommodates the v3
+        // system prompt's growth (S-I3 added ~700 bytes for the image-channel
+        // injection defense paragraph) — bump again if a future prompt revision
+        // crosses this threshold legitimately.
+        XCTAssertLessThan(body.count, 8000)
     }
 
     /// Generate a synthetic JPEG of the requested long-side dimension. Used to exercise

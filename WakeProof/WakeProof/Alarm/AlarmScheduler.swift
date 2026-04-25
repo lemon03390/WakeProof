@@ -494,12 +494,23 @@ final class AlarmScheduler {
     /// to invoke `beginDisableChallenge()` or flip isEnabled locally. Keeps the
     /// policy (grace + bypass) separate from the transition, so tests can exercise
     /// the policy without engaging the state machine.
-    func requestDisable(now: Date = .now) -> DisableRequestOutcome {
+    /// S-I7 (Wave 2.1) test seam: `bypassActive` defaults to the real check
+    /// (which requires #if DEBUG + debugger attached OR -disableBypassForUIT
+    /// launch argument). Tests can override to true/false directly without
+    /// having to fake ProcessInfo or debugger attachment.
+    func requestDisable(
+        now: Date = .now,
+        bypassActive: Bool? = nil
+    ) -> DisableRequestOutcome {
         #if DEBUG
-        if Self.isDisableChallengeBypassActive(defaults: defaults) {
+        let active = bypassActive ?? Self.isDisableChallengeBypassActive(defaults: defaults)
+        if active {
             logger.info("requestDisable: DEBUG bypass active — allowing direct disable")
             return .allowed
         }
+        #else
+        // bypassActive is ignored in Release — bypass paths don't compile.
+        _ = bypassActive
         #endif
         if Self.isInGracePeriod(now: now, defaults: defaults) {
             logger.info("requestDisable: inside 24h grace — allowing direct disable")
