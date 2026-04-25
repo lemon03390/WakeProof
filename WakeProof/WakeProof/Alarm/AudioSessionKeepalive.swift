@@ -246,26 +246,89 @@ final class AudioSessionKeepalive {
 
     /// Begin looping an alarm sound at moderate initial volume. Caller drives escalation via setAlarmVolume.
     /// Re-entrant safe: stops any prior alarm player so two AVAudioPlayers cannot fight over the session.
+    ///
+    /// Phase 8 device-test fix: the silent-loop keepalive is supposed to keep
+    /// the AVAudioSession active overnight, but iOS may silently invalidate
+    /// the session under specific conditions (memory pressure, mediaserverd
+    /// reset, prolonged background, edge-case interruption recovery failure).
+    /// When that happens `player.play()` returns false and the alarm rings
+    /// silently — the user sleeps through. Real overnight test reproduced
+    /// this exact failure: alarm fired, banner showed "Alarm player refused
+    /// to start for alarm.m4a", three G3 backup notifications also arrived
+    /// silently (silent-mode iPhone), user woke up an hour late.
+    ///
+    /// Defensive re-arm: re-set category + setActive(true) before each
+    /// playAlarmSound call. setCategory is idempotent (no-op when already
+    /// .playback + .mixWithOthers), setActive(true) is also idempotent on an
+    /// already-active session. Cost is one mediaserverd XPC on the alarm
+    /// fire path (~10ms), which the user happily trades for "alarm actually
+    /// rings" reliability.
+    ///
+    /// Retry-once fallback: if first play() returns false, sleep 100ms (give
+    /// the session time to settle after re-arm) then retry. This catches the
+    /// edge case where setActive returns success but the audio HW isn't yet
+    /// routable. Two attempts is enough — beyond that something is genuinely
+    /// broken and we want the lastError surfaced to the home banner.
     func playAlarmSound(url: URL) {
         alarmPlayer?.stop()
         alarmPlayer = nil
+        rearmSessionForAlarm()
         do {
             let player = try AVAudioPlayer(contentsOf: url)
             player.numberOfLoops = -1
             player.volume = 0.3
-            guard player.prepareToPlay(), player.play() else {
-                let msg = "Alarm player refused to start for \(url.lastPathComponent)"
-                logger.error("\(msg, privacy: .public)")
-                lastError = msg
+            if player.prepareToPlay(), player.play() {
+                alarmPlayer = player
+                lastError = nil
+                logger.info("Alarm sound started at \(Date().ISO8601Format(), privacy: .public)")
                 return
             }
-            alarmPlayer = player
-            lastError = nil
-            logger.info("Alarm sound started at \(Date().ISO8601Format(), privacy: .public)")
+            // First attempt refused — re-arm + retry once. Common cause:
+            // setActive returned true but the audio route wasn't yet
+            // reconfigured (XPC race). 100ms gives mediaserverd time to
+            // settle. Synchronous sleep is acceptable here because (a) the
+            // alarm UI is already visible (no user-perceived stall) and (b)
+            // we're on @MainActor — no actor-hop cost.
+            logger.warning("Alarm player.play() refused on first attempt — re-arming session for retry")
+            rearmSessionForAlarm()
+            Thread.sleep(forTimeInterval: 0.1)
+            let retry = try AVAudioPlayer(contentsOf: url)
+            retry.numberOfLoops = -1
+            retry.volume = 0.3
+            if retry.prepareToPlay(), retry.play() {
+                alarmPlayer = retry
+                lastError = nil
+                logger.info("Alarm sound started on retry at \(Date().ISO8601Format(), privacy: .public)")
+                return
+            }
+            let msg = "Alarm player refused to start for \(url.lastPathComponent) (after retry)"
+            logger.error("\(msg, privacy: .public)")
+            lastError = msg
         } catch {
             let msg = "Failed to start alarm sound: \(error.localizedDescription)"
             logger.error("\(msg, privacy: .public)")
             lastError = msg
+        }
+    }
+
+    /// Defense-in-depth: reset category + reactivate the session before each
+    /// alarm fire. The silent-loop keepalive is supposed to keep this hot,
+    /// but real overnight tests showed iOS can silently invalidate the
+    /// session — without re-arm, `player.play()` then refuses. Both calls
+    /// are idempotent on an already-correct session. Logged at info level
+    /// so a recurring re-arm pattern in Console signals a flaky keepalive
+    /// worth deeper investigation.
+    private func rearmSessionForAlarm() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true, options: [])
+            logger.info("Audio session re-armed for alarm fire (category=\(session.category.rawValue, privacy: .public))")
+        } catch {
+            logger.error("Pre-alarm session re-arm failed: \(error.localizedDescription, privacy: .public). play() may refuse.")
+            // Not fatal here — let playAlarmSound's main path attempt the
+            // play and surface its own error if it fails. The error here
+            // is observable in Console for post-mortem.
         }
     }
 
