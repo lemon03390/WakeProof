@@ -29,6 +29,14 @@ struct AlarmRingingView: View {
     /// Populated in `.onAppear` via Task.detached and used directly in body.
     @State private var cachedBaselineImage: UIImage?
 
+    /// Round-2 F-6 (Wave 3.4, 2026-04-26): when decode returns nil (corrupt
+    /// JPEG bytes — rare; SwiftData store partial corruption), the body
+    /// would silently render only the error banner with no visual reference.
+    /// The user, half-awake at 7am, has no signal that the baseline image
+    /// is unrecoverable. This flag drives a "Re-run onboarding" hint so the
+    /// failure mode is visible.
+    @State private var baselineDecodeFailed: Bool = false
+
     var body: some View {
         ZStack {
             Color.wpChar900.ignoresSafeArea()
@@ -69,6 +77,16 @@ struct AlarmRingingView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
                         .padding(.horizontal, WPSpacing.xl2)
+                    } else if baselineDecodeFailed {
+                        // F-6 (Wave 3.4): decode failed — surface the
+                        // unrecoverable state so the user knows to re-run
+                        // onboarding rather than tap "Prove you're awake"
+                        // forever against a missing reference.
+                        Text("Baseline photo couldn't be loaded. Reinstall to re-capture.")
+                            .wpFont(.footnote)
+                            .foregroundStyle(Color.wpAttempted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, WPSpacing.xl2)
                     }
                     Text(error)
                         .wpFont(.callout)
@@ -91,11 +109,19 @@ struct AlarmRingingView: View {
             // late-arriving REJECTED render doesn't pay 5–7 MB of decode at
             // animation time. Decode on the user-initiated background QoS
             // and assign back to MainActor.
+            //
+            // F-6 (Wave 3.4): record decode-failed so the body can render
+            // the "couldn't load" hint instead of silently skipping the
+            // "Match this scene" overlay.
             if cachedBaselineImage == nil, let data = baselines.first?.imageData {
                 let image = await Task.detached(priority: .userInitiated) {
                     UIImage(data: data)
                 }.value
-                cachedBaselineImage = image
+                if let image {
+                    cachedBaselineImage = image
+                } else {
+                    baselineDecodeFailed = true
+                }
             }
         }
     }

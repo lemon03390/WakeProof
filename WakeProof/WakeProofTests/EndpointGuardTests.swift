@@ -186,6 +186,52 @@ final class EndpointGuardTests: XCTestCase {
         }
     }
 
+    // MARK: - R2-I1 (Wave 3.4): credentialsInURL invariant
+
+    /// Round-2 PR-review R2-I1: SF-3 added the `credentialsInURL` enum case
+    /// to reject `https://user:pass@host/...` URLs that would otherwise
+    /// pass scheme + host checks but leak credentials into HTTP Basic
+    /// Auth and any caller log interpolating `endpoint.absoluteString`.
+    /// Pin the rejection here so a future reordering of validate's checks
+    /// (or removal of the enum case) breaks tests immediately.
+
+    /// Allowlisted host with embedded credentials → rejected with
+    /// credentialsInURL, not hostNotAllowed.
+    func testCredentialsInAllowlistedURLAreRejected() {
+        let input = "https://attacker:secret@wakeproof-proxy-vercel.vercel.app/v1/messages"
+        XCTAssertThrowsError(try EndpointGuard.validate(urlString: input)) { error in
+            guard case EndpointGuard.GuardError.credentialsInURL(let url) = error else {
+                XCTFail("Expected credentialsInURL, got \(error)")
+                return
+            }
+            // Redacted URL must NOT contain the credentials.
+            XCTAssertFalse(url.contains("attacker"), "Redacted URL leaked username — got \(url)")
+            XCTAssertFalse(url.contains("secret"), "Redacted URL leaked password — got \(url)")
+            // Host should still be there for diagnostic use.
+            XCTAssertTrue(url.contains("wakeproof-proxy-vercel.vercel.app"))
+        }
+    }
+
+    /// Same shape but non-allowlisted host — still credentialsInURL (reject
+    /// fires BEFORE host check so the credentials don't leak through host-
+    /// not-allowed's error string).
+    func testCredentialsInNonAllowlistedURLAreRejectedAsCredentialsNotHost() {
+        let input = "https://u:p@evil.example/path"
+        XCTAssertThrowsError(try EndpointGuard.validate(urlString: input)) { error in
+            guard case EndpointGuard.GuardError.credentialsInURL = error else {
+                XCTFail("Expected credentialsInURL (fires before host check), got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Plain HTTPS to allowlisted host — accepted (no credentials).
+    func testPlainHTTPSToAllowlistedHostAccepted() throws {
+        let url = try EndpointGuard.validate(urlString: "https://wakeproof-proxy-vercel.vercel.app/v1/messages")
+        XCTAssertNil(url.user, "Sanity: production URL has no userinfo")
+        XCTAssertNil(url.password)
+    }
+
     // MARK: - P21: invariant test for allowlist hygiene
 
     /// P21 (Stage 6 Wave 2): every suffix-form entry in `allowedHostSuffixes`

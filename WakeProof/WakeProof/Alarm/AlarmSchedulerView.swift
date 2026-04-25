@@ -621,6 +621,16 @@ struct AlarmSchedulerView: View {
         if droppedMemoryWrites > 0 {
             return "Memory calibration degraded: \(droppedMemoryWrites) write\(droppedMemoryWrites == 1 ? "" : "s") dropped."
         }
+        // Round-2 F-2 (Wave 3.4): retention drift — at least one wake-attempt
+        // file failed to delete during the cleaner sweep. The 7-day promise
+        // is silently breaking; surface so triage can spot it. Lowest
+        // priority because the privacy-relevant data is logged (not user-
+        // facing), but the user has the right to see "your retention promise
+        // is drifting" when it is.
+        let drift = WakeAttemptCleaner.retentionDriftCount()
+        if drift > 0 {
+            return "Storage cleanup couldn't remove \(drift) old recording\(drift == 1 ? "" : "s"). Restart WakeProof or check device storage."
+        }
         return nil
     }
 

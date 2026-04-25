@@ -28,6 +28,7 @@
 //
 
 import Foundation
+import os
 
 /// Hostname allowlist guard for outbound Claude-proxy calls.
 ///
@@ -35,6 +36,15 @@ import Foundation
 /// `nonisolated` static init) can invoke `validate` without actor hops.
 /// The enum has no stored state — all methods are pure.
 nonisolated enum EndpointGuard {
+
+    /// Round-2 F-4 (Wave 3.4, 2026-04-26): defensive logger so any future
+    /// caller using bare `validate(_:)` (instead of `validateOrCrash`)
+    /// leaves a triage trail when a rejection happens. Currently every
+    /// production caller goes through `validateOrCrash` which preconditions,
+    /// so the logs aren't load-bearing today — but the symmetry-with-other-
+    /// guards principle says don't ship a security check that throws
+    /// silently.
+    private static let logger = Logger(subsystem: LogSubsystem.app, category: "endpoint-guard")
     /// Hosts the iOS client is permitted to reach.
     ///
     /// Entries are matched either as exact hostnames (e.g. `api.anthropic.com`,
@@ -123,20 +133,31 @@ nonisolated enum EndpointGuard {
     static func validate(_ url: URL) throws -> URL {
         // No scheme at all = malformed input (URL parsed but has nothing).
         guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
-            throw GuardError.malformedURL(urlString: url.absoluteString)
+            // F-9 (Wave 3.4): redact urlString in the error payload so the
+            // localizedDescription doesn't re-embed credentials a future
+            // malformed-URL caller might pass.
+            let safe = redact(url)
+            logger.error("validate: malformed URL (no scheme) — \(safe, privacy: .public)")
+            throw GuardError.malformedURL(urlString: safe)
         }
         // Concrete-but-wrong scheme = schemeNotAllowed.
         guard scheme == "https" else {
-            throw GuardError.schemeNotAllowed(scheme: scheme, url: url.absoluteString)
+            let safe = redact(url)
+            logger.error("validate: scheme '\(scheme, privacy: .public)' rejected — \(safe, privacy: .public)")
+            throw GuardError.schemeNotAllowed(scheme: scheme, url: safe)
         }
         // SF-3 (Wave 3.1): reject embedded credentials so they don't become
         // part of the live `endpoint` URL. Use the redacted form in the error
         // payload so the credentials don't leak into the thrown error either.
         if url.user != nil || url.password != nil {
-            throw GuardError.credentialsInURL(url: redact(url))
+            let safe = redact(url)
+            logger.error("validate: credentials embedded in URL — \(safe, privacy: .public)")
+            throw GuardError.credentialsInURL(url: safe)
         }
         guard let host = url.host, !host.isEmpty else {
-            throw GuardError.malformedURL(urlString: url.absoluteString)
+            let safe = redact(url)
+            logger.error("validate: malformed URL (no host) — \(safe, privacy: .public)")
+            throw GuardError.malformedURL(urlString: safe)
         }
         let allowed = allowedHostSuffixes.contains { suffix in
             if suffix.hasPrefix(".") {
@@ -148,7 +169,9 @@ nonisolated enum EndpointGuard {
             return host == suffix
         }
         guard allowed else {
-            throw GuardError.hostNotAllowed(host: host, url: url.absoluteString)
+            let safe = redact(url)
+            logger.error("validate: host '\(host, privacy: .public)' not in allowlist — \(safe, privacy: .public)")
+            throw GuardError.hostNotAllowed(host: host, url: safe)
         }
         return url
     }

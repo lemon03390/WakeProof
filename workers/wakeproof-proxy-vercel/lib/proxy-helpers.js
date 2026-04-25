@@ -117,10 +117,14 @@ export function sanitizeUpstreamBody(status, originalBytes, contentType) {
         : 'Upstream error (details suppressed)',
     };
     return Buffer.from(JSON.stringify({ error: sanitized }), 'utf8');
-  } catch {
-    // Parse failure on a JSON-claimed content type. Don't pass-through —
-    // emit a synthetic safe body. Logged at the proxy route via the upstream
-    // status code, so triage still has the original status.
+  } catch (err) {
+    // Round-2 F-3 (Wave 3.4, 2026-04-26): log the parse failure so triage
+    // can distinguish "Anthropic returned valid JSON we sanitized" from
+    // "Anthropic returned malformed bytes we replaced wholesale". Without
+    // this log line the access-log status code looks identical for both.
+    // The original bytes are NOT logged (they may contain echoed prompt
+    // fragments — the whole reason the function exists).
+    console.warn(`[sanitize_parse_failed] status=${status} bytes=${originalBytes.length} contentType=${contentType} err=${String(err)}`);
     return Buffer.from(
       JSON.stringify({ error: { type: 'invalid_request_error', message: 'Upstream error (unparseable)' } }),
       'utf8'

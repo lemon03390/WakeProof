@@ -39,6 +39,26 @@ import os
 enum WakeAttemptCleaner {
     private static let logger = Logger(subsystem: LogSubsystem.app, category: "wake-attempt-cleaner")
 
+    /// Round-2 F-2 (Wave 3.4, 2026-04-26): UserDefaults-backed counter
+    /// surfaced via AlarmSchedulerView's systemBanner. Bumps when a sweep
+    /// fails to delete a stale file; cleared after a clean sweep. Without
+    /// this, the 7-day retention promise could quietly drift on a device
+    /// with persistent FS issues (sandbox edge case after iOS upgrade,
+    /// AVFoundation holding file handles) — the failure was logged but
+    /// invisible to the user. Mirrors the `droppedMemoryWrites` pattern.
+    static let retentionDriftKey = "com.wakeproof.retention.driftCount"
+    static func retentionDriftCount(on defaults: UserDefaults = .standard) -> Int {
+        defaults.integer(forKey: retentionDriftKey)
+    }
+    static func clearRetentionDrift(on defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: retentionDriftKey)
+    }
+    private static func bumpRetentionDrift(by count: Int, on defaults: UserDefaults = .standard) {
+        guard count > 0 else { return }
+        let current = defaults.integer(forKey: retentionDriftKey)
+        defaults.set(current + count, forKey: retentionDriftKey)
+    }
+
     /// Days to keep .mov clips on disk.
     static let videoRetentionDays: Int = 7
     /// Days to keep `imageData` bytes in WakeAttempt rows. Row itself is kept.
@@ -55,8 +75,13 @@ enum WakeAttemptCleaner {
     }
 
     /// Allows the user to manually clear all wake recordings + image bytes.
-    /// Wired to a Settings action; doesn't delete the WakeAttempt rows themselves
-    /// (those carry verdict / streak data the user may want to keep).
+    /// Available API for a future Settings integration; not yet wired to a
+    /// UI surface (Round-2 F-1 — privacy promise reduced in Info.plist
+    /// from "you can also clear from Settings" to retention-only language
+    /// while the Settings UI is post-ship). The function is still here so
+    /// once Settings ships, the wiring is one call. Doesn't delete the
+    /// WakeAttempt rows themselves (those carry verdict / streak data the
+    /// user may want to keep).
     ///
     /// SF-1 (Wave 3.1, 2026-04-26): file-delete failure now logged + counted
     /// instead of `try?`-swallowed. The privacy-sensitive purge was previously
@@ -196,12 +221,14 @@ enum WakeAttemptCleaner {
                 logger.error("Video delete failed for \(next.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
             }
         }
-        if deletedCount > 0 || failedCount > 0 {
-            if failedCount > 0 {
-                logger.error("Wake-attempt video sweep: deleted=\(deletedCount) failed=\(failedCount) bytes=\(bytesReclaimed) — retention promise may be drifting")
-            } else {
-                logger.info("Deleted \(deletedCount) wake-attempt videos older than \(videoRetentionDays) days; bytes=\(bytesReclaimed)")
-            }
+        if failedCount > 0 {
+            logger.error("Wake-attempt video sweep: deleted=\(deletedCount) failed=\(failedCount) bytes=\(bytesReclaimed) — retention promise may be drifting")
+            bumpRetentionDrift(by: failedCount)
+        } else if deletedCount > 0 {
+            logger.info("Deleted \(deletedCount) wake-attempt videos older than \(videoRetentionDays) days; bytes=\(bytesReclaimed)")
+            // Clean sweep — clear any prior drift counter so the banner stops
+            // showing stale state once the FS issue is resolved.
+            clearRetentionDrift()
         }
     }
 

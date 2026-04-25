@@ -27,9 +27,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>WakeProof needs the camera to verify you're actually out of bed when your alarm rings. Each wake attempt records a brief clip; a single still frame is sent to Anthropic's Claude AI for verification. The clip is stored locally on your device for ~7 days, then automatically deleted; you can also clear all recordings from Settings.</string>
+	<string>WakeProof needs the camera to verify you're actually out of bed when your alarm rings. Each wake attempt records a brief clip; a single still frame is sent to Anthropic's Claude AI for verification. The clip is stored locally on your device for up to 7 days, then automatically deleted.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>WakeProof records a brief (≤4s) clip alongside your wake-up photo. The microphone is only accessed during the wake-up verification; audio is kept local on your device for ~7 days, then automatically deleted, and is never uploaded.</string>
+	<string>WakeProof records a brief (≤4s) clip alongside your wake-up photo. The microphone is only accessed during the wake-up verification; audio is kept local on your device for up to 7 days, then automatically deleted, and is never uploaded.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>WakeProof reads your sleep data from Apple Health to show you a summary of last night's rest when you successfully wake up.</string>
 	<key>NSUserNotificationsUsageDescription</key>

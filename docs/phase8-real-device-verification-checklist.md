@@ -97,7 +97,7 @@ Welcome flow / Permission primers / Baseline capture / Bedtime / Hero block / St
 - [X] Title "Capture your baseline" 顯示
 - [X] TextField "Label this spot" — **打字時文字為深 charcoal（不是純黑）**，背景 system roundedBorder
 - [X] 拍照後 preview 圖最高 260pt、圓角 16pt
-- [ ] Location 未填時 Save button 為 **muted** 樣式（無 shadow，opacity 較低）
+- [X] Location 未填時 Save button 為 **muted** 樣式（無 shadow，opacity 較低）
 - [X] Location 填好 → Save button 變 **wpVerified 綠色**（primaryConfirm）
 - [X] Save 後進入下一 step
 
@@ -132,8 +132,8 @@ Welcome flow / Permission primers / Baseline capture / Bedtime / Hero block / St
 - [X] 大時鐘顯示**現在時間**（hh:mm），SF Pro Rounded 64pt
 - [X] 時鐘**每秒 tick**（觀察分鐘變化時數字不抖動 — `monospacedDigit()` 生效）
 - [X] 設定一個 alarm 後 → 時鐘下方出現 **"Next ring Mon Apr 26 06:30"** 灰色 footnote
-- [ ] 完成至少一次 verified verify → **WPStreakBadge** 在時鐘下方出現（wpVerified 綠膠囊 + "1 day"）
-- [ ] **點 Streak badge → 直接跳到 StreakCalendarView**（不是只是 visual feedback）
+- [X] 完成至少一次 verified verify → **WPStreakBadge** 在時鐘下方出現（wpVerified 綠膠囊 + "1 day"）
+- [X] **點 Streak badge → 直接跳到 StreakCalendarView**（不是只是 visual feedback）
 
 > FAIL notes：
 
