@@ -60,32 +60,29 @@ struct InvestmentDashboardView: View {
     private let logger = Logger(subsystem: LogSubsystem.verification, category: "dashboard")
 
     var body: some View {
-        Form {
-            // Metric 1: baseline age. Always rendered — on fresh install it
-            // carries the prompt copy that tells the user what's missing.
-            Section {
+        ScrollView {
+            VStack(spacing: WPSpacing.md) {
+                // Metric 1: baseline age. Always rendered — on fresh install it
+                // carries the prompt copy that tells the user what's missing.
                 baselineCard
-            }
 
-            // Metrics 2 + 3: gated on baseline presence. A fresh-install
-            // user sees only the prompt card above; these two only make
-            // sense once a baseline exists.
-            if baselines.first != nil {
-                Section {
+                // Metrics 2 + 3: gated on baseline presence. A fresh-install
+                // user sees only the prompt card above; these two only make
+                // sense once a baseline exists.
+                if baselines.first != nil {
                     verifiedMorningsCard
-                }
-                Section {
                     insightsCard
-                }
-                Section {
                     framingLine
                 }
             }
+            .padding(.horizontal, WPSpacing.xl2)
+            .padding(.vertical, WPSpacing.xl)
         }
+        .background(Color.wpCream100)
         .navigationTitle("Your commitment")
         .navigationBarTitleDisplayMode(.inline)
-        // Load the async Opus insights count. `.task` on the Form binds the
-        // lifetime to the view's presentation — a re-entry into the view
+        // Load the async Opus insights count. `.task` on the ScrollView binds
+        // the lifetime to the view's presentation — a re-entry into the view
         // re-fires this, which is intentional: navigating back and forth
         // refreshes the count after a verify that landed while we were away.
         .task { await loadInsightsCount() }
@@ -96,47 +93,44 @@ struct InvestmentDashboardView: View {
     @ViewBuilder
     private var baselineCard: some View {
         if let baseline = baselines.first {
-            metricRow(
-                bigText: InvestmentDashboardModel.baselineAgeText(
+            WPMetricCard(
+                value: InvestmentDashboardModel.baselineAgeText(
                     capturedAt: baseline.capturedAt,
                     now: now
                 ),
-                label: "Baseline captured",
-                subHint: InvestmentDashboardModel.baselineSubHint(
+                label: InvestmentDashboardModel.baselineSubHint(
                     locationLabel: baseline.locationLabel,
                     capturedAt: baseline.capturedAt
                 )
             )
         } else {
             // No baseline → show only this card with the onboarding prompt.
-            // Using a single-line copy as defined in the locked spec.
-            Text(InvestmentDashboardModel.noBaselineCopy)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
+            WPCard {
+                Text(InvestmentDashboardModel.noBaselineCopy)
+                    .wpFont(.body)
+                    .foregroundStyle(Color.wpChar500)
+                    .padding(.vertical, WPSpacing.xs1)
+            }
         }
     }
 
     @ViewBuilder
     private var verifiedMorningsCard: some View {
         let count = InvestmentDashboardModel.verifiedCount(from: wakeAttempts)
-        metricRow(
-            bigText: "\(count)",
-            label: "Verified mornings",
-            subHint: count == 0
-                ? "Tomorrow's your first"
-                : "Since baseline"
+        WPMetricCard(
+            value: "\(count)",
+            label: count == 0 ? "Verified mornings — tomorrow's your first" : "Verified mornings since baseline",
+            accent: true
         )
     }
 
     @ViewBuilder
     private var insightsCard: some View {
-        metricRow(
-            bigText: InvestmentDashboardModel.insightsCountText(insightsCount),
-            label: "Insights Opus noticed about you",
-            subHint: (insightsCount ?? 0) == 0 && insightsCount != nil
-                ? "Opus starts noticing after verified wakes"
-                : "From your memory file"
+        WPMetricCard(
+            value: InvestmentDashboardModel.insightsCountText(insightsCount),
+            label: (insightsCount ?? 0) == 0 && insightsCount != nil
+                ? "Insights — Opus starts noticing after verified wakes"
+                : "Insights Opus noticed about you"
         )
     }
 
@@ -144,35 +138,11 @@ struct InvestmentDashboardView: View {
     private var framingLine: some View {
         let count = InvestmentDashboardModel.verifiedCount(from: wakeAttempts)
         Text(InvestmentDashboardModel.framingLine(verifiedCount: count))
-            .font(.title3.weight(.semibold))
+            .wpFont(.title3)
+            .foregroundStyle(Color.wpChar900)
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-    }
-
-    /// Shared two-column metric row: big number/text on the left, label +
-    /// optional sub-hint stacked on the right.
-    @ViewBuilder
-    private func metricRow(bigText: String, label: String, subHint: String?) -> some View {
-        HStack(alignment: .center, spacing: 16) {
-            Text(bigText)
-                .font(.system(size: 32, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
-                .frame(minWidth: 90, alignment: .leading)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.headline)
-                if let subHint, !subHint.isEmpty {
-                    Text(subHint)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(bigText). \(label)\(subHint.map { ". \($0)" } ?? "")")
+            .padding(.vertical, WPSpacing.xs2)
     }
 
     // MARK: - Async loading
