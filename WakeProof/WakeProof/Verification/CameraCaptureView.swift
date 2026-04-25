@@ -36,7 +36,6 @@ struct CameraCaptureResult {
 
 enum CameraCaptureError: LocalizedError {
     case cameraUnavailable
-    case microphoneUnavailable
     case sessionConfigFailed(underlying: Error)
     case recordingFailed(underlying: Error)
     case noVideoURLReturned
@@ -46,7 +45,6 @@ enum CameraCaptureError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .cameraUnavailable:          return "Camera unavailable. Try restarting WakeProof."
-        case .microphoneUnavailable:      return "Microphone permission needed to record. Open Settings → WakeProof → Microphone."
         case .sessionConfigFailed:        return "Couldn't start camera. Try once more — if it persists, restart WakeProof."
         case .recordingFailed:            return "Recording failed. Tap \"Prove you're awake\" to retry."
         case .dismissedWhileBackgrounded: return "Camera closed while app was backgrounded. Try again."
@@ -234,16 +232,29 @@ private final class CameraRecorderViewController: UIViewController {
     deinit {
         NotificationCenter.default.removeObserver(self)
         // SwiftUI may tear down the UIViewControllerRepresentable without going
-        // through cancel/success (parent view removed mid-recording). Without
+        // through cancel/success — most commonly via the CameraCaptureFlow
+        // 30s watchdog firing returnToRingingWith(...) mid-recording. Without
         // explicit teardown the AVCaptureSession keeps running and the orange
-        // mic indicator stays on indefinitely. sessionQueue.async is safe in
-        // deinit because deinit holds the last strong reference — no
-        // re-entrancy risk on the captured queue.
+        // mic indicator stays on indefinitely.
+        //
+        // Two cleanups required, both safe in deinit (last-reference, no
+        // re-entrancy):
+        //   1. captureSession.stopRunning on sessionQueue
+        //   2. AVAudioSession category restored to .playback so the mic
+        //      indicator clears (even if normal restoreAudioSession() path
+        //      didn't run).
         let session = captureSession
         sessionQueue.async {
             if session.isRunning {
                 session.stopRunning()
             }
+        }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback, mode: .default, options: [.mixWithOthers]
+            )
+        } catch {
+            Self.unwiredLog.warning("deinit audio category restore failed: \(error.localizedDescription, privacy: .public). Mic indicator may stay visible until next interruption.")
         }
     }
 

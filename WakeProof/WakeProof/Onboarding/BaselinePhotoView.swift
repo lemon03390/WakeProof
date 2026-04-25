@@ -134,7 +134,7 @@ struct CameraPicker: UIViewControllerRepresentable {
         }
         let picker = UIImagePickerController()
         picker.sourceType = .camera
-        // Same rear-then-front fallback as CameraCaptureView.CameraHostController; setting
+        // Rear-then-front fallback for legacy device support; setting
         // an unavailable cameraDevice throws.
         if UIImagePickerController.isCameraDeviceAvailable(.rear) {
             picker.cameraDevice = .rear
