@@ -173,8 +173,19 @@ final class AudioSessionKeepalive {
                 }
                 switch type {
                 case .began:
-                    self.logger.warning("Audio session interruption BEGAN at \(Date().ISO8601Format(), privacy: .public)")
+                    self.logger.warning("Audio session interruption BEGAN")
+                    // E-M7 (Wave 2.5, 2026-04-26): set lastError so the
+                    // AlarmSchedulerView banner surfaces "Audio interrupted —
+                    // alarm may not resume." Cleared in `.ended`. Without this,
+                    // a rare iOS bug where `.ended` never fires would leave the
+                    // user with a silent alarm + no signal.
+                    self.lastError = "Audio interrupted (likely a phone call). Alarm should resume on call end."
                 case .ended:
+                    // Clear the interruption banner; handleInterruptionEnded
+                    // does the route restoration.
+                    if self.lastError == "Audio interrupted (likely a phone call). Alarm should resume on call end." {
+                        self.lastError = nil
+                    }
                     self.handleInterruptionEnded(optionsRaw: optionsRaw)
                 @unknown default:
                     break
@@ -189,7 +200,14 @@ final class AudioSessionKeepalive {
         ) { _ in
             // No state mutation here — just log. Use the nonisolated static logger so we
             // don't depend on the OperationQueue.main ↔ MainActor executor identity.
-            Self.nonisolatedLogger.info("Audio route changed at \(Date().ISO8601Format(), privacy: .public)")
+            //
+            // P-I7 (Wave 2.2, 2026-04-26): drop the per-event ISO8601Format()
+            // call. `Logger` adds its own timestamp at log-emit time, so the
+            // explicit format() was a redundant String allocation on every
+            // route change. Over an 8-hour overnight session with frequent
+            // Bluetooth pairings, the cost adds up. Logger's deferred
+            // formatting on the literal is ~free.
+            Self.nonisolatedLogger.info("Audio route changed")
         }
     }
 
@@ -264,12 +282,23 @@ final class AudioSessionKeepalive {
     /// fire path (~10ms), which the user happily trades for "alarm actually
     /// rings" reliability.
     ///
-    /// Retry-once fallback: if first play() returns false, sleep 100ms (give
+    /// Retry-once fallback: if first play() returns false, await 100ms (give
     /// the session time to settle after re-arm) then retry. This catches the
     /// edge case where setActive returns success but the audio HW isn't yet
     /// routable. Two attempts is enough — beyond that something is genuinely
     /// broken and we want the lastError surfaced to the home banner.
-    func playAlarmSound(url: URL) {
+    ///
+    /// P-C1 / E-I12 (Wave 2.2, 2026-04-26): converted from sync `Thread.sleep`
+    /// to `await Task.sleep`. The previous synchronous 100 ms block ran on
+    /// @MainActor inside the alarm-fire path — which collides with SwiftUI's
+    /// `.easeInOut(duration: 0.2)` phase-transition animation on @MainActor.
+    /// 100 ms of frozen MainActor during a 200 ms animation = visible stutter
+    /// + dropped frame at the most demo-critical moment. Async sleep yields
+    /// MainActor while we wait for mediaserverd to settle.
+    ///
+    /// Callers must await — see WakeProofApp's `onFire` closure which now
+    /// spawns a `Task { @MainActor in await audioKeepalive.playAlarmSound(...) }`.
+    func playAlarmSound(url: URL) async {
         alarmPlayer?.stop()
         alarmPlayer = nil
         rearmSessionForAlarm()
@@ -286,12 +315,10 @@ final class AudioSessionKeepalive {
             // First attempt refused — re-arm + retry once. Common cause:
             // setActive returned true but the audio route wasn't yet
             // reconfigured (XPC race). 100ms gives mediaserverd time to
-            // settle. Synchronous sleep is acceptable here because (a) the
-            // alarm UI is already visible (no user-perceived stall) and (b)
-            // we're on @MainActor — no actor-hop cost.
+            // settle. Async sleep yields MainActor instead of blocking it.
             logger.warning("Alarm player.play() refused on first attempt — re-arming session for retry")
             rearmSessionForAlarm()
-            Thread.sleep(forTimeInterval: 0.1)
+            try? await Task.sleep(for: .milliseconds(100))
             let retry = try AVAudioPlayer(contentsOf: url)
             retry.numberOfLoops = -1
             retry.volume = 0.5
@@ -346,7 +373,12 @@ final class AudioSessionKeepalive {
         // the stop path. Log the short-circuit so volume-ramp-after-stop timing
         // weirdness is diagnosable from Console without needing a debugger.
         if alarmPlayer == nil {
-            logger.debug("setAlarmVolume(\(volume, privacy: .public)) called but alarmPlayer is nil — ramp outrunning stop")
+            // E-I13 (Wave 2.5, 2026-04-26): bumped from .debug to .warning. .debug
+            // doesn't ship in production console output, so volume-ramp-after-stop
+            // patterns were invisible to triage. .warning makes them surface in
+            // device Console where a user-reported "alarm too quiet" can be
+            // correlated with a ramp that ran while the player was nil.
+            logger.warning("setAlarmVolume(\(volume, privacy: .public)) called but alarmPlayer is nil — ramp outrunning stop")
             return
         }
         alarmPlayer?.volume = max(0.0, min(1.0, volume))

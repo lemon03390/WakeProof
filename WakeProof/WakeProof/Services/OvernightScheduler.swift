@@ -666,10 +666,14 @@ actor OvernightScheduler {
         let request = BGProcessingTaskRequest(identifier: Self.backgroundTaskIdentifier)
         request.requiresExternalPower = false
         request.requiresNetworkConnectivity = true
-        // 2h hint — iOS is best-effort; it may fire later (often never until
-        // midnight-ish if the device is idle). The hint just tells iOS "not
-        // sooner than X"; the actual scheduling depends on system load.
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 3600)
+        // P-M3 (Wave 2.5, 2026-04-26): 4h hint (was 2h). iOS is best-effort —
+        // it may fire later (often never until midnight-ish if the device is
+        // idle). The hint just tells iOS "not sooner than X"; the actual
+        // scheduling depends on system load. Bumping to 4h halves the
+        // expected per-night API spend without losing the briefing freshness
+        // (the seed at session-start carries most of the data; mid-session
+        // pokes are incremental). Saves ~$0.06/night/user at scale.
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 4 * 3600)
         do {
             try BGTaskScheduler.shared.submit(request)
             logger.info("scheduleNextBackgroundRefresh: submitted earliest=\(request.earliestBeginDate?.ISO8601Format() ?? "nil", privacy: .public)")

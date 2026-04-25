@@ -120,22 +120,35 @@ struct BaselinePhotoView: View {
         }
     }
 
+    /// P-I8 (Wave 2.2, 2026-04-26): JPEG encoding moved off the main thread.
+    /// `image.jpegData(compressionQuality: 0.8)` for an 18 MP TrueDepth still
+    /// blocks 50–150 ms on iPhone 17 Pro — visible jank on the baseline-confirm
+    /// tap. Detached task encodes off-main, then hands back to MainActor for
+    /// the BaselinePhoto construction + onCaptured callback.
     private func handleSave() {
         guard let image = capturedImage else {
             errorMessage = "Capture a baseline photo before continuing."
             logger.warning("Save tapped with no captured image")
             return
         }
-        guard let data = image.jpegData(compressionQuality: 0.8) else {
-            errorMessage = "Couldn't encode the photo. Try retaking."
-            logger.error("JPEG encoding returned nil for baseline image")
-            return
+        let label = locationLabel.isEmpty ? "wake-location" : locationLabel
+        Task {
+            // Detach so the encode runs on a background QoS — UIImage is
+            // thread-safe for read-only operations, and jpegData copies bytes
+            // out, so no main-actor invariant is violated.
+            let data: Data? = await Task.detached(priority: .userInitiated) {
+                image.jpegData(compressionQuality: 0.8)
+            }.value
+            await MainActor.run {
+                guard let data else {
+                    errorMessage = "Couldn't encode the photo. Try retaking."
+                    logger.error("JPEG encoding returned nil for baseline image")
+                    return
+                }
+                let photo = BaselinePhoto(imageData: data, locationLabel: label)
+                onCaptured(photo)
+            }
         }
-        let photo = BaselinePhoto(
-            imageData: data,
-            locationLabel: locationLabel.isEmpty ? "wake-location" : locationLabel
-        )
-        onCaptured(photo)
     }
 }
 

@@ -69,6 +69,15 @@ struct MorningBriefingView: View {
     /// reason to stay visible until the briefing cover dismisses.
     @State private var shareCardFailed: Bool = false
 
+    /// P-I5 (Wave 2.2, 2026-04-26): cache the rendered share image so it isn't
+    /// re-rasterised on every body re-evaluation during the sunrise reveal
+    /// animation. `ImageRenderer.uiImage` for a 1080x1920 PNG costs 30–60 ms on
+    /// iPhone 12-class hardware; the briefing cover's `revealOpacity`
+    /// transitions from 0→1 over 1.2 s easeOut, triggering many re-renders that
+    /// would each pay that cost. We render once on .onAppear (after streak +
+    /// observation are known) and reference the cached value in body.
+    @State private var cachedShareImage: Image?
+
     /// Task 4.1: drives the sunrise gradient opacity on VERIFIED — starts at 0
     /// and animates to 1 over 1200ms easeOut on .onAppear, creating a warm
     /// background reveal rather than a jarring hard-cut to the gradient.
@@ -206,13 +215,17 @@ struct MorningBriefingView: View {
                 // tap via `makeShareImage()`; it's not expensive enough to
                 // warrant caching, and a stale cache would be worse than a
                 // 50ms re-render on tap.
+                // P-I5 (Wave 2.2): use cached share image populated in .onAppear
+                // rather than calling makeShareImage() each body re-eval. The
+                // cache is populated only when all share gates pass, so the
+                // `let shareImage = cachedShareImage` unwrap is the gate.
                 if ShareCardModel.shouldShowShareButton(
                     enabled: shareCardEnabled,
                     streak: currentStreak,
                     observation: observation
                 ),
                    case .success = result,
-                   let shareImage = makeShareImage()
+                   let shareImage = cachedShareImage
                 {
                     ShareLink(
                         item: shareImage,
@@ -240,6 +253,21 @@ struct MorningBriefingView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             Self.logger.info("MorningBriefingView appeared resultTag=\(Self.tag(result), privacy: .public)")
+            // P-I5 (Wave 2.2): cache the share image once so the body
+            // re-renders during the sunrise reveal don't trigger fresh raster
+            // work. Only render if the gate currently passes — re-evaluation
+            // when streak / observation change is rare (post-onAppear data is
+            // stable for the lifetime of the cover).
+            if cachedShareImage == nil,
+               case .success = result,
+               ShareCardModel.shouldShowShareButton(
+                enabled: shareCardEnabled,
+                streak: currentStreak,
+                observation: observation
+               )
+            {
+                cachedShareImage = makeShareImage()
+            }
             // Task 4.1: trigger the sunrise reveal on VERIFIED. Non-success
             // paths have a solid wpChar900 background so the opacity change
             // is a no-op for them — the `if case .success` branch never

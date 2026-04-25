@@ -99,6 +99,20 @@ final class BaselineCameraViewController: UIViewController {
                 session.stopRunning()
             }
         }
+        // P-I6 (Wave 2.2, 2026-04-26): even though baseline capture is
+        // photo-only (no mic input), AVCaptureSession with the front camera
+        // can briefly toggle the audio session, leaving the mic privacy
+        // indicator visible until the next interruption. Restore .playback so
+        // the orange dot clears immediately on sheet dismiss. Mirrors
+        // CameraRecorderViewController.deinit.
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback, mode: .default, options: [.mixWithOthers]
+            )
+        } catch {
+            Logger(subsystem: LogSubsystem.onboarding, category: "baseline-camera")
+                .warning("deinit audio category restore failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Session configuration (sessionQueue)
