@@ -66,6 +66,15 @@ struct BedtimeStep: View {
                 )
                 .foregroundStyle(Color.wpCream50)
                 .tint(Color.wpCream50)
+                // .tint alone doesn't propagate to the compact DatePicker's
+                // time bubble (iOS system styling overrides it with
+                // secondaryLabel-on-secondarySystemFill, which reads as dim
+                // grey on the warm-charcoal hero). .colorMultiply blends the
+                // rendered colors with wpCream50 so the time text matches
+                // the "Bedtime" label brightness — the bubble background
+                // also picks up a faint cream wash, which is on-brand and
+                // adds visual weight to the value.
+                .colorMultiply(Color.wpCream50)
             }
 
             if let saveFailureMessage {
