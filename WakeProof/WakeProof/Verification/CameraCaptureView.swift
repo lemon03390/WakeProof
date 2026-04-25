@@ -360,7 +360,18 @@ private final class CameraRecorderViewController: UIViewController {
         }
 
         captureSession.beginConfiguration()
-        defer { captureSession.commitConfiguration() }
+        // CRITICAL: explicit commitConfiguration() before startRunning() — Apple
+        // throws NSGenericException "startRunning may not be called between
+        // calls to beginConfiguration and commitConfiguration" if startRunning
+        // fires while configuration is still open. The previous `defer { commit }`
+        // pattern crashed on device because defer runs at function exit AFTER
+        // startRunning. Every early-return below also commits before bailing.
+        var didCommit = false
+        func commit() {
+            guard !didCommit else { return }
+            didCommit = true
+            captureSession.commitConfiguration()
+        }
 
         // .medium is sufficient for the vision prompt's face-in-frame check
         // and cuts the .mov size by ~80% vs .high (480p ~1Mbps vs 1080p
@@ -376,6 +387,7 @@ private final class CameraRecorderViewController: UIViewController {
         // .front fallback was unreachable dead code.
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             logger.error("No wide-angle camera available")
+            commit()
             DispatchQueue.main.async { [weak self] in
                 self?.reportTerminal { self?.onFailed(.cameraUnavailable) }
             }
@@ -385,6 +397,7 @@ private final class CameraRecorderViewController: UIViewController {
             let videoInput = try AVCaptureDeviceInput(device: camera)
             guard captureSession.canAddInput(videoInput) else {
                 logger.error("Cannot add video input")
+                commit()
                 DispatchQueue.main.async { [weak self] in
                     self?.reportTerminal { self?.onFailed(.cameraUnavailable) }
                 }
@@ -393,6 +406,7 @@ private final class CameraRecorderViewController: UIViewController {
             captureSession.addInput(videoInput)
         } catch {
             logger.error("Video input init failed: \(error.localizedDescription, privacy: .public)")
+            commit()
             DispatchQueue.main.async { [weak self] in
                 self?.reportTerminal { self?.onFailed(.sessionConfigFailed(underlying: error)) }
             }
@@ -422,12 +436,17 @@ private final class CameraRecorderViewController: UIViewController {
         // Movie file output.
         guard captureSession.canAddOutput(movieOutput) else {
             logger.error("Cannot add movie output")
+            commit()
             DispatchQueue.main.async { [weak self] in
                 self?.reportTerminal { self?.onFailed(.cameraUnavailable) }
             }
             return
         }
         captureSession.addOutput(movieOutput)
+
+        // CRITICAL: commit BEFORE startRunning. See `commit()` helper above
+        // for the Apple-mandated ordering rule.
+        commit()
 
         // Start running. Once running, hop to main to install the preview
         // layer + kick off the auto-record sequence.
