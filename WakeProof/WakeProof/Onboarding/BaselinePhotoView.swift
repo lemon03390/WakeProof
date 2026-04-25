@@ -59,7 +59,11 @@ struct BaselinePhotoView: View {
 
             TextField("Label this spot", text: $locationLabel)
                 .textFieldStyle(.roundedBorder)
-                .foregroundStyle(.black)
+                // .roundedBorder TextField on iOS uses a system-themed white
+                // field on a dark hero surface — char-900 text reads as the
+                // input value. wpChar900 instead of pure black per design-
+                // system non-negotiable #1.
+                .foregroundStyle(Color.wpChar900)
 
             Spacer()
 

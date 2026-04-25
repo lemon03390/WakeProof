@@ -171,7 +171,13 @@ private final class CameraHostController: UIViewController,
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        // wpChar900 instead of pure black for design-system consistency.
+        // The host VC is fullscreen-presented and immediately presents the
+        // UIImagePickerController on top, so the backing color is barely
+        // ever visible — but during the transition flash and on the
+        // "dismissed-while-backgrounded" edge case (the void noted in
+        // docstring above) the warm-charcoal reads on-brand.
+        view.backgroundColor = UIColor(red: 0x2B / 255.0, green: 0x1F / 255.0, blue: 0x17 / 255.0, alpha: 1.0)
         // Detect the case where iOS dismissed the picker while the app was backgrounded
         // (rare for full-screen modal but documented). Without this, the host VC remains on
         // screen with a black void and no callback fires — user must force-quit to escape.

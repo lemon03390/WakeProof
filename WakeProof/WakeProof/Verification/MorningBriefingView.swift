@@ -114,7 +114,7 @@ struct MorningBriefingView: View {
             } else {
                 Color.wpChar900.ignoresSafeArea()
             }
-            VStack(spacing: 24) {
+            VStack(spacing: WPSpacing.xl) {
                 Spacer()
                 Text("Good morning")
                     .wpFont(.display)
@@ -175,12 +175,13 @@ struct MorningBriefingView: View {
                 // Diagnostic surface for demo prep: the reason code lets you
                 // tell at a glance whether the pipeline rendered real prose
                 // or fell through to a failure branch. Hidden in release so
-                // users never see "reason:" text.
+                // users never see "reason:" text. caption2.monospaced() is
+                // intentional: monospaced diagnostic — no WPFont equivalent.
                 if let reasonTag {
                     Text(reasonTag)
                         .font(.caption2.monospaced())
                         .foregroundStyle(Color.wpCream50.opacity(0.35))
-                        .padding(.top, 4)
+                        .padding(.top, WPSpacing.xs1)
                 }
                 #endif
                 Spacer()
@@ -225,18 +226,18 @@ struct MorningBriefingView: View {
                             .foregroundStyle(Color.wpCream50.opacity(0.55))
                             .underline()
                     }
-                    .padding(.bottom, 40)
+                    .padding(.bottom, WPSpacing.xl3)
                 } else {
                     // Explicit placeholder spacer so the "Start your day"
                     // button lifts off the bottom edge when the Share row is
-                    // absent. Using a fixed 32pt spacer rather than a
-                    // conditional padding modifier so the layout offset is
-                    // identical shape with/without the ShareLink (simpler
-                    // to eyeball in the preview grid).
-                    Color.clear.frame(height: 32)
+                    // absent. Using WPSpacing.xl2 (32pt) so the layout offset
+                    // matches the ShareLink presence (simpler to eyeball in
+                    // the preview grid).
+                    Color.clear.frame(height: WPSpacing.xl2)
                 }
             }
         }
+        .preferredColorScheme(.dark)
         .onAppear {
             Self.logger.info("MorningBriefingView appeared resultTag=\(Self.tag(result), privacy: .public)")
             // Task 4.1: trigger the sunrise reveal on VERIFIED. Non-success

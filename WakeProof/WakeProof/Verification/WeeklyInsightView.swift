@@ -68,7 +68,7 @@ struct WeeklyInsightView: View {
                         .foregroundStyle(Color.wpChar500)
                 }
             } else {
-                Text("No insight yet — run `scripts/generate-weekly-insight.py` after 14 days of seed data.")
+                Text("Your first insight will appear after a week of verified mornings.")
                     .wpFont(.body)
                     .italic()
                     .foregroundStyle(Color.wpChar500)

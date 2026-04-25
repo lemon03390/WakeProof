@@ -421,26 +421,28 @@ struct AlarmSchedulerView: View {
                 Color.wpCream100.ignoresSafeArea(edges: .bottom)
             )
             .navigationTitle("WakeProof")
-            .onAppear(perform: loadFromScheduler)
+            // Single .onAppear merging three formerly-separate appearance
+            // refresh actions. Order matters:
+            //   1. loadFromScheduler — populates @State from scheduler.window
+            //      so the form fields reflect the persisted contract before
+            //      any user interaction.
+            //   2. refreshDroppedMemoryCount (P10) — UserDefaults read; cheap.
+            //      Drives the lowest-priority systemBanner. No actor hop needed.
+            //   3. recomputeStreak (Wave 5 H3) — pure derivation from the
+            //      @Query-backed `wakeAttempts`. The bootstrap in WakeProofApp
+            //      runs the first recompute before this view appears, so this
+            //      covers "navigated back from the calendar". The
+            //      .onChange(of: wakeAttempts.count) below covers "a row was
+            //      added while the view was visible".
+            .onAppear {
+                loadFromScheduler()
+                refreshDroppedMemoryCount()
+                recomputeStreak()
+            }
             // R9: refresh the overnight error banner snapshot whenever the
             // view comes back into focus. Quick one-shot poll of the actor;
             // the property is actor-local so we have to hop.
             .task { await refreshOvernightStartError() }
-            // P10 (Stage 6 Wave 2): refresh the dropped-memory-writes counter
-            // so the lowest-priority banner reflects the latest count. Cheap
-            // UserDefaults read; no actor hop required. The counter itself is
-            // bumped from within the queue's flush path, so by the time this
-            // view is active we always see a current value.
-            .onAppear(perform: refreshDroppedMemoryCount)
-            // Wave 5 H3: recompute the streak from the current WakeAttempt
-            // rows every time the view appears AND every time the @Query-
-            // driven array changes (e.g. a VERIFIED verify just landed).
-            // `.onAppear` covers "navigated back from the calendar";
-            // `.onChange(of: wakeAttempts.count)` covers "a row was added
-            // while the view was visible". Bootstrap in WakeProofApp runs
-            // the first recompute before this view appears, so the badge is
-            // accurate on first render even if the user never leaves it.
-            .onAppear(perform: recomputeStreak)
             .onChange(of: wakeAttempts.count) { _, _ in
                 recomputeStreak()
             }
