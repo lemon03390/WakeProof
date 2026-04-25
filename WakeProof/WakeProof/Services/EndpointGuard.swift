@@ -37,11 +37,16 @@ import Foundation
 nonisolated enum EndpointGuard {
     /// Hosts the iOS client is permitted to reach.
     ///
-    /// Entries are matched either as exact hostnames (e.g. `api.anthropic.com`)
-    /// or as DNS suffixes with a leading dot (e.g. `.vercel.app` matches
-    /// `wakeproof-proxy-vercel.vercel.app` and any preview hash). Suffixes must
-    /// start with a `.` so `.vercel.app` does not accidentally match
-    /// `evilvercel.app`.
+    /// Entries are matched either as exact hostnames (e.g. `api.anthropic.com`,
+    /// `wakeproof-proxy-vercel.vercel.app`) or as DNS suffixes with a leading
+    /// dot (e.g. `.aspiratcm.com` matches `wakeproof.aspiratcm.com`). Suffixes
+    /// MUST start with a `.` so `.aspiratcm.com` does not accidentally match
+    /// `evilaspiratcm.com`.
+    ///
+    /// S-I1 history: a `.vercel.app` wildcard previously lived here; removed
+    /// because Vercel hostnames are first-come-first-served and any attacker
+    /// who deploys `evil-foo.vercel.app` would have passed the suffix check.
+    /// Prefer exact hostnames; suffixes are reserved for DNS zones we control.
     ///
     /// Keep ordering alphabetical for diff stability; the guard's time complexity
     /// is O(n) over this list and the list is small.
@@ -51,9 +56,14 @@ nonisolated enum EndpointGuard {
     /// the production hostname only. Preview-URL deployments (which change per
     /// PR) are no longer auto-trusted; if needed, append the specific preview
     /// hash here per environment, or use a build-config to swap allowlists.
+    /// Round-1 PR-review I-4 (Wave 3.2, 2026-04-26): tightened `.aspiratcm.com`
+    /// from suffix-form to exact `wakeproof.aspiratcm.com`. The wildcard
+    /// suffix would have allowed any subdomain (e.g. `evil.aspiratcm.com`)
+    /// if the team's DNS provider were ever compromised. The archive Cloudflare
+    /// Worker only ever lived at the `wakeproof.` subdomain — pin to that.
     static let allowedHostSuffixes: [String] = [
         "api.anthropic.com",                            // Direct-to-Anthropic fallback (simulator + sanity probes)
-        ".aspiratcm.com",                               // Cloudflare Worker archive domain (retained for rollback)
+        "wakeproof.aspiratcm.com",                      // Cloudflare Worker archive — exact subdomain (post-I-4)
         "wakeproof-proxy-vercel.vercel.app",            // Current production proxy (exact hostname only — see S-I1)
     ]
 
@@ -61,6 +71,13 @@ nonisolated enum EndpointGuard {
         case hostNotAllowed(host: String, url: String)
         case malformedURL(urlString: String)
         case schemeNotAllowed(scheme: String, url: String)
+        /// Round-1 PR-review SF-3 (Wave 3.1, 2026-04-26): URLs of the form
+        /// `https://user:pass@host/...` parse cleanly + match the host allowlist
+        /// + use HTTPS — but the embedded credentials would land in URL-Request
+        /// HTTP Basic Auth and in any caller log that interpolates
+        /// `endpoint.absoluteString`. Rejected unconditionally to remove the
+        /// silent credential-leak surface.
+        case credentialsInURL(url: String)
 
         var errorDescription: String? {
             switch self {
@@ -72,6 +89,9 @@ nonisolated enum EndpointGuard {
             case .schemeNotAllowed(let scheme, _):
                 return "Endpoint scheme '\(scheme)' is not allowed. " +
                     "Only 'https' is accepted — plaintext or non-HTTP schemes are rejected to prevent token leakage."
+            case .credentialsInURL:
+                return "Endpoint URL contains embedded credentials (user:password@). " +
+                    "Strip them from Secrets.swift — credentials in URL leak into HTTP Basic Auth and crash logs."
             }
         }
     }
@@ -93,10 +113,13 @@ nonisolated enum EndpointGuard {
     /// whole job is to fail before that becomes load-bearing. Accepts only
     /// `https`; rejects `http`, `ftp`, `file`, `data`, etc.
     ///
-    /// Order: malformed (missing scheme entirely) → wrong scheme → malformed
-    /// host. A URL with no scheme at all is malformed input; one with a
-    /// concrete-but-wrong scheme (e.g. `http`, `file`, `ftp`) is a deliberate
-    /// reject path so the error surface stays distinct.
+    /// Order: malformed (missing scheme entirely) → wrong scheme → credentials
+    /// embedded → malformed host → host-not-allowed. A URL with no scheme at
+    /// all is malformed input; one with a concrete-but-wrong scheme is a
+    /// deliberate reject path so the error surface stays distinct. Credentials-
+    /// in-URL (`https://u:p@host`) is rejected before host check so the error
+    /// payload (which embeds `url.absoluteString`) goes through `redact(_:)`
+    /// at the call site — see SF-3 / SF-4.
     static func validate(_ url: URL) throws -> URL {
         // No scheme at all = malformed input (URL parsed but has nothing).
         guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
@@ -105,6 +128,12 @@ nonisolated enum EndpointGuard {
         // Concrete-but-wrong scheme = schemeNotAllowed.
         guard scheme == "https" else {
             throw GuardError.schemeNotAllowed(scheme: scheme, url: url.absoluteString)
+        }
+        // SF-3 (Wave 3.1): reject embedded credentials so they don't become
+        // part of the live `endpoint` URL. Use the redacted form in the error
+        // payload so the credentials don't leak into the thrown error either.
+        if url.user != nil || url.password != nil {
+            throw GuardError.credentialsInURL(url: redact(url))
         }
         guard let host = url.host, !host.isEmpty else {
             throw GuardError.malformedURL(urlString: url.absoluteString)
@@ -175,11 +204,26 @@ nonisolated enum EndpointGuard {
     /// `URLComponents.url?.absoluteString` preserves scheme/host/port/path/
     /// query but drops credentials cleanly — this matches the "log the
     /// URL without its secrets" intent exactly.
-    private static func redact(_ url: URL?) -> String {
+    ///
+    /// SF-4 (Wave 3.1, 2026-04-26): exposed as `static` (not `private`) so
+    /// other clients deriving URLs from `Secrets.claudeEndpoint` can route
+    /// their own preconditionFailure messages through the same redactor.
+    /// `OvernightAgentClient.defaultBaseURL` previously interpolated
+    /// `Secrets.claudeEndpoint` verbatim into a precondition message, leaking
+    /// any embedded credentials into the iOS crash log.
+    static func redact(_ url: URL?) -> String {
         guard let url else { return "<unparseable>" }
         var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         comps?.user = nil
         comps?.password = nil
         return comps?.url?.absoluteString ?? "<redacted>"
+    }
+
+    /// SF-4 (Wave 3.1): redact a URL string. Same contract as `redact(_:)`
+    /// but accepts the un-parsed string — useful when the caller has only the
+    /// raw `Secrets.claudeEndpoint` value and wants to log without leaking
+    /// credentials embedded in it.
+    static func redact(urlString: String) -> String {
+        redact(URL(string: urlString))
     }
 }

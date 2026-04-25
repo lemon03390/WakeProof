@@ -47,6 +47,14 @@ struct WakeProofApp: App {
     /// directory creation failure so init() can route through its existing
     /// fatalError-on-init-fail recovery rather than silently falling back to
     /// Documents (which would re-introduce the iCloud Backup leak).
+    ///
+    /// Round-1 PR-review I-7 (Wave 3.2, 2026-04-26): also mark the store file
+    /// itself excluded after ModelContainer creates it (belt-and-suspenders
+    /// — Apple's `isExcludedFromBackupKey` propagates from the parent
+    /// directory per QA1719, but explicit per-file marking is robust to
+    /// future changes in that propagation contract). Done in `init()` post-
+    /// container creation rather than here (this method runs before the file
+    /// exists). Returns the store file URL so the caller can apply.
     private static func makeStoreURL() throws -> URL {
         let fm = FileManager.default
         let appSupport = try fm.url(
@@ -55,7 +63,9 @@ struct WakeProofApp: App {
             appropriateFor: nil,
             create: true
         )
-        var dir = appSupport.appendingPathComponent("WakeProof", isDirectory: true)
+        // `var dir` → `let dir`: setResourceValues mutates URL's local resource
+        // cache (not the variable binding) — `let` is correct.
+        let dir = appSupport.appendingPathComponent("WakeProof", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -63,10 +73,14 @@ struct WakeProofApp: App {
         // failure rather than `try?`-swallowing — a silent failure here re-introduces
         // the privacy regression we're closing (E-I6: silent backup-exclusion failure
         // means bedroom-photo data syncs to iCloud anyway).
+        //
+        // setResourceValues requires a `var` URL binding (it's a mutating method on
+        // URL's resource-cache). Use a local var, not the outer `let dir`.
+        var dirWithRV = dir
         var rv = URLResourceValues()
         rv.isExcludedFromBackup = true
-        try dir.setResourceValues(rv)
-        return dir.appendingPathComponent("WakeProof.store", isDirectory: false)
+        try dirWithRV.setResourceValues(rv)
+        return dirWithRV.appendingPathComponent("WakeProof.store", isDirectory: false)
     }
     /// Weak bridge between `init()`'s synchronously-registered BGTask launch handler and
     /// the scheduler instance. `nonisolated static` so the handler closure can capture
@@ -88,14 +102,19 @@ struct WakeProofApp: App {
             // compromise. The captured-video path (CameraCaptureFlow) already
             // marks `.mov` files excluded; this aligns the SwiftData side.
             //
-            // Protection level stays `.completeUntilFirstUserAuthentication` (the
-            // default) because the alarm fires while the device is locked — using
-            // `.complete` would block writes mid-ring. CKR is the strongest level
-            // compatible with overnight alarm operation.
+            // Protection level stays `.completeUntilFirstUserAuthentication`
+            // (the SwiftData default — inherited from the directory's
+            // attributes; we don't set `.fileProtectionKey` explicitly here)
+            // because the alarm fires while the device is locked — using
+            // `.complete` would block writes mid-ring.
+            // `.completeUntilFirstUserAuthentication` is the strongest level
+            // compatible with overnight alarm operation: the file is
+            // unreadable until the user has unlocked the device at least
+            // once after boot, but stays readable across screen-locks.
             //
             // Migration note: hackathon scope = single device, no production rows
             // to migrate. First launch on a clean install simply creates the new
-            // store; an existing Vincent install carries an orphan
+            // store; an existing pre-Wave-2.1 install carries an orphan
             // `Documents/default.store` that's harmless (we don't read it). For
             // a future production migration helper, copy on first run if the new
             // store doesn't exist + the legacy one does.
@@ -108,6 +127,23 @@ struct WakeProofApp: App {
                 for: BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self,
                 configurations: configuration
             )
+            // Round-1 PR-review I-7 (Wave 3.2, 2026-04-26): mark the store file
+            // itself excluded from backup — directory-level exclusion
+            // propagates per Apple QA1719, but explicit per-file marking is
+            // robust to any future iOS change to that propagation. The store
+            // is now created (ModelContainer init wrote the SQLite file).
+            // Best-effort: a setResourceValues failure here is non-fatal —
+            // the directory mark already provides backup exclusion via
+            // propagation. Log at .warning so triage can spot if it ever
+            // matters.
+            do {
+                var storeFile = storeURL
+                var rv = URLResourceValues()
+                rv.isExcludedFromBackup = true
+                try storeFile.setResourceValues(rv)
+            } catch {
+                Self.logger.warning("Could not mark SwiftData store file excluded-from-backup directly (directory-level exclusion still applies): \(error.localizedDescription, privacy: .public)")
+            }
         } catch {
             // Log before the fatal so crash reports carry the decoded reason rather than
             // just a stack trace. Recoverable storage-init UI is out of scope here; this
@@ -201,20 +237,25 @@ struct WakeProofApp: App {
         scheduler.recoverUnresolvedFireIfNeeded()
         scheduler.scheduleNextFireIfEnabled()
 
-        // Wave 2.4 B4 fix: flush any pending WakeAttempt rows queued from previous
-        // launches whose SwiftData save failed. Must run AFTER persistAttempt is wired
-        // (done by wireSchedulerCallbacks above) so the flush's retry attempts can
-        // reach ModelContext. Runs in a MainActor Task because AlarmScheduler is
-        // @MainActor-isolated and persistAttempt reads the captured mainContext.
+        // Wave 2.4 B4 fix + Round-1 I-2 (Wave 3.2): flush any pending WakeAttempt
+        // rows queued from previous launches whose SwiftData save failed AND
+        // run the retention sweep INSIDE the same serialized Task — both touch
+        // `modelContainer.mainContext` and call `try context.save()`. Running
+        // them concurrently from independent Task blocks let the cleaner's
+        // rollback wipe just-flushed survivors (or vice-versa). Now they
+        // execute strictly in order: flush first (heal yesterday's failures),
+        // sweep second (apply today's retention).
+        //
+        // Runs in a MainActor Task because AlarmScheduler is @MainActor-isolated
+        // and persistAttempt reads the captured mainContext.
+        let mainContext = modelContainer.mainContext
         Task { @MainActor [scheduler] in
             await scheduler.flushPendingAttempts()
+            // S-C4 (Wave 2.1): retention sweep — delete .mov clips older than
+            // 7 days, nil out imageData on rows older than 30 days, clean up
+            // tmp capture leftovers. Bounded pass per cold start.
+            WakeAttemptCleaner.runRetentionSweep(context: mainContext)
         }
-
-        // S-C4 (Wave 2.1, 2026-04-26): retention sweep — delete .mov clips
-        // older than 7 days, nil out imageData on rows older than 30 days, and
-        // clean up tmp capture leftovers. Single bounded pass per cold start;
-        // see WakeAttemptCleaner for the full retention contract.
-        WakeAttemptCleaner.runRetentionSweep(context: modelContainer.mainContext)
 
         // Wave 5 H3: prime the streak badge from the existing WakeAttempt
         // history. AlarmSchedulerView also recomputes on appear, but priming
@@ -481,6 +522,11 @@ struct RootView: View {
     @Query(Self.briefingFetchDescriptor)
     private var verifiedAttempts: [WakeAttempt]
 
+    /// M-1 (Wave 3.3): static computed `var` → `let` would require evaluating
+    /// the descriptor at type-load time, which means it must be Sendable. The
+    /// computed-var form is fine — `@Query` evaluates it once at view init,
+    /// and SwiftUI caches the descriptor for the view's lifetime. Keep `var`
+    /// to avoid forcing a Sendable annotation chase.
     private static var briefingFetchDescriptor: FetchDescriptor<WakeAttempt> {
         var descriptor = FetchDescriptor<WakeAttempt>(
             predicate: #Predicate<WakeAttempt> { $0.verdict == "VERIFIED" && $0.capturedAt != nil },

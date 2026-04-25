@@ -126,10 +126,16 @@ actor OvernightAgentClient {
         // parse-able URL, so a tampered Secrets value would silently route overnight
         // agent traffic to an attacker-controlled host (vision verification crashed
         // loudly on the same allowlist; overnight agent did not).
+        // SF-4 (Wave 3.1, 2026-04-26): redact the Secrets value before
+        // interpolating into the precondition message. Without this, a
+        // tampered/misconfigured Secrets value containing credentials
+        // (`https://u:p@host/...`) would land verbatim in the iOS crash log.
+        // EndpointGuard.redact strips userinfo cleanly.
         guard let url = URL(string: Secrets.claudeEndpoint),
               let host = url.host,
               let scheme = url.scheme else {
-            preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(Secrets.claudeEndpoint)' could not be parsed into scheme+host")
+            let redacted = EndpointGuard.redact(urlString: Secrets.claudeEndpoint)
+            preconditionFailure("OvernightAgentClient: Secrets.claudeEndpoint '\(redacted)' could not be parsed into scheme+host")
         }
         // SR7 (Stage 4): validateOrCrash replaces the inline catch → preconditionFailure
         // block. The derived URL string is `scheme://host[:port]`; validateOrCrash

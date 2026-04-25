@@ -128,13 +128,8 @@ final class VisionVerifier {
 
     private let logger = Logger(subsystem: LogSubsystem.verification, category: "verifier")
 
-    /// T-C2 (Wave 2.4, 2026-04-26): exposed as `internal` (was `private`) so
-    /// tests can verify `bank.count >= 2` and that every entry passes the
-    /// MemoryPromptBuilder XML/escape invariants. Deformed entries (empty
-    /// strings, pipe characters that break the prompt's table layout, bytes
-    /// Claude can't liveness-verify against) used to ship without a regression
-    /// gate. The bank itself remains in this file; `internal` access doesn't
-    /// expand the API surface beyond `@testable import`.
+    /// `internal` (not `private`) so tests can lock the bank's invariants —
+    /// see `VisionVerifierTests.testAntiSpoofBank*` (T-C2).
     static let antiSpoofBank = [
         "Blink twice",
         "Show your right hand",
@@ -635,7 +630,9 @@ final class VisionVerifier {
             // E-I2 (Wave 2.3, 2026-04-26): the assignment to
             // `currentAntiSpoofInstruction` used to happen BEFORE the persist
             // guard, so a persist failure (early-return) would leave the
-            // instruction polluting state for the next fire's read at line 228.
+            // instruction polluting state for the next fire's
+            // `instructionForThisCall = currentAntiSpoofInstruction` capture
+            // at the top of `verifyDisableChallenge`/`verify`'s do-block.
             // Now we hold the instruction in a local until persist succeeds, so
             // the early-return path doesn't observe a half-applied state.
             let instruction = Self.antiSpoofBank.randomElement() ?? "Blink twice"

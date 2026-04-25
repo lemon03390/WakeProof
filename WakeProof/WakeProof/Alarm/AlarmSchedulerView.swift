@@ -602,13 +602,17 @@ struct AlarmSchedulerView: View {
         if let overnightErr = lastSessionStartError {
             return "Overnight analysis couldn't start tonight: \(overnightErr). We'll retry next launch."
         }
-        // E-C2 (Wave 2.3, 2026-04-26): briefing earned but persist to history
-        // failed. The cover rendered the briefing from in-memory DTO (user
-        // doesn't lose this morning's reward) but the SwiftData row never
-        // landed — WeeklyCoach won't see this morning. Surface so the user
-        // knows there's a history gap.
+        // E-C2 (Wave 2.3, 2026-04-26) + Round-1 C-1 (Wave 3.1): briefing
+        // earned but persist to history failed. The cover rendered the
+        // briefing from in-memory DTO (user doesn't lose this morning's
+        // reward) but the SwiftData row never landed — WeeklyCoach
+        // definitely won't see this morning, NOT "may miss". Honest copy.
+        // Long-term recovery via a PendingMorningBriefingQueue mirroring the
+        // WakeAttempt + memory-write queues is documented as DEFERRED post-
+        // ship; the in-memory render is the demo-day fallback, the banner is
+        // the audit trail.
         if visionVerifier.lastBriefingPersistFailedAt != nil {
-            return "Latest briefing couldn't be saved to history. WeeklyCoach may miss it."
+            return "Latest briefing wasn't saved to history. Weekly insights will skip this morning."
         }
         // P10 (Stage 6 Wave 2): memory calibration degradation. Lowest
         // priority because the alarm still works — but silently dropping

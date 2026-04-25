@@ -67,11 +67,13 @@ actor HealthKitSleepReader: SleepReading {
     func lastNightSleep(windowHours: Int = 12) async throws -> SleepSnapshot {
         logger.info("Fetching sleep samples: window=\(windowHours, privacy: .public)h")
 
-        // S-M4 (Wave 2.5, 2026-04-26): negative or zero window collapses the
+        // S-M4 (Wave 2.5, 2026-04-26): zero or negative window collapses the
         // HK predicate to start>=end, which yields zero results indistinguishable
         // from a no-sleep-data return. preconditionFailure on programmer error
         // surfaces the bug at the call site rather than masking as silent
-        // empty data the agent then misinterprets.
+        // empty data the agent then misinterprets. Both `0` (zero window =
+        // identical start/end) and negative values (start > end, predicate
+        // returns nothing) fall under the same programmer-error category.
         precondition(windowHours > 0, "windowHours must be positive (got \(windowHours))")
 
         guard HKHealthStore.isHealthDataAvailable() else {

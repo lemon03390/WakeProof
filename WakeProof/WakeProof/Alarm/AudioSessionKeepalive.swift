@@ -314,7 +314,7 @@ final class AudioSessionKeepalive {
             if player.prepareToPlay(), player.play() {
                 alarmPlayer = player
                 lastError = nil
-                logger.info("Alarm sound started at \(Date().ISO8601Format(), privacy: .public)")
+                logger.info("Alarm sound started")
                 return
             }
             // First attempt refused — re-arm + retry once. Common cause:
@@ -330,7 +330,7 @@ final class AudioSessionKeepalive {
             if retry.prepareToPlay(), retry.play() {
                 alarmPlayer = retry
                 lastError = nil
-                logger.info("Alarm sound started on retry at \(Date().ISO8601Format(), privacy: .public)")
+                logger.info("Alarm sound started on retry")
                 return
             }
             let msg = "Alarm player refused to start for \(url.lastPathComponent) (after retry)"
@@ -367,7 +367,7 @@ final class AudioSessionKeepalive {
     func stopAlarmSound() {
         alarmPlayer?.stop()
         alarmPlayer = nil
-        logger.info("Alarm sound stopped at \(Date().ISO8601Format(), privacy: .public)")
+        logger.info("Alarm sound stopped")
     }
 
     func setAlarmVolume(_ volume: Float) {

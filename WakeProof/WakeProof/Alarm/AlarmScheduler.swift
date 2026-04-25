@@ -186,12 +186,13 @@ final class AlarmScheduler {
     /// If a future config drift makes a Release build define DEBUG, this
     /// compiles into the shipped binary and the contract weakens.
     ///
-    /// S-I7 (Wave 2.1, 2026-04-26): defence-in-depth even within DEBUG —
-    /// the bypass is honored only when a debugger is actually attached
-    /// (`isatty(STDERR_FILENO)` for Xcode console, plus the
-    /// `getppid() != 1` check via `kinfo_proc`). This means a DEBUG build
-    /// distributed via ad-hoc TestFlight (which we don't do, but defending
-    /// in depth) doesn't honor the bypass when launched without Xcode.
+    /// S-I7 (Wave 2.1, 2026-04-26): defence-in-depth even within DEBUG — the
+    /// bypass is honored only when a debugger is actually attached, detected
+    /// via `sysctl` on `kinfo_proc.kp_proc.p_flag & P_TRACED` (the standard
+    /// Apple-documented technique used by `isDebuggerAttached()` below). This
+    /// means a DEBUG build distributed via ad-hoc TestFlight (which we don't
+    /// do, but defending in depth) doesn't honor the bypass when launched
+    /// without Xcode.
     static func isDisableChallengeBypassActive(
         defaults: UserDefaults = .standard,
         arguments: [String] = ProcessInfo.processInfo.arguments,

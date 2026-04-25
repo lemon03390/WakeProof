@@ -57,6 +57,19 @@ enum WakeAttemptCleaner {
     /// Allows the user to manually clear all wake recordings + image bytes.
     /// Wired to a Settings action; doesn't delete the WakeAttempt rows themselves
     /// (those carry verdict / streak data the user may want to keep).
+    ///
+    /// SF-1 (Wave 3.1, 2026-04-26): file-delete failure now logged + counted
+    /// instead of `try?`-swallowed. The privacy-sensitive purge was previously
+    /// reporting "filesDeleted=N success" even if some files were locked by
+    /// AVFoundation, sandbox-denied, or busy — leaving orphan bedroom video
+    /// bytes resident with no signal.
+    ///
+    /// M-8 (Wave 3.1): file deletes now happen AFTER `context.save()` succeeds,
+    /// so a SwiftData rollback can't desync (file gone but row's videoPath
+    /// restored, leading to AlarmRingingView reading a now-nonexistent
+    /// playback URL). Build the work list first → save → execute filesystem
+    /// deletes. If the deletes partially fail, the rows are already saved
+    /// with `videoPath = nil` so the UI doesn't reference dead URLs.
     static func purgeAllWakeRecordings(context: ModelContext) {
         let allAttempts: [WakeAttempt]
         do {
@@ -67,28 +80,49 @@ enum WakeAttemptCleaner {
         }
 
         var rowsCleared = 0
-        var filesDeleted = 0
+        var pendingDeletes: [URL] = []
         let attemptsDir = wakeAttemptsDirectory()
 
+        // First pass: mutate SwiftData state, queue filesystem work.
         for attempt in allAttempts {
             if attempt.imageData != nil {
                 attempt.imageData = nil
                 rowsCleared += 1
             }
             if let dir = attemptsDir, let path = attempt.videoPath, isSafeFilename(path) {
-                let url = dir.appendingPathComponent(path)
-                if (try? FileManager.default.removeItem(at: url)) != nil {
-                    filesDeleted += 1
-                }
+                pendingDeletes.append(dir.appendingPathComponent(path))
                 attempt.videoPath = nil
             }
         }
+
+        // Second pass: persist mutations FIRST so rollback can't desync.
         do {
             try context.save()
-            logger.info("Purged all wake recordings: rows=\(rowsCleared) files=\(filesDeleted)")
         } catch {
             logger.error("purgeAll save failed: \(error.localizedDescription, privacy: .public)")
             context.rollback()
+            return
+        }
+
+        // Third pass: now that rows are durably purged, execute file deletes.
+        // SF-1: per-file logging on failure so triage can see which files
+        // resisted deletion; the rows are already cleared, so subsequent
+        // sweeps will skip them.
+        var filesDeleted = 0
+        var filesFailed = 0
+        for url in pendingDeletes {
+            do {
+                try FileManager.default.removeItem(at: url)
+                filesDeleted += 1
+            } catch {
+                filesFailed += 1
+                logger.error("purgeAll file remove failed for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if filesFailed > 0 {
+            logger.error("Purged wake recordings: rows=\(rowsCleared) filesDeleted=\(filesDeleted) filesFailed=\(filesFailed) — orphan files may persist; see above.")
+        } else {
+            logger.info("Purged all wake recordings: rows=\(rowsCleared) files=\(filesDeleted)")
         }
     }
 
@@ -138,6 +172,7 @@ enum WakeAttemptCleaner {
         )
 
         var deletedCount = 0
+        var failedCount = 0
         var bytesReclaimed: Int64 = 0
         while let next = enumerator?.nextObject() as? URL {
             guard let values = try? next.resourceValues(forKeys: resourceKeys),
@@ -147,13 +182,26 @@ enum WakeAttemptCleaner {
                 continue
             }
             let size = (try? next.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            if (try? fm.removeItem(at: next)) != nil {
+            // SF-2 (Wave 3.1, 2026-04-26): per-file delete failure logged. The
+            // 7-day retention promise can quietly drift if deletes are silently
+            // dropped (file held open by AVFoundation, sandbox edge case during
+            // iOS upgrade). Aggregate failure count surfaced via .error log so
+            // field triage can spot stale-bytes accumulation.
+            do {
+                try fm.removeItem(at: next)
                 deletedCount += 1
                 bytesReclaimed += Int64(size)
+            } catch {
+                failedCount += 1
+                logger.error("Video delete failed for \(next.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
             }
         }
-        if deletedCount > 0 {
-            logger.info("Deleted \(deletedCount) wake-attempt videos older than \(videoRetentionDays) days; bytes=\(bytesReclaimed)")
+        if deletedCount > 0 || failedCount > 0 {
+            if failedCount > 0 {
+                logger.error("Wake-attempt video sweep: deleted=\(deletedCount) failed=\(failedCount) bytes=\(bytesReclaimed) — retention promise may be drifting")
+            } else {
+                logger.info("Deleted \(deletedCount) wake-attempt videos older than \(videoRetentionDays) days; bytes=\(bytesReclaimed)")
+            }
         }
     }
 
@@ -174,6 +222,7 @@ enum WakeAttemptCleaner {
         )
         let cutoff = Date().addingTimeInterval(-Double(tmpCaptureRetentionHours) * 3600.0)
         var deletedCount = 0
+        var failedCount = 0
         while let next = enumerator?.nextObject() as? URL {
             let name = next.lastPathComponent
             // Match only our own tmp files — never touch other tenants of /tmp.
@@ -182,12 +231,21 @@ enum WakeAttemptCleaner {
                   modified < cutoff else {
                 continue
             }
-            if (try? fm.removeItem(at: next)) != nil {
+            // SF-2 (Wave 3.1): per-file delete failure observability.
+            do {
+                try fm.removeItem(at: next)
                 deletedCount += 1
+            } catch {
+                failedCount += 1
+                logger.error("tmp capture remove failed for \(name, privacy: .private): \(error.localizedDescription, privacy: .public)")
             }
         }
-        if deletedCount > 0 {
-            logger.info("Cleaned \(deletedCount) tmp capture leftover files older than \(tmpCaptureRetentionHours)h")
+        if deletedCount > 0 || failedCount > 0 {
+            if failedCount > 0 {
+                logger.error("tmp capture sweep: deleted=\(deletedCount) failed=\(failedCount)")
+            } else {
+                logger.info("Cleaned \(deletedCount) tmp capture leftover files older than \(tmpCaptureRetentionHours)h")
+            }
         }
     }
 

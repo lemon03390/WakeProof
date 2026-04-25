@@ -31,7 +31,14 @@ final class VisionVerifierTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        container = try ModelContainer(for: BaselinePhoto.self, WakeAttempt.self, configurations: config)
+        // Round-1 PR-review T-5 (Wave 3.1): include MorningBriefing in the
+        // test schema so a future schema migration that breaks production at
+        // launch (per WakeProofApp's fatalError-on-init) lights up here
+        // immediately rather than at first device launch.
+        container = try ModelContainer(
+            for: BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self,
+            configurations: config
+        )
         suiteName = "com.wakeproof.tests.visionverifier.\(UUID().uuidString)"
         suiteDefaults = UserDefaults(suiteName: suiteName)
         suiteDefaults.removePersistentDomain(forName: suiteName)

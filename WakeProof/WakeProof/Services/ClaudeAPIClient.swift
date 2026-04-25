@@ -437,8 +437,18 @@ struct ClaudeAPIClient: ClaudeVisionClient {
 
         // No-resize path: re-encode anyway to strip EXIF (S-I4). UIImage.jpegData
         // emits a fresh JPEG without source metadata.
+        //
+        // Round-1 PR-review SF-7 (Wave 3.2, 2026-04-26): on encode failure
+        // (rare; OOM under memory pressure), the EXIF-stripping promise is
+        // silently degraded — the original bytes (with EXIF) ship to
+        // Anthropic. Log so the privacy-contract violation is observable.
         if longSide <= maxLongSide {
-            return image.jpegData(compressionQuality: 0.9) ?? jpegData
+            if let stripped = image.jpegData(compressionQuality: 0.9) {
+                return stripped
+            }
+            Logger(subsystem: LogSubsystem.verification, category: "claude")
+                .error("resizeForUpload: jpegData(0.9) returned nil — EXIF strip degraded; shipping original bytes")
+            return jpegData
         }
 
         let scale = maxLongSide / longSide
@@ -452,7 +462,13 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         let resized = renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: targetSize))
         }
-        return resized.jpegData(compressionQuality: 0.85) ?? jpegData
+        // SF-7 (Wave 3.2): same observability for the resize path.
+        if let stripped = resized.jpegData(compressionQuality: 0.85) {
+            return stripped
+        }
+        Logger(subsystem: LogSubsystem.verification, category: "claude")
+            .error("resizeForUpload: jpegData(0.85) on resized image returned nil — shipping original bytes")
+        return jpegData
     }
 
     /// R4 fix: moved to a nonisolated static so `Task.detached` can call it without

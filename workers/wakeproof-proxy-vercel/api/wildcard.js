@@ -44,6 +44,7 @@ import {
   sanitizeUpstreamBody,
   readWithTimeout,
   classifyFetchError,
+  tokenIdent,
   BURST_WINDOW_MS,
   BURST_LIMIT_DEFAULT,
 } from '../lib/proxy-helpers.js';
@@ -170,7 +171,9 @@ export default async function handler(req, res) {
     res.status(400).json({
       error: {
         type: 'invalid_path',
-        message: 'Path contains characters outside the allowed set [a-zA-Z0-9_\\-/].',
+        // M-9 (Wave 3.3): cleaned-up regex-source artifact for user-visible
+        // copy. The `\\-` was a regex-escape-source leak.
+        message: 'Path contains characters outside the allowed set: letters, digits, underscore, hyphen, forward slash.',
       },
     });
     return;
@@ -216,15 +219,16 @@ export default async function handler(req, res) {
     allowedBeta = kept.join(', ');
   }
 
-  // S-C1 (Wave 2.1): per-token burst rate limit (best-effort, warm-Lambda only).
-  const tokenSuffix = clientToken.slice(-6);
+  // S-C1 (Wave 2.1) + I-6 (Wave 3.2): per-token burst rate limit, keyed on
+  // SHA-256 prefix to avoid the suffix-collision + log-leak vectors.
+  const ident = tokenIdent(clientToken);
   const burstLimit = parseInt(process.env.WAKEPROOF_BURST_LIMIT, 10) || BURST_LIMIT_DEFAULT;
-  const burst = checkBurstLimit(tokenSuffix, burstLimit);
+  const burst = checkBurstLimit(ident, burstLimit);
   console.info(
-    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=${method} path=/${upstreamPath} burst=${burst.count}/${burstLimit}`
+    `[ratelimit-note] token=h:${ident} ts=${new Date().toISOString()} method=${method} path=/${upstreamPath} burst=${burst.count}/${burstLimit}`
   );
   if (!burst.allowed) {
-    console.warn(`[ratelimit-trip] token=***${tokenSuffix} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
+    console.warn(`[ratelimit-trip] token=h:${ident} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
     res.setHeader('Retry-After', String(Math.ceil(BURST_WINDOW_MS / 1000)));
     res.status(429).json({
       error: {

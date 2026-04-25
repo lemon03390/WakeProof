@@ -24,6 +24,7 @@ import {
   sanitizeUpstreamBody,
   readWithTimeout,
   classifyFetchError,
+  tokenIdent,
   BURST_WINDOW_MS,
   BURST_LIMIT_DEFAULT,
 } from '../../lib/proxy-helpers.js';
@@ -78,17 +79,18 @@ export default async function handler(req, res) {
     return;
   }
 
-  // S-C1 (Wave 2.1): per-token burst rate limit (best-effort, warm-Lambda only).
-  // Detective `[ratelimit-note]` log lines remain so post-facto abuse is
-  // reconstructable from Vercel logs.
-  const tokenSuffix = clientToken.slice(-6);
+  // S-C1 (Wave 2.1) + I-6 (Wave 3.2): per-token burst rate limit, keyed on
+  // `tokenIdent(token)` (SHA-256 prefix) instead of last-6-char suffix so a
+  // log read doesn't reveal token bytes and rotation can't collide on a 6-hex
+  // suffix. Detective `[ratelimit-note]` log lines remain.
+  const ident = tokenIdent(clientToken);
   const burstLimit = parseInt(process.env.WAKEPROOF_BURST_LIMIT, 10) || BURST_LIMIT_DEFAULT;
-  const burst = checkBurstLimit(tokenSuffix, burstLimit);
+  const burst = checkBurstLimit(ident, burstLimit);
   console.info(
-    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=POST path=/v1/messages burst=${burst.count}/${burstLimit}`
+    `[ratelimit-note] token=h:${ident} ts=${new Date().toISOString()} method=POST path=/v1/messages burst=${burst.count}/${burstLimit}`
   );
   if (!burst.allowed) {
-    console.warn(`[ratelimit-trip] token=***${tokenSuffix} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
+    console.warn(`[ratelimit-trip] token=h:${ident} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
     res.setHeader('Retry-After', String(Math.ceil(BURST_WINDOW_MS / 1000)));
     res.status(429).json({
       error: {

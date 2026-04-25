@@ -4,7 +4,23 @@
 // `messages.js` and `wildcard.js` apply the same hardening posture. Add new
 // guards here, not in the route files.
 
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHash } from 'node:crypto';
+
+// Round-1 PR-review I-6 (Wave 3.2, 2026-04-26): tokenIdent replaces the
+// last-6-chars suffix used previously for burst-cache keying + log
+// correlation. Two motivations:
+//   1. Collision: with token rotation, two tokens sharing the last 6 hex
+//      chars (1-in-16M) would share a burst counter.
+//   2. Log leak: the 6-char suffix in Vercel logs reveals 6 hex chars of the
+//      token; an attacker with log read access correlates suffixes across
+//      rotations or guesses adjacent tokens. The SHA-256 prefix doesn't
+//      reveal anything about the original token's bytes.
+// SHA-256 hex prefix is collision-resistant for the per-warm-Lambda cache
+// (10–100 active suffixes max). Length 12 chars = 48 bits = 1-in-280-trillion
+// collision probability per cache cycle — practically zero.
+export function tokenIdent(token) {
+  return createHash('sha256').update(token).digest('hex').slice(0, 12);
+}
 
 // L1 (Wave 2.7): constant-time token compare. Mirrored from the original
 // route-file implementations now that both share this module.
@@ -71,13 +87,29 @@ export function checkBurstLimit(tokenSuffix, limit) {
 // image data); forwarding verbatim could leak prompt content into the iOS
 // client's logs. We strip down to {type, message} for 4xx and bound message
 // length. 2xx and 5xx pass through unchanged.
+//
+// SF-6 (Wave 3.1, 2026-04-26): JSON.parse failure path now returns a synthetic
+// safe-by-construction error body instead of passing through the original
+// bytes. The fall-through was the exact silent-leak vector the function
+// exists to prevent — if Anthropic ever returns a malformed/truncated 4xx
+// with an echoed prompt fragment, the parse-fail catch would have re-emitted
+// it verbatim. Now we fail safe with a generic "Upstream error
+// (unparseable)" body. Non-JSON 4xx is still passed through (the function
+// only owns the JSON sanitisation contract).
 export function sanitizeUpstreamBody(status, originalBytes, contentType) {
   if (status < 400 || status >= 500) return originalBytes;
   if (!contentType || !contentType.includes('json')) return originalBytes;
   try {
     const parsed = JSON.parse(originalBytes.toString('utf8'));
     const errorObj = parsed?.error;
-    if (!errorObj || typeof errorObj !== 'object') return originalBytes;
+    if (!errorObj || typeof errorObj !== 'object') {
+      // Shape mismatch — synthesize a generic 4xx body rather than leaking
+      // whatever was in the original.
+      return Buffer.from(
+        JSON.stringify({ error: { type: 'invalid_request_error', message: 'Upstream error (unexpected shape)' } }),
+        'utf8'
+      );
+    }
     const sanitized = {
       type: typeof errorObj.type === 'string' ? errorObj.type : 'invalid_request_error',
       message: typeof errorObj.message === 'string'
@@ -86,7 +118,13 @@ export function sanitizeUpstreamBody(status, originalBytes, contentType) {
     };
     return Buffer.from(JSON.stringify({ error: sanitized }), 'utf8');
   } catch {
-    return originalBytes;
+    // Parse failure on a JSON-claimed content type. Don't pass-through —
+    // emit a synthetic safe body. Logged at the proxy route via the upstream
+    // status code, so triage still has the original status.
+    return Buffer.from(
+      JSON.stringify({ error: { type: 'invalid_request_error', message: 'Upstream error (unparseable)' } }),
+      'utf8'
+    );
   }
 }
 

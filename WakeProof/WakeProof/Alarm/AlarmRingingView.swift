@@ -18,6 +18,17 @@ struct AlarmRingingView: View {
 
     let onRequestCapture: () -> Void
 
+    /// Round-1 PR-review I-1 (Wave 3.2, 2026-04-26): cache the decoded
+    /// baseline `UIImage` in @State so an 18MP TrueDepth JPEG isn't decoded
+    /// on MainActor for every body re-render. The previous
+    /// `UIImage(data: $0.imageData)` call ran inside the body builder — at
+    /// alarm fire (when the screen is competing for MainActor with the audio
+    /// session re-arm + animation transitions), a synchronous 5–7 MB image
+    /// decode is the same R4-class jank class that `ClaudeAPIClient.resizeForUpload`
+    /// + `Task.detached` was supposed to address everywhere else.
+    /// Populated in `.onAppear` via Task.detached and used directly in body.
+    @State private var cachedBaselineImage: UIImage?
+
     var body: some View {
         ZStack {
             Color.wpChar900.ignoresSafeArea()
@@ -42,7 +53,11 @@ struct AlarmRingingView: View {
                     // baseline photo so the user can match the framing.
                     // Text-only error ("scene mismatch") was hard to act on
                     // — users didn't know what to aim the camera at.
-                    if let baselineImage = baselines.first.flatMap({ UIImage(data: $0.imageData) }) {
+                    //
+                    // I-1 (Wave 3.2): use cached UIImage populated in
+                    // .onAppear off-main rather than decoding 5–7 MB of JPEG
+                    // on MainActor for every body re-render.
+                    if let baselineImage = cachedBaselineImage {
                         VStack(spacing: WPSpacing.sm) {
                             Text("Match this scene")
                                 .wpFont(.caption)
@@ -71,5 +86,17 @@ struct AlarmRingingView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .task {
+            // I-1 (Wave 3.2): decode the baseline JPEG off MainActor so a
+            // late-arriving REJECTED render doesn't pay 5–7 MB of decode at
+            // animation time. Decode on the user-initiated background QoS
+            // and assign back to MainActor.
+            if cachedBaselineImage == nil, let data = baselines.first?.imageData {
+                let image = await Task.detached(priority: .userInitiated) {
+                    UIImage(data: data)
+                }.value
+                cachedBaselineImage = image
+            }
+        }
     }
 }
