@@ -67,13 +67,9 @@ struct NightlySynthesisClient {
     }
 
     /// P-I3 (Wave 2.2, 2026-04-26): `static let` shared URLSession — see the
-    /// rationale in ClaudeAPIClient.defaultSession.
-    private static let defaultSession: URLSession = {
-        let c = URLSessionConfiguration.default
-        c.timeoutIntervalForRequest = 15
-        c.timeoutIntervalForResource = 30
-        return URLSession(configuration: c)
-    }()
+    /// rationale in ClaudeAPIClient.defaultSession. Built via `ProxyURLSession`
+    /// so the 15/30 timeout pair stays in lockstep with the other proxy clients.
+    private static let defaultSession: URLSession = ProxyURLSession.make()
 
     func synthesize(
         sleep: SleepSnapshot,

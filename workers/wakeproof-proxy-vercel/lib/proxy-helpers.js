@@ -41,6 +41,21 @@ export function checkBurstLimit(tokenSuffix, limit) {
   const cache = getBurstCache();
   const now = Date.now();
   const cutoff = now - BURST_WINDOW_MS;
+  // Wave 2.6: opportunistic prune of stale OTHER buckets so a long-warm
+  // Lambda doesn't accumulate orphaned token-suffix keys (idle tokens after
+  // their burst window expired). With ~1-10 active suffixes per warm
+  // container, the per-call sweep is trivial; without it the Map grows
+  // monotonically until container recycle. We compute `cutoff` once and use
+  // it both for our own bucket filter and for sibling-bucket eviction.
+  for (const [key, entries] of cache) {
+    if (key === tokenSuffix) continue;
+    // entries is sorted by push order (monotonic now()); the last entry is
+    // the most recent. If even the newest entry is past the cutoff, no
+    // entries in this bucket can still count toward a future check.
+    if (entries.length === 0 || entries[entries.length - 1] <= cutoff) {
+      cache.delete(key);
+    }
+  }
   const recent = (cache.get(tokenSuffix) || []).filter((ts) => ts > cutoff);
   if (recent.length >= limit) {
     cache.set(tokenSuffix, recent);

@@ -68,8 +68,7 @@ enum WakeAttemptCleaner {
 
         var rowsCleared = 0
         var filesDeleted = 0
-        let docsURL = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
-        let attemptsDir = docsURL?.appendingPathComponent("WakeAttempts", isDirectory: true)
+        let attemptsDir = wakeAttemptsDirectory()
 
         for attempt in allAttempts {
             if attempt.imageData != nil {
@@ -127,10 +126,7 @@ enum WakeAttemptCleaner {
 
     private static func sweepOldVideoFiles() {
         let fm = FileManager.default
-        guard let docsURL = try? fm.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false) else {
-            return
-        }
-        let attemptsDir = docsURL.appendingPathComponent("WakeAttempts", isDirectory: true)
+        guard let attemptsDir = wakeAttemptsDirectory() else { return }
         guard fm.fileExists(atPath: attemptsDir.path) else { return }
 
         let cutoff = Calendar.current.date(byAdding: .day, value: -videoRetentionDays, to: .now) ?? .now
@@ -164,26 +160,52 @@ enum WakeAttemptCleaner {
     private static func sweepTmpCaptureLeftovers() {
         let fm = FileManager.default
         let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        guard let entries = try? fm.contentsOfDirectory(at: tmpURL, includingPropertiesForKeys: [.contentModificationDateKey]) else {
-            return
-        }
+        // Wave 2.6: switched from `contentsOfDirectory(at:includingPropertiesForKeys:)`
+        // (eager — materialises every entry + stats every file's mtime up front) to
+        // a lazy `enumerator` that allows the prefix check to short-circuit BEFORE
+        // we pay for `.contentModificationDateKey`. NSTemporaryDirectory is shared
+        // with the OS — a fresh launch can land on a /tmp with hundreds of system
+        // entries (URLSession download staging, snapshot caches). Filtering name
+        // first cuts the stat-call cost to "the few files we actually own".
+        let enumerator = fm.enumerator(
+            at: tmpURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        )
         let cutoff = Date().addingTimeInterval(-Double(tmpCaptureRetentionHours) * 3600.0)
         var deletedCount = 0
-        for url in entries {
-            let name = url.lastPathComponent
+        while let next = enumerator?.nextObject() as? URL {
+            let name = next.lastPathComponent
             // Match only our own tmp files — never touch other tenants of /tmp.
             guard name.hasPrefix("wakeproof-capture-") else { continue }
-            guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
+            guard let modified = (try? next.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
                   modified < cutoff else {
                 continue
             }
-            if (try? fm.removeItem(at: url)) != nil {
+            if (try? fm.removeItem(at: next)) != nil {
                 deletedCount += 1
             }
         }
         if deletedCount > 0 {
             logger.info("Cleaned \(deletedCount) tmp capture leftover files older than \(tmpCaptureRetentionHours)h")
         }
+    }
+
+    /// Resolve `Documents/WakeAttempts/` — the durable directory videos and
+    /// tmp-promoted captures land in. Returns `nil` if Documents is
+    /// unreachable (sandbox edge case at app launch). Shared by both the
+    /// retention sweep and the manual purge so directory-naming changes
+    /// happen in one place.
+    private static func wakeAttemptsDirectory() -> URL? {
+        guard let docsURL = try? FileManager.default.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) else {
+            return nil
+        }
+        return docsURL.appendingPathComponent("WakeAttempts", isDirectory: true)
     }
 
     /// S-I6 (Wave 2.1): only accept `videoPath` values shaped as plain filenames.

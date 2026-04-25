@@ -66,25 +66,25 @@ final class VisionVerifier {
     /// the next successful persist.
     private(set) var lastBriefingPersistFailedAt: Date?
 
-    /// Public setter scoped to the bootstrap-failure path so the banner can
-    /// surface a recovery hint. Called from WakeProofApp's bootstrapMemoryStore
-    /// catch.
+    /// Setter for `memoryBootstrapFailed`. Called from `WakeProofApp.bootstrapMemoryStore`'s
+    /// catch arm. See the field declaration above for the failure-mode rationale.
     @MainActor
     func setMemoryBootstrapFailed(_ failed: Bool) {
         memoryBootstrapFailed = failed
     }
 
-    /// E-M4 (Wave 2.3): allow the bootstrap path to flip the reinstall flag
-    /// directly when MemoryStore.bootstrapIfNeeded throws `.invalidUserUUID`.
-    /// Previously only `read()` could flip it, so a UUID-shape failure during
-    /// bootstrap left `requiresReinstall = false` until the first verify
-    /// triggered a read. Now the banner surfaces immediately on launch.
+    /// E-M4 (Wave 2.3): bootstrap-time entry point for `requiresReinstall`. Without
+    /// this, only the `read()` path could flip the flag — so a UUID-shape failure
+    /// during bootstrap stayed silent until the first verify triggered a read.
+    /// Now the reinstall banner surfaces immediately on launch.
     @MainActor
     func flipRequiresReinstall() {
         requiresReinstall = true
     }
 
-    /// E-C2 (Wave 2.3): record/clear briefing persist failure for banner.
+    /// Setter for `lastBriefingPersistFailedAt`. Pass `true` to record `.now`,
+    /// `false` to clear. See the field above for why a Date timestamp (not a
+    /// Bool) — callers may want to display elapsed-time copy in the future.
     @MainActor
     func setBriefingPersistFailed(_ failed: Bool) {
         lastBriefingPersistFailedAt = failed ? .now : nil

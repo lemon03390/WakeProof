@@ -139,13 +139,11 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// cache) on every property read. Hot-paths like `verify()` invoke the
     /// init-default expression each call, leaking sessions that were never
     /// invalidated. `static let` evaluates the configuration once at class load.
-    private static let defaultSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 30
-        config.waitsForConnectivity = false
-        return URLSession(configuration: config)
-    }()
+    ///
+    /// The factory itself lives in `ProxyURLSession` — same 15/30 config is
+    /// used by `NightlySynthesisClient` and `OvernightAgentClient`, so the
+    /// configuration constants live in one place to avoid drift.
+    private static let defaultSession: URLSession = ProxyURLSession.make()
 
     func verify(
         baselineJPEG: Data,

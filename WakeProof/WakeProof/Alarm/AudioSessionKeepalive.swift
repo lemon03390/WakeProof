@@ -28,6 +28,13 @@ final class AudioSessionKeepalive {
     private(set) var isActive: Bool = false
     private(set) var lastError: String?
 
+    /// E-M7 (Wave 2.5): copy used by the interruption-began branch. Held in a
+    /// constant so the `.ended` clear-path matches by reference rather than
+    /// repeating a long string literal — a future copy edit can't cause the
+    /// banner to stick on after interruption ends.
+    private static let interruptionBannerMessage =
+        "Audio interrupted (likely a phone call). Alarm should resume on call end."
+
     /// Activate the audio session with .playback category and start looping silence.
     /// Idempotent — repeated calls (SwiftUI `.task` re-firing on view re-mount) won't
     /// stack interruption observers or duplicate the silent player.
@@ -174,16 +181,14 @@ final class AudioSessionKeepalive {
                 switch type {
                 case .began:
                     self.logger.warning("Audio session interruption BEGAN")
-                    // E-M7 (Wave 2.5, 2026-04-26): set lastError so the
-                    // AlarmSchedulerView banner surfaces "Audio interrupted —
-                    // alarm may not resume." Cleared in `.ended`. Without this,
-                    // a rare iOS bug where `.ended` never fires would leave the
+                    // E-M7 (Wave 2.5): surface to AlarmSchedulerView's banner
+                    // so a stuck `.ended` (rare iOS bug) doesn't leave the
                     // user with a silent alarm + no signal.
-                    self.lastError = "Audio interrupted (likely a phone call). Alarm should resume on call end."
+                    self.lastError = Self.interruptionBannerMessage
                 case .ended:
-                    // Clear the interruption banner; handleInterruptionEnded
-                    // does the route restoration.
-                    if self.lastError == "Audio interrupted (likely a phone call). Alarm should resume on call end." {
+                    // Clear our own interruption banner only — preserve any
+                    // unrelated lastError set by another code path.
+                    if self.lastError == Self.interruptionBannerMessage {
                         self.lastError = nil
                     }
                     self.handleInterruptionEnded(optionsRaw: optionsRaw)

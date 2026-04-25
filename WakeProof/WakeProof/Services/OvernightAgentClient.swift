@@ -147,13 +147,9 @@ actor OvernightAgentClient {
     /// P-I3 (Wave 2.2, 2026-04-26): `static let` shared URLSession — see the
     /// rationale in ClaudeAPIClient.defaultSession. Same proxy host so HTTP/2
     /// connection coalescing makes sharing strictly better than per-instance
-    /// sessions.
-    private static let defaultSession: URLSession = {
-        let c = URLSessionConfiguration.default
-        c.timeoutIntervalForRequest = 15
-        c.timeoutIntervalForResource = 30
-        return URLSession(configuration: c)
-    }()
+    /// sessions. Built via `ProxyURLSession` so the 15/30 timeout pair stays
+    /// in lockstep with the other proxy clients.
+    private static let defaultSession: URLSession = ProxyURLSession.make()
 
     // MARK: - Public API
 

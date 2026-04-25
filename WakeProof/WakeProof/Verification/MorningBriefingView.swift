@@ -211,14 +211,16 @@ struct MorningBriefingView: View {
                 //      morning would feel off-tone.
                 // The ShareLink takes the rendered `Image` directly — no
                 // Photos permission needed, the system sandbox share sheet
-                // handles destination selection. Renderer runs on-demand per
-                // tap via `makeShareImage()`; it's not expensive enough to
-                // warrant caching, and a stale cache would be worse than a
-                // 50ms re-render on tap.
-                // P-I5 (Wave 2.2): use cached share image populated in .onAppear
-                // rather than calling makeShareImage() each body re-eval. The
-                // cache is populated only when all share gates pass, so the
-                // `let shareImage = cachedShareImage` unwrap is the gate.
+                // handles destination selection.
+                //
+                // P-I5 (Wave 2.2): the share image is rendered once in
+                // `.onAppear` (after streak + observation are stable for the
+                // cover's lifetime) and read here from `cachedShareImage`.
+                // Earlier this view re-rendered the 1080x1920 PNG on every
+                // body re-eval during the 1.2s sunrise reveal — 30–60 ms
+                // raster work per tick. The cache is populated only when all
+                // share gates pass, so the unwrap below is the visibility
+                // gate.
                 if ShareCardModel.shouldShowShareButton(
                     enabled: shareCardEnabled,
                     streak: currentStreak,
