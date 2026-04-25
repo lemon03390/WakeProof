@@ -24,11 +24,11 @@ struct WeeklyInsightView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: WPSpacing.sm) {
             HStack {
                 Image(systemName: "sparkles")
                 Text("This week's insight")
-                    .font(.headline)
+                    .wpFont(.headline)
                 Spacer()
                 if displayableInsight != nil {
                     Button(action: { expanded.toggle() }) {
@@ -41,40 +41,41 @@ struct WeeklyInsightView: View {
             if let insight = displayableInsight {
                 if expanded {
                     Text(insight.insightText)
-                        .font(.body)
-                        .foregroundStyle(.primary.opacity(0.9))
+                        .wpFont(.body)
+                        .foregroundStyle(Color.wpChar900)
                     if let pattern = insight.patternNoticed {
                         Text("Pattern: \(pattern)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .wpFont(.caption)
+                            .foregroundStyle(Color.wpChar500)
                     }
                     if let suggestion = insight.suggestedAction {
                         Text("Try: \(suggestion)")
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .wpFont(.callout)
+                            .foregroundStyle(Color.wpChar500)
                     }
                     if let generatedAt {
                         Text("Generated \(generatedAt.formatted(.relative(presentation: .named)))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary.opacity(0.7))
+                            .wpFont(.footnote)
+                            .foregroundStyle(Color.wpChar500)
                     }
                     Text("Produced by Opus 4.7's 1M-context")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .wpFont(.footnote)
+                        .foregroundStyle(Color.wpChar300)
                 } else {
                     Text(insight.insightText)
-                        .font(.subheadline)
+                        .wpFont(.subhead)
                         .lineLimit(2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.wpChar500)
                 }
             } else {
                 Text("No insight yet — run `scripts/generate-weekly-insight.py` after 14 days of seed data.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .wpFont(.body)
+                    .italic()
+                    .foregroundStyle(Color.wpChar500)
             }
         }
-        .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(WPSpacing.md)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: WPRadius.md))
     }
 }
 

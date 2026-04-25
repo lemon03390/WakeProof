@@ -8,8 +8,8 @@
 //  permission prompt (sandbox sharing sheet handles it).
 //
 //  Layout rationale (§12.3-H5 "minimalist card"):
-//   - Solid black background mirroring MorningBriefingView — the shared
-//     artefact visually continues from the in-app morning surface.
+//   - wpPrimary gradient background (135° orange→coral) mirrors the hero
+//     alarm CTA surface — the shared artefact carries the brand signature.
 //   - Large streak number is the hero. 300pt bold is deliberately oversized
 //     so a user skimming a cluttered IG feed reads the number before
 //     anything else.
@@ -18,9 +18,8 @@
 //     horizontally padded. Max 2 lines so a long Claude observation doesn't
 //     overflow into the mark area; the 2-line truncation is acceptable
 //     because the card is a teaser, not a transcript.
-//   - "WakeProof" mark in the bottom-right at 36pt semibold, 0.5 opacity.
-//     Low opacity so the mark reads as a watermark rather than an ad; the
-//     user's streak number must dominate the visual weight.
+//   - "WakeProof" mark in the bottom-right at 36pt semibold, 0.7 opacity +
+//     tracking(2) + uppercased — brand watermark style.
 //
 //  Rendering contract:
 //   - The view MUST be used with `ImageRenderer(content: ShareCardView(...))`
@@ -49,32 +48,32 @@ struct ShareCardView: View {
 
     var body: some View {
         ZStack {
-            // Solid-black background fills the full canvas. Using Color.black
-            // rather than .background(Color.black) because ShareCardView is
-            // the render root — there is no parent; the background IS this
-            // rectangle.
-            Color.black
+            // wpPrimary gradient fills the full canvas — the share card IS
+            // hero treatment per spec. Using LinearGradient.wpPrimary so the
+            // brand gradient is consistent across all hero surfaces.
+            LinearGradient.wpPrimary
 
             VStack(spacing: 0) {
                 Spacer()
 
-                // Hero: streak number. 300pt bold with ultra-tight line spacing
-                // so the digit sits as a solid block rather than floating.
+                // Hero: streak number. 300pt bold with monospacedDigit so
+                // the numeral sits as a solid block rather than floating.
                 Text("\(streak)")
                     .font(.system(size: 300, weight: .bold))
-                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .foregroundStyle(Color.wpCream50)
 
-                // Caption underneath. 60pt, 0.7 opacity so the eye lands on
-                // the number first and the label reads as supporting text.
+                // Caption underneath. 60pt title1 role, 0.85 opacity so the
+                // eye lands on the number first and the label reads as
+                // supporting text.
                 Text(ShareCardModel.streakCaption)
-                    .font(.system(size: 60))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.top, 8)
+                    .wpFont(.title1)
+                    .foregroundStyle(Color.wpCream50.opacity(0.85))
+                    .padding(.top, WPSpacing.xs2)
 
                 // Gap between the caption and the observation. Sized by
                 // Spacer ratio rather than fixed pt so the layout adapts if
-                // the observation block is absent — Spacer's even
-                // distribution puts the observation near vertical centre.
+                // the observation block is absent.
                 Spacer()
 
                 // Observation block (H1 Claude prose). Only renders when
@@ -83,34 +82,33 @@ struct ShareCardView: View {
                 // the hero number.
                 if let observation, !observation.isEmpty {
                     Text(observation)
-                        .font(.system(size: 54))
+                        .wpFont(.callout)
                         .italic()
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(Color.wpCream50.opacity(0.85))
                         .multilineTextAlignment(.center)
                         .lineLimit(2)
                         .truncationMode(.tail)
-                        .padding(.horizontal, 80)
+                        .padding(.horizontal, WPSpacing.xl4)
                 }
 
                 Spacer()
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, WPSpacing.xl4)
 
-            // Bottom-right WakeProof mark. Low opacity (0.5) so it reads as
-            // a watermark. Positioned with VStack/HStack Spacer + trailing
-            // padding rather than overlay(alignment:) so the exact 60pt
-            // margin is explicit in the layout code.
+            // Bottom-right WakeProof mark. Low opacity so it reads as a
+            // watermark. Tracking + uppercased for brand-wordmark style.
             VStack {
                 Spacer()
                 HStack {
                     Spacer()
-                    Text(ShareCardModel.markLabel)
-                        .font(.system(size: 36, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.5))
+                    Text(ShareCardModel.markLabel.uppercased())
+                        .wpFont(.caption)
+                        .tracking(2)
+                        .foregroundStyle(Color.wpCream50.opacity(0.7))
                 }
             }
-            .padding(.trailing, 60)
-            .padding(.bottom, 60)
+            .padding(.trailing, WPSpacing.xl4)
+            .padding(.bottom, WPSpacing.xl4)
         }
         .frame(width: ShareCardModel.canvasWidth, height: ShareCardModel.canvasHeight)
     }
