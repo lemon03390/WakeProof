@@ -175,4 +175,89 @@ final class MemoryPromptBuilderTests: XCTestCase {
         XCTAssertFalse(out.contains("&amp;gt;"),
                        "must NOT double-encode: &amp;gt; indicates & was escaped after > became &gt;")
     }
+
+    // MARK: - Death-spiral filter (Phase 8 fix)
+
+    /// REJECTED entries within the suppression window (15 min default) must be
+    /// filtered before render so a same-fire retry chain doesn't compound prior
+    /// rejections into self-reinforcing bias. Phase 8 device test reproduced
+    /// 5 REJECTEDs in 4 minutes because each prior rejection was fed back as
+    /// memory_context.
+    func testRecentRejectedEntriesAreFilteredFromContext() {
+        let now = Date(timeIntervalSince1970: 1_745_500_000)
+        let recentRejected = MemoryEntry(
+            timestamp: now.addingTimeInterval(-300), // 5 min ago — inside window
+            verdict: "REJECTED", confidence: 0.88, retryCount: 0,
+            note: "wrong location"
+        )
+        let snap = MemorySnapshot(profile: nil, recentHistory: [recentRejected], totalHistoryCount: 1)
+        // history has 1 row but it's filtered → render should return nil
+        // (since profile is also nil and effective recentHistory is empty)
+        XCTAssertNil(MemoryPromptBuilder.render(snap, now: now),
+                     "recent REJECTED + no profile must render nothing — death spiral broken")
+    }
+
+    func testOldRejectedEntriesArePreservedAsCalibration() {
+        let now = Date(timeIntervalSince1970: 1_745_500_000)
+        let oldRejected = MemoryEntry(
+            timestamp: now.addingTimeInterval(-3600 * 24), // 24h ago — outside window
+            verdict: "REJECTED", confidence: 0.88, retryCount: 0,
+            note: "yesterday user was off-location"
+        )
+        let snap = MemorySnapshot(profile: nil, recentHistory: [oldRejected], totalHistoryCount: 1)
+        let out = MemoryPromptBuilder.render(snap, now: now)
+        XCTAssertNotNil(out, "REJECTED entries older than the suppression window are valid calibration data")
+        XCTAssertTrue(out!.contains("REJECTED"))
+    }
+
+    func testRecentVerifiedEntriesAreKept() {
+        let now = Date(timeIntervalSince1970: 1_745_500_000)
+        let recentVerified = MemoryEntry(
+            timestamp: now.addingTimeInterval(-300), // 5 min ago
+            verdict: "VERIFIED", confidence: 0.92, retryCount: 0,
+            note: "clean wake"
+        )
+        let snap = MemorySnapshot(profile: nil, recentHistory: [recentVerified], totalHistoryCount: 1)
+        let out = MemoryPromptBuilder.render(snap, now: now)
+        XCTAssertNotNil(out, "VERIFIED entries are never filtered regardless of recency")
+        XCTAssertTrue(out!.contains("VERIFIED"))
+    }
+
+    func testRecentRetryEntriesAreKept() {
+        let now = Date(timeIntervalSince1970: 1_745_500_000)
+        let recentRetry = MemoryEntry(
+            timestamp: now.addingTimeInterval(-180), // 3 min ago
+            verdict: "RETRY", confidence: 0.45, retryCount: 1,
+            note: "blurry, asked for retry"
+        )
+        let snap = MemorySnapshot(profile: nil, recentHistory: [recentRetry], totalHistoryCount: 1)
+        let out = MemoryPromptBuilder.render(snap, now: now)
+        XCTAssertNotNil(out, "RETRY entries are never filtered — they signal Claude wasn't sure, useful context")
+        XCTAssertTrue(out!.contains("RETRY"))
+    }
+
+    func testMixedHistoryFiltersOnlyRecentRejected() {
+        let now = Date(timeIntervalSince1970: 1_745_500_000)
+        let entries = [
+            MemoryEntry(
+                timestamp: now.addingTimeInterval(-3600 * 24), // 24h ago
+                verdict: "REJECTED", confidence: 0.85, retryCount: 0, note: "yesterday-rejected"
+            ),
+            MemoryEntry(
+                timestamp: now.addingTimeInterval(-300), // 5 min ago
+                verdict: "VERIFIED", confidence: 0.92, retryCount: 0, note: "earlier-verified"
+            ),
+            MemoryEntry(
+                timestamp: now.addingTimeInterval(-60), // 1 min ago
+                verdict: "REJECTED", confidence: 0.78, retryCount: 0, note: "recent-rejected-FILTERED"
+            ),
+        ]
+        let snap = MemorySnapshot(profile: nil, recentHistory: entries, totalHistoryCount: 3)
+        let out = MemoryPromptBuilder.render(snap, now: now)!
+
+        XCTAssertTrue(out.contains("yesterday-rejected"), "old REJECTED preserved")
+        XCTAssertTrue(out.contains("earlier-verified"), "VERIFIED preserved")
+        XCTAssertFalse(out.contains("recent-rejected-FILTERED"),
+                       "recent REJECTED must be filtered to break the death spiral")
+    }
 }

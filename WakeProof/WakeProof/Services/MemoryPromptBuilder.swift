@@ -19,13 +19,27 @@ enum MemoryPromptBuilder {
     /// full render exceeds this; the profile is always preserved intact.
     static let maxLength: Int = 2000
 
-    static func render(_ snapshot: MemorySnapshot) -> String? {
+    /// Death-spiral guard: REJECTED entries newer than this are dropped before
+    /// rendering. Phase 8 device test reproduced a feedback loop where a single
+    /// REJECTED verdict (e.g. "wrong location") got fed back as memory_context
+    /// on the user's immediate retry, biasing Claude toward another REJECTED
+    /// ("consistent with prior off-location pattern"), which fed the next retry,
+    /// etc. The user observed 5 REJECTEDs in 4 minutes and gave up.
+    /// 15 minutes covers same-fire retry chains (typically <5 min spread)
+    /// while preserving genuine next-day calibration ("user actually was at
+    /// wrong location yesterday morning at 7am — useful to know").
+    static let rejectedSuppressionWindow: TimeInterval = 15 * 60
+
+    static func render(_ snapshot: MemorySnapshot, now: Date = Date()) -> String? {
         if snapshot.isEmpty { return nil }
+
+        let effectiveSnapshot = applyDeathSpiralFilter(snapshot, now: now)
+        if effectiveSnapshot.isEmpty { return nil }
 
         var parts: [String] = []
         parts.append("<memory_context total_history=\"\(snapshot.totalHistoryCount)\">")
 
-        if let profile = snapshot.profile, !profile.isEmpty {
+        if let profile = effectiveSnapshot.profile, !profile.isEmpty {
             parts.append("<profile>")
             // B1/R2 fix: escape angle brackets in Claude-authored content so a
             // previously-authored profile can't close our wrapping tag early
@@ -36,11 +50,11 @@ enum MemoryPromptBuilder {
             parts.append("</profile>")
         }
 
-        if !snapshot.recentHistory.isEmpty {
+        if !effectiveSnapshot.recentHistory.isEmpty {
             parts.append("<recent_history>")
             parts.append("| when | verdict | confidence | retries | note |")
             parts.append("|---|---|---|---|---|")
-            for entry in snapshot.recentHistory {
+            for entry in effectiveSnapshot.recentHistory {
                 parts.append(renderRow(entry))
             }
             parts.append("</recent_history>")
@@ -52,7 +66,26 @@ enum MemoryPromptBuilder {
         guard full.count > maxLength else { return full }
 
         // Over budget. Drop history rows from oldest, keep profile intact.
-        return buildTruncated(snapshot)
+        return buildTruncated(effectiveSnapshot)
+    }
+
+    /// Filter out REJECTED entries within `rejectedSuppressionWindow` so a
+    /// same-fire retry chain doesn't compound prior rejections into a
+    /// self-reinforcing bias. Older REJECTEDs and any VERIFIED / RETRY entry
+    /// are preserved.
+    private static func applyDeathSpiralFilter(_ snapshot: MemorySnapshot, now: Date) -> MemorySnapshot {
+        let cutoff = now.addingTimeInterval(-rejectedSuppressionWindow)
+        let filtered = snapshot.recentHistory.filter { entry in
+            if entry.verdict == "REJECTED" && entry.timestamp > cutoff {
+                return false
+            }
+            return true
+        }
+        return MemorySnapshot(
+            profile: snapshot.profile,
+            recentHistory: filtered,
+            totalHistoryCount: snapshot.totalHistoryCount
+        )
     }
 
     // MARK: - Private
