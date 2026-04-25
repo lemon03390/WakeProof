@@ -50,31 +50,39 @@ struct BedtimeStep: View {
                 .tint(Color.wpCream50)
 
             if isEnabled {
-                DatePicker(
-                    "Bedtime",
-                    selection: Binding<Date>(
-                        get: {
-                            Calendar.current.date(from: DateComponents(hour: settings.hour, minute: settings.minute)) ?? .now
-                        },
-                        set: { date in
-                            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
-                            settings.hour = c.hour ?? 23
-                            settings.minute = c.minute ?? 0
-                        }
-                    ),
-                    displayedComponents: .hourAndMinute
-                )
-                .foregroundStyle(Color.wpCream50)
-                .tint(Color.wpCream50)
-                // .tint alone doesn't propagate to the compact DatePicker's
-                // time bubble (iOS system styling overrides it with
-                // secondaryLabel-on-secondarySystemFill, which reads as dim
-                // grey on the warm-charcoal hero). .colorMultiply blends the
-                // rendered colors with wpCream50 so the time text matches
-                // the "Bedtime" label brightness — the bubble background
-                // also picks up a faint cream wash, which is on-brand and
-                // adds visual weight to the value.
-                .colorMultiply(Color.wpCream50)
+                HStack {
+                    Text("Bedtime")
+                        .wpFont(.body)
+                        .foregroundStyle(Color.wpCream50)
+                    Spacer()
+                    DatePicker(
+                        "Bedtime",
+                        selection: Binding<Date>(
+                            get: {
+                                Calendar.current.date(from: DateComponents(hour: settings.hour, minute: settings.minute)) ?? .now
+                            },
+                            set: { date in
+                                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                                settings.hour = c.hour ?? 23
+                                settings.minute = c.minute ?? 0
+                            }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+                    .tint(Color.wpCream50)
+                    // Phase 8 device-test fix: the compact DatePicker's time
+                    // bubble draws its text via system .label color resolved
+                    // against the system colorScheme — even when the parent
+                    // forces .preferredColorScheme(.dark), the picker's internal
+                    // host can resolve to .light, yielding dark text against
+                    // a darker bubble (illegible on warm-charcoal). Forcing
+                    // .environment(\.colorScheme, .dark) explicitly on the
+                    // DatePicker subtree guarantees iOS resolves .label to
+                    // its dark-mode value (white). Combined with .tint, the
+                    // bubble text reads cream-white against system grey.
+                    .environment(\.colorScheme, .dark)
+                }
             }
 
             if let saveFailureMessage {

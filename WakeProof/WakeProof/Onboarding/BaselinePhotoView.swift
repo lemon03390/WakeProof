@@ -145,12 +145,16 @@ struct CameraPicker: UIViewControllerRepresentable {
         }
         let picker = UIImagePickerController()
         picker.sourceType = .camera
-        // Rear-then-front fallback for legacy device support; setting
-        // an unavailable cameraDevice throws.
-        if UIImagePickerController.isCameraDeviceAvailable(.rear) {
-            picker.cameraDevice = .rear
-        } else if UIImagePickerController.isCameraDeviceAvailable(.front) {
+        // Phase 8 device-test fix: baseline capture defaults to FRONT camera
+        // for parity with the alarm-time CameraCaptureView. Selfie format
+        // means the user's face is the visual anchor and the background is
+        // the wake-location — same image shape as morning verification, so
+        // Claude is comparing apples-to-apples. Rear fallback if front is
+        // unavailable (older iPad without front camera, hardware regression).
+        if UIImagePickerController.isCameraDeviceAvailable(.front) {
             picker.cameraDevice = .front
+        } else if UIImagePickerController.isCameraDeviceAvailable(.rear) {
+            picker.cameraDevice = .rear
         }
         picker.delegate = context.coordinator
         return picker
