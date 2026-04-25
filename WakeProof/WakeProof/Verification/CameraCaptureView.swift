@@ -283,9 +283,53 @@ private final class CameraRecorderViewController: UIViewController {
         }
     }
 
+    /// Restore the audio session category to AudioSessionKeepalive's baseline
+    /// (.playback + .mixWithOthers) after capture finishes. Without this iOS
+    /// keeps the .playAndRecord category active, which keeps the persistent
+    /// orange-dot mic indicator visible until next app foreground/background
+    /// cycle. Called from the cleanup path on every terminal outcome.
+    private func restoreAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // No setActive(false) — the keepalive's silent loop is still
+            // running and a deactivation would race with its player.
+            logger.info("Audio session restored: .playback + .mixWithOthers (keepalive baseline)")
+        } catch {
+            logger.warning("Audio session restore failed: \(error.localizedDescription, privacy: .public). Keepalive's interruption-end handler will retry on next event.")
+        }
+    }
+
     // MARK: - Session configuration (sessionQueue)
 
     private func configureAndStartSession() {
+        // Defense-in-depth: onboarding's PermissionsManager is supposed to
+        // grant camera before any wake fires, but a user who revoked
+        // camera in Settings would otherwise see a misleading
+        // "Camera unavailable" error. Surface microphoneUnavailable /
+        // cameraUnavailable explicitly so the AlarmRingingView banner
+        // points at the right Settings path.
+        let cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        guard cameraStatus == .authorized else {
+            logger.error("Camera not authorized (status=\(cameraStatus.rawValue, privacy: .public))")
+            DispatchQueue.main.async { [weak self] in
+                self?.reportTerminal { self?.onFailed(.cameraUnavailable) }
+            }
+            return
+        }
+        // Microphone is soft-required (recording falls through to video-only
+        // if the input fails to add). But if the user explicitly revoked it,
+        // surface the dedicated error so the banner can point at the right
+        // Settings path. .notDetermined falls through — AVCaptureSession will
+        // prompt at first capture.
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micStatus == .denied || micStatus == .restricted {
+            logger.warning("Microphone explicitly denied (status=\(micStatus.rawValue, privacy: .public)) — proceeding video-only")
+            // Not a hard fail: we can still record video. The downstream
+            // verifier doesn't use the audio track. Just don't try to add
+            // the mic input below.
+        }
+
         captureSession.beginConfiguration()
         defer { captureSession.commitConfiguration() }
 
@@ -321,10 +365,12 @@ private final class CameraRecorderViewController: UIViewController {
             return
         }
 
-        // Microphone input. If absent, recording proceeds video-only — the
-        // downstream verifier doesn't use the audio track, so this is a
-        // soft-failure rather than a fatal one.
-        if let mic = AVCaptureDevice.default(for: .audio) {
+        // Microphone input. Skipped entirely when the user explicitly denied
+        // (per the status check above); otherwise added if available, with
+        // soft-failure on init errors. The downstream verifier doesn't use
+        // the audio track so video-only is acceptable.
+        if micStatus != .denied, micStatus != .restricted,
+           let mic = AVCaptureDevice.default(for: .audio) {
             do {
                 let audioInput = try AVCaptureDeviceInput(device: mic)
                 if captureSession.canAddInput(audioInput) {
@@ -336,7 +382,7 @@ private final class CameraRecorderViewController: UIViewController {
                 logger.warning("Audio input init failed (\(error.localizedDescription, privacy: .public)) — recording video-only")
             }
         } else {
-            logger.warning("No audio capture device available — recording video-only")
+            logger.warning("Skipping audio input (status=\(micStatus.rawValue, privacy: .public)) — recording video-only")
         }
 
         // Movie file output.
@@ -454,11 +500,23 @@ private final class CameraRecorderViewController: UIViewController {
         // Auto-stop after the configured duration. We wrap in Task with a
         // weak self capture so a cancel-then-tap sequence doesn't keep the
         // VC alive past its natural lifetime.
+        //
+        // Per CLAUDE.md auto-promoted rule (no `try?` swallowing errors),
+        // explicit do/catch on the sleep so a cancellation-mid-sleep is
+        // observable and doesn't trigger a stop on a no-longer-relevant
+        // session.
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(Self.recordingDuration))
+            do {
+                try await Task.sleep(for: .seconds(Self.recordingDuration))
+            } catch is CancellationError {
+                // View torn down or recording already stopped — caller no
+                // longer needs the auto-stop. Returning here also avoids a
+                // benign-but-noisy stopRecording on a stale VC reference.
+                return
+            } catch {
+                self?.logger.warning("Auto-stop sleep threw non-cancellation error: \(error.localizedDescription, privacy: .public). Stopping anyway to avoid runaway recording.")
+            }
             guard let self else { return }
-            // If the user already cancelled, the file output isn't recording
-            // and stopRecording is a no-op; fine to call unconditionally.
             if self.movieOutput.isRecording {
                 self.movieOutput.stopRecording()
             }
@@ -478,17 +536,24 @@ private final class CameraRecorderViewController: UIViewController {
                 }
                 do {
                     let still = try await Self.extractMiddleFrame(videoURL: url)
+                    // Success: clear outputURL so the cleanup helper doesn't
+                    // delete a file that CameraCaptureFlow now owns.
+                    self.outputURL = nil
                     self.reportTerminal {
                         self.onCaptured(CameraCaptureResult(stillImage: still, videoURL: url))
                     }
                 } catch {
                     self.logger.error("Frame extraction failed: \(error.localizedDescription, privacy: .public)")
+                    // Frame extraction failed but the .mov is on disk —
+                    // clean it up to avoid tmpDir leak.
+                    self.cleanupOutputFileOnFailure()
                     self.reportTerminal {
                         self.onFailed(.frameExtractionFailed(underlying: error))
                     }
                 }
             }
         case .failure(let error):
+            cleanupOutputFileOnFailure()
             tearDownSession()
             reportTerminal { onFailed(error) }
         }
@@ -500,12 +565,41 @@ private final class CameraRecorderViewController: UIViewController {
                 captureSession.stopRunning()
             }
         }
+        restoreAudioSession()
+        recordingDelegate = nil
+    }
+
+    /// Best-effort cleanup for the temporary recording file on failure paths.
+    /// Success paths hand the URL to CameraCaptureFlow.persist which moves
+    /// it into Documents/WakeAttempts; failure paths would otherwise leak
+    /// the .mov in tmpDir until iOS's eventual sweep. Tied to the captured
+    /// outputURL so cancel-during-recording cleans up its in-flight file too.
+    private func cleanupOutputFileOnFailure() {
+        guard let url = outputURL else { return }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            outputURL = nil
+            return
+        }
+        do {
+            try fm.removeItem(at: url)
+            logger.info("Cleaned up tmp capture file \(url.lastPathComponent, privacy: .public)")
+        } catch {
+            logger.warning("Failed to clean up tmp capture file \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public). iOS will reclaim it eventually.")
+        }
+        outputURL = nil
     }
 
     @objc private func handleCancelTap() {
         if movieOutput.isRecording {
             movieOutput.stopRecording()
+            // stopRecording will trigger fileOutput(_:didFinishRecordingTo:...)
+            // shortly. That delegate path's success branch reports onCaptured,
+            // but the latch below makes that a no-op since we claim onCancelled
+            // here. The leftover .mov file is cleaned up by the delegate's
+            // failure path (or by cleanupOutputFileOnFailure here for safety).
         }
+        cleanupOutputFileOnFailure()
         tearDownSession()
         reportTerminal { onCancelled() }
     }
@@ -565,8 +659,29 @@ private final class RecordingDelegate: NSObject, AVCaptureFileOutputRecordingDel
         // + non-zero size as the success signal, mirroring what the prior
         // UIImagePickerController flow accepted, and only fall through to
         // failure when the file is missing/empty.
-        let attrs = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)
-        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        //
+        // Per CLAUDE.md auto-promoted rule (no `try?` swallowing errors),
+        // explicit do/catch on attributesOfItem so a real filesystem failure
+        // (file gone, permission denied, FS unmounted) surfaces as a
+        // recordingFailed with the actual underlying error rather than a
+        // misleading noVideoURLReturned.
+        let logger = Logger(subsystem: LogSubsystem.verification, category: "recordingDelegate")
+        let size: Int
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: outputFileURL.path)
+            size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        } catch let attrError {
+            logger.error("attributesOfItem failed for \(outputFileURL.lastPathComponent, privacy: .public): \(attrError.localizedDescription, privacy: .public)")
+            // If AVCapture also reported an error, surface that instead — it
+            // describes the recording-time problem, while the attribute read
+            // is a downstream symptom.
+            if let error {
+                completion(.failure(.recordingFailed(underlying: error)))
+            } else {
+                completion(.failure(.recordingFailed(underlying: attrError)))
+            }
+            return
+        }
         if size > 0 {
             completion(.success(outputFileURL))
             return
