@@ -198,15 +198,23 @@ private struct PermissionStep: View {
             }
             Spacer()
             VStack(spacing: WPSpacing.sm) {
-                Button(action: tap) {
-                    Text(isWorking ? "Working..." : action)
-                }
-                .buttonStyle(.primaryWhite)
-                .disabled(isWorking)
-
+                // Once iOS has rejected the permission, re-tapping the
+                // primary action would silently no-op (Apple never re-prompts
+                // for an already-denied permission). Swap the primary button
+                // to deeplink Settings so the only path forward is also the
+                // visually-dominant action — no dead-end UX.
                 if deniedNotice != nil, let url = URL(string: UIApplication.openSettingsURLString) {
-                    Link("Open Settings", destination: url)
-                        .foregroundStyle(Color.wpCream50.opacity(0.85))
+                    Link(destination: url) {
+                        Text("Open Settings")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.primaryWhite)
+                } else {
+                    Button(action: tap) {
+                        Text(isWorking ? "Working..." : action)
+                    }
+                    .buttonStyle(.primaryWhite)
+                    .disabled(isWorking)
                 }
 
                 if let secondary, let secondaryHandler {
