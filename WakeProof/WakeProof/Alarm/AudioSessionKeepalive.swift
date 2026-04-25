@@ -276,7 +276,7 @@ final class AudioSessionKeepalive {
         do {
             let player = try AVAudioPlayer(contentsOf: url)
             player.numberOfLoops = -1
-            player.volume = 0.3
+            player.volume = 0.5
             if player.prepareToPlay(), player.play() {
                 alarmPlayer = player
                 lastError = nil
@@ -294,7 +294,7 @@ final class AudioSessionKeepalive {
             Thread.sleep(forTimeInterval: 0.1)
             let retry = try AVAudioPlayer(contentsOf: url)
             retry.numberOfLoops = -1
-            retry.volume = 0.3
+            retry.volume = 0.5
             if retry.prepareToPlay(), retry.play() {
                 alarmPlayer = retry
                 lastError = nil

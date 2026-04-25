@@ -43,9 +43,11 @@ final class AlarmSoundEngine {
         stop()
         logger.info("Escalation started at \(Date().ISO8601Format(), privacy: .public)")
         escalationTask = Task { [weak self] in
-            // Ramp 0.3 → 1.0 over 60 s in 12 steps.
+            // Ramp 0.5 → 1.0 over 60 s in 12 steps. 0.5 start (was 0.3)
+            // because a sleep-deprived user needs immediate audible
+            // pressure — too quiet a start gets ignored or muted out.
             let steps = 12
-            let startVolume: Float = 0.3
+            let startVolume: Float = 0.5
             let endVolume: Float = 1.0
             let stepInterval: Double = 60.0 / Double(steps)
             for i in 0...steps {
