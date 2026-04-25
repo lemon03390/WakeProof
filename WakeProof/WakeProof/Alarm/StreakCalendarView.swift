@@ -39,19 +39,20 @@ struct StreakCalendarView: View {
         List {
             Section {
                 Text(monthTitle)
-                    .font(.title2.weight(.semibold))
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 4, trailing: 16))
+                    .wpFont(.title3)
+                    .foregroundStyle(Color.wpChar900)
+                    .listRowInsets(EdgeInsets(top: WPSpacing.sm, leading: WPSpacing.md, bottom: WPSpacing.xs1, trailing: WPSpacing.md))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             }
 
             Section {
                 weekdayHeader
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: WPSpacing.xs1, leading: WPSpacing.md, bottom: WPSpacing.xs1, trailing: WPSpacing.md))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 monthGrid
-                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 12, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: WPSpacing.xs1, leading: WPSpacing.md, bottom: WPSpacing.sm, trailing: WPSpacing.md))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             }
@@ -61,6 +62,8 @@ struct StreakCalendarView: View {
                     .listRowBackground(Color.clear)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.wpCream100)
         .navigationTitle("Streak")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -73,8 +76,9 @@ struct StreakCalendarView: View {
         HStack(spacing: 0) {
             ForEach(orderedWeekdaySymbols, id: \.self) { symbol in
                 Text(symbol)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .wpFont(.caption)
+                    .tracking(1.5)
+                    .foregroundStyle(Color.wpChar500)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -90,16 +94,16 @@ struct StreakCalendarView: View {
     }
 
     private var legend: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            legendRow(colour: .green, filled: true, text: "Verified — you got up")
-            legendRow(colour: .orange, filled: false, text: "Alarm fired, not verified")
-            legendRow(colour: .gray.opacity(0.35), filled: true, text: "No attempt")
+        VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+            legendRow(colour: Color.wpVerified, filled: true, text: "Verified — you got up")
+            legendRow(colour: Color.wpAttempted, filled: false, text: "Alarm fired, not verified")
+            legendRow(colour: Color.wpChar300.opacity(0.5), filled: true, text: "No attempt")
         }
-        .font(.footnote)
+        .wpFont(.footnote)
     }
 
     private func legendRow(colour: Color, filled: Bool, text: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: WPSpacing.xs2) {
             Group {
                 if filled {
                     Circle().fill(colour)
@@ -108,7 +112,7 @@ struct StreakCalendarView: View {
                 }
             }
             .frame(width: 14, height: 14)
-            Text(text).foregroundStyle(.secondary)
+            Text(text).foregroundStyle(Color.wpChar500)
         }
     }
 
@@ -124,20 +128,20 @@ struct StreakCalendarView: View {
                 // the streak algorithm (future doesn't affect it), not for
                 // the visual.
                 Circle()
-                    .fill(Color.gray.opacity(isFuture ? 0.15 : 0.25))
+                    .fill(Color.wpChar300.opacity(isFuture ? 0.15 : 0.25))
                 Text(cell.dayNumberText)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .wpFont(.caption)
+                    .foregroundStyle(Color.wpChar500)
             case .verified:
-                Circle().fill(Color.green)
+                Circle().fill(Color.wpVerified)
                 Image(systemName: "checkmark")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.wpCream50)
             case .attempted:
-                Circle().strokeBorder(Color.orange, lineWidth: 2)
+                Circle().strokeBorder(Color.wpAttempted, lineWidth: 2)
                 Text(cell.dayNumberText)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
+                    .wpFont(.caption)
+                    .foregroundStyle(Color.wpAttempted)
             }
 
             // "Today" ring overlays whatever state the cell has.
