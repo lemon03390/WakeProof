@@ -411,7 +411,12 @@ struct AlarmSchedulerView: View {
                 .padding(.top, WPSpacing.xl)
                 .padding(.bottom, WPSpacing.xl4)
             }
-            .scrollDismissesKeyboard(.interactively)
+            // .immediately rather than .interactively — Phase 8 device test
+            // on iPhone 17 Pro showed users expect any scroll to dismiss the
+            // commitment-note keyboard (matches iOS Mail / Notes default).
+            // .interactively would require the user to drag DOWN onto the
+            // keyboard, which they don't intuit on a scroll-list surface.
+            .scrollDismissesKeyboard(.immediately)
             // Apply ignoresSafeArea ONLY to the cream background — extending
             // it past the home indicator. Applying it to the ScrollView itself
             // cancels iOS 16+'s automatic keyboard safe-area inset, which

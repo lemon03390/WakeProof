@@ -30,6 +30,15 @@ struct WPHeroTimeDisplay: View {
                 .wpFont(style == .large ? .heroXL : .hero)
                 .monospacedDigit()
                 .foregroundStyle(foreground)
+                // 12-hour locales render time as e.g. "10:30 AM" — at 88pt
+                // SF Pro Rounded the AM/PM suffix overflows on standard iPhone
+                // widths (iPhone 17 Pro 402pt minus 32pt screen padding leaves
+                // ~338pt, while "10:30 AM" wants ~350pt). lineLimit(1) +
+                // minimumScaleFactor(0.5) lets SwiftUI shrink to fit on a
+                // single line rather than wrapping. 0.5 is generous: even
+                // worst-case "12:30 PM" never needs more than ~0.85x scale.
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
         }
     }
 }
