@@ -302,12 +302,17 @@ struct WakeProofApp: App {
             // → stop) or force-quits the app. See AlarmSoundEngine header
             // for the rationale; tl;dr a self-commitment alarm cannot
             // contain its own escape hatch without breaking the contract.
-            guard let url = Bundle.main.url(forResource: "alarm", withExtension: "m4a") else {
-                // R7 fix retained: if alarm.m4a is missing from the bundle
-                // (build-config regression), we still start the soundEngine
-                // so the ramp logger fires. Audio will be silent but the
-                // ringing UI + verification flow still progress.
-                Self.logger.fault("alarm.m4a missing from bundle — silent alarm")
+            // User's alarm-sound choice (Standard / Annoying) is persisted via
+            // UserDefaults under AlarmSound.userDefaultsKey. AlarmSchedulerView's
+            // @AppStorage binding writes there; here we read it on each fire so
+            // a setting change between fires takes effect on the next ring.
+            let chosenSound = AlarmSound.current()
+            guard let url = Bundle.main.url(forResource: chosenSound.bundleResourceName, withExtension: "m4a") else {
+                // R7 fix retained: if the chosen alarm asset is missing from
+                // the bundle (build-config regression), we still start the
+                // soundEngine so the ramp logger fires. Audio will be silent
+                // but the ringing UI + verification flow still progress.
+                Self.logger.fault("\(chosenSound.bundleResourceName, privacy: .public).m4a missing from bundle — silent alarm")
                 soundEngine.start(setVolume: { _ in /* no audio player to mutate */ })
                 return
             }

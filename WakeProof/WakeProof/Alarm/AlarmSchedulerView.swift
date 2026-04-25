@@ -99,6 +99,13 @@ struct AlarmSchedulerView: View {
     /// both surfaces read the same UserDefaults bool without any plumbing.
     @AppStorage(ShareCardModel.shareCardEnabledKey) private var shareCardEnabled: Bool = false
 
+    /// User-selectable alarm tone (Standard / Annoying). Stored as the
+    /// AlarmSound rawValue under the shared AlarmSound.userDefaultsKey so
+    /// WakeProofApp's onFire reader (`AlarmSound.current()`) sees the same
+    /// value without separate plumbing. Default is `.standard` per
+    /// AlarmSound.default — first-launch users get the calmer tone.
+    @AppStorage(AlarmSound.userDefaultsKey) private var alarmSoundRaw: String = AlarmSound.default.rawValue
+
     /// Wave 5 G1 (§12.4-G1): DEBUG-only toggle that lets demo recordings flip
     /// the alarm off without the vision-verified challenge. The underlying
     /// UserDefaults key is consumed by `AlarmScheduler.requestDisable` inside a
@@ -329,6 +336,30 @@ struct AlarmSchedulerView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                        }
+                    }
+
+                    // MARK: — Sound
+                    // User picks between two bundled tones. Picker reads the
+                    // selection back via AlarmSound enum so adding a third
+                    // tone in the future = one new enum case + one new asset
+                    // file, no UI churn.
+                    WPSection("Sound") {
+                        WPCard {
+                            VStack(alignment: .leading, spacing: WPSpacing.xs2) {
+                                Picker("Alarm sound", selection: Binding<AlarmSound>(
+                                    get: { AlarmSound(rawValue: alarmSoundRaw) ?? AlarmSound.default },
+                                    set: { alarmSoundRaw = $0.rawValue }
+                                )) {
+                                    ForEach(AlarmSound.allCases) { sound in
+                                        Text(sound.displayName).tag(sound)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                Text("Standard ramps from a calm tone to full volume over 60s. Annoying skips the gentle start.")
+                                    .wpFont(.footnote)
+                                    .foregroundStyle(Color.wpChar500)
+                            }
                         }
                     }
 
