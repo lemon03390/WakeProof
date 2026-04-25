@@ -9,6 +9,7 @@
 //
 
 import CryptoKit
+import UIKit
 import XCTest
 @testable import WakeProof
 
@@ -596,6 +597,91 @@ final class ClaudeAPIClientTests: XCTestCase {
             model: "claude-opus-4-7",
             promptTemplate: template
         )
+    }
+
+    // MARK: - R5 (HTTP 413 fix): defensive image downscale before upload
+
+    /// R5: a 4032×3024 baseline (iPhone 17 Pro front cam at `.photo` preset, JPEG q=0.8)
+    /// can exceed Anthropic vision's 5 MB per-image post-base64 limit and trigger HTTP 413.
+    /// `verify(...)` must downscale the input to ≤1280 px long side before uploading.
+    /// We assert via the ratio of body size to original input size — a 4032 px image
+    /// uploaded as-is would put the JSON body well above 5 MB; the resized version must
+    /// land in the high-KB / low-MB range.
+    func testOversizedBaselineIsDownscaledBeforeUpload() async throws {
+        let oversized = makeJPEG(longSide: 4032, color: .red)
+        XCTAssertGreaterThan(oversized.count, 500_000,
+                             "Test fixture must actually be oversized (got \(oversized.count) bytes)")
+        let bodyCapture = BodyCaptureBox()
+        let client = makeClient { request in
+            bodyCapture.body = request.httpBody ?? request.bodyStreamAsData()
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, try! JSONSerialization.data(withJSONObject: self.happyBodyJSON))
+        }
+        _ = try await client.verify(
+            baselineJPEG: oversized,
+            stillJPEG: Data([0xFF, 0xD8, 0xFF]),
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil
+        )
+        let body = try XCTUnwrap(bodyCapture.body, "URLSession did not surface the request body")
+        // Body carries TWO base64-encoded images plus JSON overhead. If the resize ran,
+        // total body is ~250–700 KB. If it didn't run, the 4032 px JPEG alone after
+        // base64 (~33% inflation) would push body past 1 MB — assert under 1 MB to give
+        // headroom for the JSON wrapping and the small `stillJPEG` stub.
+        XCTAssertLessThan(body.count, 1_000_000,
+                          "Oversized baseline must be downscaled before upload — got \(body.count) bytes")
+    }
+
+    /// R5 corollary: the resize is a no-op for inputs that don't decode as a UIImage
+    /// (3-byte SOI stubs used in every other test in this file). Verifies the existing
+    /// test suite isn't accidentally broken by the resize hop.
+    func testTinyStubImageDataPassesThroughUnchanged() async throws {
+        let stub = Data([0xFF, 0xD8, 0xFF])
+        let bodyCapture = BodyCaptureBox()
+        let client = makeClient { request in
+            bodyCapture.body = request.httpBody ?? request.bodyStreamAsData()
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, try! JSONSerialization.data(withJSONObject: self.happyBodyJSON))
+        }
+        _ = try await client.verify(
+            baselineJPEG: stub,
+            stillJPEG: stub,
+            baselineLocation: "kitchen",
+            antiSpoofInstruction: nil
+        )
+        let body = try XCTUnwrap(bodyCapture.body)
+        // 3-byte stub × base64 (4 chars) × 2 images + JSON wrapper ≈ <2 KB. Not a tight
+        // assertion, just enough to prove the stub didn't get rejected upstream.
+        XCTAssertLessThan(body.count, 5000)
+    }
+
+    /// Generate a synthetic JPEG of the requested long-side dimension. Used to exercise
+    /// the resize path with a real, decodable image (UIImage.jpegData would refuse on
+    /// the 3-byte SOI stubs that the rest of the suite uses).
+    private func makeJPEG(longSide: CGFloat, color: UIColor) -> Data {
+        let size = CGSize(width: longSide, height: longSide * 0.75)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let image = renderer.image { ctx in
+            color.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            // Draw varied content so JPEG can't compress to almost nothing —
+            // we want a realistic byte count to exercise the size threshold.
+            for i in 0..<100 {
+                UIColor(white: CGFloat(i) / 100.0, alpha: 1.0).setFill()
+                let stripeY = size.height * CGFloat(i) / 100.0
+                ctx.fill(CGRect(x: 0, y: stripeY, width: size.width, height: size.height / 100.0))
+            }
+        }
+        return image.jpegData(compressionQuality: 0.8) ?? Data()
+    }
+
+    /// Reference-type box so the URLProtocol handler closure can write the captured body
+    /// without requiring the surrounding XCTestCase instance to be `@MainActor`.
+    final class BodyCaptureBox {
+        nonisolated(unsafe) var body: Data?
     }
 }
 

@@ -164,17 +164,28 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         // are let-properties on a struct; `buildRequestBody` is pure — safe to detach.
         let frozenPromptTemplate = promptTemplate
         let frozenModel = model
-        let bodyData = try await Task.detached(priority: .userInitiated) {
+        let (bodyData, resizedBaselineBytes, resizedStillBytes) = try await Task.detached(priority: .userInitiated) {
+            // R5 fix: defensive downscale before upload. iPhone 17 Pro front cam at
+            // `.photo` preset can produce 5–7 MB JPEGs (18 MP TrueDepth sensor); base64
+            // inflates by 33% → 7–10 MB encoded which exceeds Anthropic vision's 5 MB
+            // per-image limit → HTTP 413. Cap the long side at 1280 px (well below
+            // Anthropic's recommended 1568 px efficiency threshold) so each base64-
+            // encoded image lands in the 400–700 KB range. No-op for already-small
+            // images (alarm-time still from `.medium` preset is ~480×360) and a clean
+            // pass-through for test fixtures (3-byte stubs that UIImage can't decode).
+            let resizedBaseline = Self.resizeForUpload(jpegData: baselineJPEG, maxLongSide: 1280)
+            let resizedStill = Self.resizeForUpload(jpegData: stillJPEG, maxLongSide: 1280)
             let requestBody = Self.buildRequestBody(
-                baselineJPEG: baselineJPEG,
-                stillJPEG: stillJPEG,
+                baselineJPEG: resizedBaseline,
+                stillJPEG: resizedStill,
                 baselineLocation: baselineLocation,
                 antiSpoofInstruction: antiSpoofInstruction,
                 memoryContext: memoryContext,
                 promptTemplate: frozenPromptTemplate,
                 model: frozenModel
             )
-            return try JSONSerialization.data(withJSONObject: requestBody)
+            let body = try JSONSerialization.data(withJSONObject: requestBody)
+            return (body, resizedBaseline.count, resizedStill.count)
         }.value
 
         var request = URLRequest(url: endpoint)
@@ -190,7 +201,10 @@ struct ClaudeAPIClient: ClaudeVisionClient {
         // public so field triage can tell at a glance whether this call is the initial
         // verify or an anti-spoof retry.
         let hasAntiSpoof = antiSpoofInstruction != nil
-        logger.info("Calling Claude \(model, privacy: .public) hasAntiSpoof=\(hasAntiSpoof, privacy: .public) imageBytes=\(baselineJPEG.count, privacy: .private)+\(stillJPEG.count, privacy: .private) instruction=\(antiSpoofInstruction ?? "nil", privacy: .private)")
+        // Log both original and post-resize sizes so field triage can confirm the R5
+        // downscale ran (and detect the rare case where UIImage couldn't decode the
+        // baseline → pass-through risks 413 again).
+        logger.info("Calling Claude \(model, privacy: .public) hasAntiSpoof=\(hasAntiSpoof, privacy: .public) imageBytes=\(baselineJPEG.count, privacy: .private)→\(resizedBaselineBytes, privacy: .private)+\(stillJPEG.count, privacy: .private)→\(resizedStillBytes, privacy: .private) instruction=\(antiSpoofInstruction ?? "nil", privacy: .private)")
         #if DEBUG
         // B7 fix: diagnostic probes were built for Cloudflare HKG debugging and have
         // no production purpose. In release they'd add up to 15s of ring-ceiling spend
@@ -377,6 +391,34 @@ struct ClaudeAPIClient: ClaudeVisionClient {
     /// site (Logger's privacy is per-interpolation, not per-value).
     private static func snippet(from data: Data) -> String {
         String(data: data.prefix(200), encoding: .utf8) ?? "<non-utf8>"
+    }
+
+    /// R5 fix: defensive image downscale before upload to Anthropic. Decodes the
+    /// JPEG, resizes if the long side exceeds `maxLongSide` pixels, re-encodes at
+    /// quality 0.85. Returns the original bytes unchanged when:
+    ///   - UIImage can't decode the data (test stubs / corrupt JPEG)
+    ///   - The image is already at or below `maxLongSide` (no work needed)
+    ///   - JPEG re-encoding fails (defensive — better to send original than crash)
+    /// Caller is responsible for invoking this off MainActor (the existing R4
+    /// detached task already covers that).
+    private static func resizeForUpload(jpegData: Data, maxLongSide: CGFloat) -> Data {
+        guard let image = UIImage(data: jpegData) else { return jpegData }
+        let pixelWidth = image.size.width * image.scale
+        let pixelHeight = image.size.height * image.scale
+        let longSide = max(pixelWidth, pixelHeight)
+        guard longSide > maxLongSide else { return jpegData }
+        let scale = maxLongSide / longSide
+        let targetSize = CGSize(width: pixelWidth * scale, height: pixelHeight * scale)
+        // scale=1 so output dimensions equal targetSize in pixels (no Retina x2/x3
+        // multiplication — the upload doesn't care about display density).
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resized.jpegData(compressionQuality: 0.85) ?? jpegData
     }
 
     /// R4 fix: moved to a nonisolated static so `Task.detached` can call it without
