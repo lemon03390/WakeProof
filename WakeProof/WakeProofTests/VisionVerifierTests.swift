@@ -100,6 +100,58 @@ final class VisionVerifierTests: XCTestCase {
         scheduler.beginCapturing()
     }
 
+    // MARK: - Anti-spoof bank invariants (T-C2 Wave 2.4)
+
+    /// T-C2 (Wave 2.4, 2026-04-26): production uses `randomElement()` so a
+    /// deformed bank entry (empty string, pipe-character that breaks the
+    /// prompt's table layout, etc.) could silently land in front of the user
+    /// at demo time. Test invariants here so any future bank edit hits a
+    /// regression gate.
+    func testAntiSpoofBankHasMultipleEntries() {
+        XCTAssertGreaterThanOrEqual(VisionVerifier.antiSpoofBank.count, 2,
+                                    "bank must have ≥2 entries so randomElement() actually varies")
+    }
+
+    func testAntiSpoofBankEntriesAreWellFormed() {
+        for instruction in VisionVerifier.antiSpoofBank {
+            XCTAssertFalse(instruction.isEmpty, "Empty bank entry would render as a blank prompt")
+            XCTAssertFalse(instruction.contains("|"), "Pipe character breaks the prompt table layout: '\(instruction)'")
+            XCTAssertFalse(instruction.contains("<"), "Angle bracket would interfere with XML-escape framing: '\(instruction)'")
+            XCTAssertFalse(instruction.contains(">"), "Angle bracket would interfere with XML-escape framing: '\(instruction)'")
+            XCTAssertLessThan(instruction.count, 80, "Bank entry too long to read at a glance: '\(instruction)'")
+            XCTAssertGreaterThan(instruction.count, 4, "Bank entry too short to be an actionable instruction: '\(instruction)'")
+        }
+    }
+
+    // MARK: - lastError (T-C4 Wave 2.4)
+
+    /// T-C4 (Wave 2.4, 2026-04-26): `lastError` is meaningful UI state but
+    /// previously had no test asserting its value across paths. A regression
+    /// where a previous fire's error survives into the next fire's UI would
+    /// have shipped without a regression test.
+    func testLastErrorIsClearedOnFreshVerifyEntry() async {
+        // First verify rejected → lastError populated.
+        let firstClient = FakeClient(result: .success(makeResult(verdict: .rejected, reasoning: "Wrong location")))
+        let verifier = VisionVerifier(client: firstClient)
+        verifier.scheduler = scheduler
+        enterVerifyingState()
+        await verifier.verify(attempt: makeAttempt(), baseline: baseline, context: context)
+        XCTAssertNotNil(verifier.lastError, "REJECTED should set lastError")
+
+        // Reset for new fire (mirrors what AlarmRingingView would do).
+        verifier.resetForNewFire()
+        XCTAssertNil(verifier.lastError, "resetForNewFire must clear lastError so the next fire starts clean")
+    }
+
+    func testLastErrorPopulatedOnNetworkFailure() async {
+        let client = FakeClient(result: .failure(URLError(.timedOut)))
+        let verifier = VisionVerifier(client: client)
+        verifier.scheduler = scheduler
+        enterVerifyingState()
+        await verifier.verify(attempt: makeAttempt(), baseline: baseline, context: context)
+        XCTAssertNotNil(verifier.lastError, "Network error should populate lastError for the AlarmRingingView banner")
+    }
+
     // MARK: - Verdict routing
 
     func testVerifiedVerdictTransitionsSchedulerToIdleAndUpdatesRow() async throws {

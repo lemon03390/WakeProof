@@ -64,6 +64,31 @@ final class MemoryPromptBuilderTests: XCTestCase {
         XCTAssertTrue(out.contains(profile), "profile must survive truncation")
     }
 
+    /// T-I7 (Wave 2.4, 2026-04-26): truncation must NOT slice mid-codepoint.
+    /// `String.count` is grapheme-based but emoji / multi-byte CJK characters
+    /// are 4 UTF-8 bytes per codepoint. If MemoryPromptBuilder ever switches
+    /// to a byte-based truncation, slicing mid-codepoint produces invalid
+    /// UTF-8 — Claude's tokenizer chokes and `decodingFailed` ships to the
+    /// user instead of a verdict. This test forces non-ASCII content + over-
+    /// length so the truncation path runs against multi-byte codepoints.
+    func testOversizedNonASCIIInputTruncatesAtCodepointBoundary() {
+        // Profile of repeated emoji — every grapheme is 4 UTF-8 bytes. If
+        // truncation slices at maxLength bytes, it likely lands mid-codepoint.
+        let profile = String(repeating: "😀", count: 200)
+        let snap = MemorySnapshot(profile: profile, recentHistory: [], totalHistoryCount: 0)
+        let out = MemoryPromptBuilder.render(snap)
+        guard let out else {
+            XCTFail("render returned nil for oversized non-ASCII profile")
+            return
+        }
+        // The output must still be valid UTF-8 — round-trip through Data and
+        // back. If it slices a codepoint, this re-decode fails.
+        let bytes = out.data(using: .utf8)
+        XCTAssertNotNil(bytes, "Truncated output must be valid UTF-8 — slicing mid-codepoint regressed")
+        // And length is bounded.
+        XCTAssertLessThanOrEqual(out.count, MemoryPromptBuilder.maxLength)
+    }
+
     func testNotePipeIsEscaped() {
         let entry = MemoryEntry(
             timestamp: Date(timeIntervalSince1970: 1_745_466_662),

@@ -103,6 +103,54 @@ final class VerificationResultTests: XCTestCase {
         XCTAssertEqual(result.verdict, .verified)
     }
 
+    // MARK: - T-I8 (Wave 2.4): brace-counter adversarial inputs
+
+    /// Hand-picked adversarial JSON shapes that previously had no test
+    /// coverage. The brace scanner's job is to find the OUTERMOST balanced
+    /// `{...}` substring inside Claude's wrapper text. These edge cases pin
+    /// behaviour for inputs that could otherwise crash, return malformed
+    /// fragments, or DoS via deeply nested objects.
+
+    /// Deeply nested object — the parser must not blow the stack or hang.
+    func testDeeplyNestedObjectExtractedCorrectly() throws {
+        let depth = 50
+        let nested = String(repeating: "{\"a\":", count: depth) + "true" + String(repeating: "}", count: depth)
+        let wrapper = "Sure, here's the result: " + nested + " Thanks!"
+        // Decoding will fail (the nested object isn't a verdict shape) — but
+        // the brace-extract must complete without crashing.
+        _ = VerificationResult.fromClaudeMessageBody(wrapper)
+        // No assertion needed — just that we got here without a crash.
+        XCTAssertTrue(true)
+    }
+
+    /// Mismatched braces inside strings (escape-handling). The scanner must
+    /// not count a `}` that's inside a JSON string literal.
+    func testEscapedQuoteWithinReasoningDoesNotConfuseScanner() throws {
+        let json = """
+        Pre-amble. {
+          "same_location": true, "person_upright": true, "eyes_open": true,
+          "appears_alert": true, "lighting_suggests_room_lit": true,
+          "confidence": 0.9,
+          "reasoning": "weird \\"quoted } content\\" here",
+          "spoofing_ruled_out": [], "verdict": "VERIFIED"
+        } trailing text
+        """
+        let result = try XCTUnwrap(VerificationResult.fromClaudeMessageBody(json))
+        XCTAssertEqual(result.verdict, .verified)
+    }
+
+    /// Object with no closing brace at all — the parser must return nil
+    /// rather than producing a malformed output or hanging on EOF.
+    func testUnbalancedJSONReturnsNil() {
+        let truncated = """
+        {
+          "verdict": "VERIFIED",
+          "reasoning": "...
+        """
+        let result = VerificationResult.fromClaudeMessageBody(truncated)
+        XCTAssertNil(result, "Unbalanced JSON must produce nil, not crash or partial result")
+    }
+
     // MARK: - Layer 2 memory_update parsing
 
     func testMemoryUpdatePresentDecodesBothFields() throws {

@@ -34,10 +34,42 @@ final class EndpointGuardTests: XCTestCase {
         XCTAssertEqual(url.host, "api.anthropic.com")
     }
 
-    // (a) Valid host accepted — Vercel preview host (suffix match).
-    func testValidVercelPreviewHostIsAcceptedViaSuffixMatch() throws {
-        let url = try EndpointGuard.validate(urlString: "https://wakeproof-proxy-vercel-abc123def.vercel.app/v1/messages")
-        XCTAssertEqual(url.host, "wakeproof-proxy-vercel-abc123def.vercel.app")
+    // S-I1 (Wave 2.1, 2026-04-26): Vercel preview hosts are NO LONGER auto-trusted.
+    // The `.vercel.app` wildcard suffix was dropped because Vercel hostnames are
+    // first-come-first-served — anyone can register `evil-foo.vercel.app`. Only the
+    // exact production hostname is allowlisted. If a preview deployment needs to
+    // be exercised on-device, append the specific hash to `allowedHostSuffixes`
+    // for the duration of testing.
+    func testVercelPreviewHostIsRejectedAfterSuffixRemoval() {
+        XCTAssertThrowsError(try EndpointGuard.validate(urlString: "https://wakeproof-proxy-vercel-abc123def.vercel.app/v1/messages")) { error in
+            guard case EndpointGuard.GuardError.hostNotAllowed = error else {
+                XCTFail("Expected hostNotAllowed for non-prod Vercel hostname (S-I1), got \(error)")
+                return
+            }
+        }
+    }
+
+    // S-C2 (Wave 2.1, 2026-04-26): scheme is enforced. http://, ftp://, file://, etc.
+    // must be rejected before the host check even runs — defence-in-depth in case
+    // ATS is ever loosened in Info.plist.
+    func testNonHTTPSSchemeIsRejected() {
+        XCTAssertThrowsError(try EndpointGuard.validate(urlString: "http://wakeproof-proxy-vercel.vercel.app/v1/messages")) { error in
+            guard case EndpointGuard.GuardError.schemeNotAllowed(let scheme, _) = error else {
+                XCTFail("Expected schemeNotAllowed for http://, got \(error)")
+                return
+            }
+            XCTAssertEqual(scheme, "http")
+        }
+    }
+
+    func testFileSchemeIsRejected() {
+        XCTAssertThrowsError(try EndpointGuard.validate(urlString: "ftp://api.anthropic.com/v1/messages")) { error in
+            guard case EndpointGuard.GuardError.schemeNotAllowed(let scheme, _) = error else {
+                XCTFail("Expected schemeNotAllowed for ftp://, got \(error)")
+                return
+            }
+            XCTAssertEqual(scheme, "ftp")
+        }
     }
 
     // (b) Wrong host rejected with the specific error case.
@@ -77,14 +109,13 @@ final class EndpointGuardTests: XCTestCase {
         }
     }
 
-    // (c) Hostless URL (file://, relative) rejected with malformedURL.
-    func testHostlessURLIsRejected() {
-        // URL(string: "file:///tmp/foo") parses successfully but has no host —
-        // allowlist suffix matching with an empty string would spuriously match
-        // "" against any suffix, hence the explicit empty-host guard.
+    // (c) Hostless URL (file://, relative) rejected. After S-C2 the scheme check
+    // fires first — file:// is rejected as schemeNotAllowed before the host check.
+    func testHostlessFileURLIsRejected() {
         XCTAssertThrowsError(try EndpointGuard.validate(urlString: "file:///tmp/foo")) { error in
-            guard case EndpointGuard.GuardError.malformedURL = error else {
-                XCTFail("Expected malformedURL for file://, got \(error)")
+            // file:// is not https, so schemeNotAllowed fires first.
+            guard case EndpointGuard.GuardError.schemeNotAllowed = error else {
+                XCTFail("Expected schemeNotAllowed for file://, got \(error)")
                 return
             }
         }

@@ -205,6 +205,43 @@ final class MemoryStoreTests: XCTestCase {
                        "history.jsonl must end on a newline boundary — otherwise the next append merges into a half-written row")
     }
 
+    // MARK: - Corrupt-line detection (T-I4 Wave 2.4)
+
+    /// T-I4 (Wave 2.4, 2026-04-26): malformed lines on disk are silently
+    /// skipped via `compactMap`. The skip path is necessary (don't crater
+    /// `read()` on one corrupt row) but until now no test verified it
+    /// happened — a future regression that crashed on malformed input would
+    /// also "pass" because the test just asserts valid lines round-trip.
+    /// This pins the contract: read() returns the valid lines AND a logger
+    /// emits the per-line decode failure (assertion is by total count).
+    func testCorruptHistoryLineIsSkippedNotCratering() async throws {
+        let uuid = UUID().uuidString
+        let store = makeStore(uuid: uuid)
+        try await store.bootstrapIfNeeded()
+        // Append one valid entry through the actor.
+        try await store.appendHistory(MemoryEntry(
+            timestamp: Date(timeIntervalSince1970: 1_745_500_000),
+            verdict: "VERIFIED", confidence: 0.9, retryCount: 0, note: "valid"
+        ))
+        // Manually inject a corrupt line into the on-disk jsonl.
+        let docs = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+        let userDir = docs.appendingPathComponent("memory/\(uuid)", isDirectory: true)
+        let historyFile = userDir.appendingPathComponent("history.jsonl", isDirectory: false)
+        let existing = try Data(contentsOf: historyFile)
+        // Append "{not-json\n" — a line that fails JSON decode but doesn't
+        // crash the file reader (still UTF-8, still a complete line).
+        var combined = Data()
+        combined.append(existing)
+        combined.append("{not-json}\n".data(using: .utf8)!)
+        try combined.write(to: historyFile)
+
+        // read() must NOT throw; the corrupt line is dropped silently with a
+        // logger.error per the existing line-decode catch block.
+        let snapshot = try await store.read()
+        XCTAssertEqual(snapshot.recentHistory.count, 1, "Corrupt line dropped; 1 valid line remains")
+        XCTAssertEqual(snapshot.recentHistory.first?.note, "valid")
+    }
+
     // MARK: - Security
 
     func testInvalidUserUUIDIsRejected() async {
@@ -405,10 +442,18 @@ final class MemoryStoreTests: XCTestCase {
         }
 
         let warnings = await store.overCapWarningsEmitted
-        XCTAssertGreaterThan(warnings, 0,
-                             "once total exceeds cap, every further append must emit the warning; got \(warnings)")
-        XCTAssertLessThanOrEqual(warnings, 5,
-                                 "never more warnings than appends")
+        // T-C1 (Wave 2.4, 2026-04-26): pin the EXACT count instead of accepting
+        // a 1–5 range. The previous range-bound assertion let a regression that
+        // emitted only 1 warning (instead of the 3 the docstring explains)
+        // pass silently. The off-by-one cache quirk + the +2/+3/+4 over-cap
+        // appends yield exactly 3 warnings; locking the value flushes any
+        // future change to the cache or cap-check semantics through review.
+        XCTAssertEqual(warnings, 3,
+                       """
+                       cap=3, +1 cache offset → entries 2/3/4 trip cap = 3 warnings. \
+                       If this assertion fires after a cache-logic change, double-check \
+                       whether the new behavior is the intent before bumping the expected.
+                       """)
 
         // Sanity: the file genuinely has 5 lines even though cap was exceeded
         // (P18 is about the signal, not rotation — rotation is deferred).
