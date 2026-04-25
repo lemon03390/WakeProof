@@ -47,6 +47,49 @@ final class VisionVerifier {
     /// dismissed and immediately forgot.
     private(set) var requiresReinstall: Bool = false
 
+    /// E-C3 (Wave 2.3, 2026-04-26): set to `true` when MemoryStore bootstrap
+    /// throws a non-UUID error (disk full, sandbox edge case, ReadOnly
+    /// directory). That failure used to collapse silently — `memoryStore`
+    /// would stay nil for the rest of the session, every verify ran without
+    /// calibration context, the queue grew until it dropped older entries.
+    /// AlarmSchedulerView's systemBanner now surfaces this so the user knows
+    /// memory is unavailable and the verdicts won't accumulate calibration.
+    /// Distinct from `requiresReinstall` (UUID-shape failure) so the banner
+    /// copy can differentiate.
+    private(set) var memoryBootstrapFailed: Bool = false
+
+    /// E-C2 (Wave 2.3, 2026-04-26): timestamp of the last MorningBriefing
+    /// SwiftData persist failure. The .success branch of the VERIFIED
+    /// transition still renders the in-memory DTO to the cover (user did wake
+    /// up + earn the briefing), but the audit row was never written. Banner
+    /// surfaces this so the user knows their history has a gap. Cleared on
+    /// the next successful persist.
+    private(set) var lastBriefingPersistFailedAt: Date?
+
+    /// Public setter scoped to the bootstrap-failure path so the banner can
+    /// surface a recovery hint. Called from WakeProofApp's bootstrapMemoryStore
+    /// catch.
+    @MainActor
+    func setMemoryBootstrapFailed(_ failed: Bool) {
+        memoryBootstrapFailed = failed
+    }
+
+    /// E-M4 (Wave 2.3): allow the bootstrap path to flip the reinstall flag
+    /// directly when MemoryStore.bootstrapIfNeeded throws `.invalidUserUUID`.
+    /// Previously only `read()` could flip it, so a UUID-shape failure during
+    /// bootstrap left `requiresReinstall = false` until the first verify
+    /// triggered a read. Now the banner surfaces immediately on launch.
+    @MainActor
+    func flipRequiresReinstall() {
+        requiresReinstall = true
+    }
+
+    /// E-C2 (Wave 2.3): record/clear briefing persist failure for banner.
+    @MainActor
+    func setBriefingPersistFailed(_ failed: Bool) {
+        lastBriefingPersistFailedAt = failed ? .now : nil
+    }
+
     /// Derived from the scheduler's phase — `.verifying` is the only state in which a
     /// Claude call is pending. Eliminates the drift risk of maintaining a separate
     /// `isInFlight` flag alongside `scheduler.phase`: any future branch that forgot to
@@ -85,7 +128,14 @@ final class VisionVerifier {
 
     private let logger = Logger(subsystem: LogSubsystem.verification, category: "verifier")
 
-    private static let antiSpoofBank = [
+    /// T-C2 (Wave 2.4, 2026-04-26): exposed as `internal` (was `private`) so
+    /// tests can verify `bank.count >= 2` and that every entry passes the
+    /// MemoryPromptBuilder XML/escape invariants. Deformed entries (empty
+    /// strings, pipe characters that break the prompt's table layout, bytes
+    /// Claude can't liveness-verify against) used to ship without a regression
+    /// gate. The bank itself remains in this file; `internal` access doesn't
+    /// expand the API surface beyond `@testable import`.
+    static let antiSpoofBank = [
         "Blink twice",
         "Show your right hand",
         "Nod your head"
@@ -581,12 +631,19 @@ final class VisionVerifier {
             }
         case .retry:
             // First RETRY — pick an anti-spoof instruction and transition to that phase.
+            //
+            // E-I2 (Wave 2.3, 2026-04-26): the assignment to
+            // `currentAntiSpoofInstruction` used to happen BEFORE the persist
+            // guard, so a persist failure (early-return) would leave the
+            // instruction polluting state for the next fire's read at line 228.
+            // Now we hold the instruction in a local until persist succeeds, so
+            // the early-return path doesn't observe a half-applied state.
             let instruction = Self.antiSpoofBank.randomElement() ?? "Blink twice"
-            currentAntiSpoofInstruction = instruction
             guard persistOrFallbackToRinging(
                 attempt, context: context, verdict: .retry, reasoning: result.reasoning,
                 fallbackMessage: "Retry save failed — tap \"Prove you're awake\" to retry."
             ) else { return }
+            currentAntiSpoofInstruction = instruction
             scheduler?.beginAntiSpoofPrompt(instruction: instruction)
         case .captured, .timeout, .unresolved:
             // Defensive branch; unreachable by current `VerificationResult.Verdict` cases

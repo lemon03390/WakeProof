@@ -122,7 +122,20 @@ actor MemoryStore {
         guard fm.fileExists(atPath: userDir.path) else {
             return .empty
         }
-        let profile = try? loadProfile(in: userDir)
+        // E-I8 (Wave 2.3, 2026-04-26): replace `try? loadProfile` with
+        // explicit do/catch so failures are observable in Console. The most
+        // common failure here is `.complete`-protected file unreadable while
+        // the screen is locked (alarm fire path) — silently nil-collapsing
+        // those returns to "no profile" which Claude reads as "fresh user"
+        // and recalibrates from scratch. With a logged warning we can spot
+        // post-mortem "screen-locked-during-verify" patterns.
+        let profile: String?
+        do {
+            profile = try loadProfile(in: userDir)
+        } catch {
+            logger.warning("loadProfile failed (likely file-protection or lock-screen race): \(error.localizedDescription, privacy: .public)")
+            profile = nil
+        }
         let (recent, total) = loadHistory(in: userDir)
         let snapshot = MemorySnapshot(
             profile: profile,
@@ -325,8 +338,20 @@ actor MemoryStore {
 
     private func loadHistory(in userDir: URL) -> (recent: [MemoryEntry], total: Int) {
         let file = userDir.appendingPathComponent("history.jsonl", isDirectory: false)
-        guard FileManager.default.fileExists(atPath: file.path),
-              let raw = try? String(contentsOf: file, encoding: .utf8) else {
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            return ([], 0)
+        }
+        // E-I7 (Wave 2.3, 2026-04-26): explicit do/catch for the read so
+        // file-protection-locked-during-verify failures are observable.
+        // Previously a silent `try? String(contentsOf:)` collapsed read errors
+        // into "no history" — Claude calibrated as fresh-install for the rest
+        // of the locked-screen verify, but logs showed nothing. With a logged
+        // warning we can spot the pattern post-mortem.
+        let raw: String
+        do {
+            raw = try String(contentsOf: file, encoding: .utf8)
+        } catch {
+            logger.warning("history.jsonl read failed (likely file-protection or lock-screen race): \(error.localizedDescription, privacy: .public)")
             return ([], 0)
         }
         let lines = raw.split(whereSeparator: \.isNewline).map(String.init)

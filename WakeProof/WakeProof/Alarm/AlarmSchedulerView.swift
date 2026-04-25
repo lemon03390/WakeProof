@@ -180,16 +180,21 @@ struct AlarmSchedulerView: View {
                         // Wrapping in a NavigationLink makes the badge itself
                         // a one-tap entry to the calendar — discoverability
                         // win vs requiring scroll-to "View streak calendar".
+                        // E-C4 (Wave 2.3): always render the badge if a fetch
+                        // failure occurred, even when (current, best) are 0 —
+                        // the user needs to see the "—" + warning that the
+                        // audit trail couldn't be read this launch.
                         if WPStreakBadge.shouldRender(
                             currentStreak: streakService.currentStreak,
                             bestStreak: streakService.bestStreak
-                        ) {
+                        ) || streakService.fetchFailedAt != nil {
                             NavigationLink {
                                 StreakCalendarView(attempts: wakeAttempts)
                             } label: {
                                 WPStreakBadge(
                                     currentStreak: streakService.currentStreak,
-                                    bestStreak: streakService.bestStreak
+                                    bestStreak: streakService.bestStreak,
+                                    isStale: streakService.fetchFailedAt != nil
                                 )
                             }
                             .buttonStyle(.plain)
@@ -569,6 +574,14 @@ struct AlarmSchedulerView: View {
         if visionVerifier.requiresReinstall {
             return "Security issue: reinstall WakeProof to regenerate identity."
         }
+        // E-C3 (Wave 2.3, 2026-04-26): MemoryStore bootstrap failed (disk full,
+        // sandbox edge case, ReadOnly directory). Memory is unavailable —
+        // verifications run without calibration context. Distinct from
+        // requiresReinstall (UUID-shape failure); this is a recoverable
+        // filesystem state. Slot below reinstall, above notifications.
+        if visionVerifier.memoryBootstrapFailed {
+            return "Memory unavailable — verifications running without calibration. Try restarting WakeProof or freeing device storage."
+        }
         if permissions.notifications == .denied {
             return "Notifications are off — WakeProof can't reliably wake you. Open Settings → WakeProof → Notifications."
         }
@@ -588,6 +601,14 @@ struct AlarmSchedulerView: View {
         // user knows no manual action is required.
         if let overnightErr = lastSessionStartError {
             return "Overnight analysis couldn't start tonight: \(overnightErr). We'll retry next launch."
+        }
+        // E-C2 (Wave 2.3, 2026-04-26): briefing earned but persist to history
+        // failed. The cover rendered the briefing from in-memory DTO (user
+        // doesn't lose this morning's reward) but the SwiftData row never
+        // landed — WeeklyCoach won't see this morning. Surface so the user
+        // knows there's a history gap.
+        if visionVerifier.lastBriefingPersistFailedAt != nil {
+            return "Latest briefing couldn't be saved to history. WeeklyCoach may miss it."
         }
         // P10 (Stage 6 Wave 2): memory calibration degradation. Lowest
         // priority because the alarm still works — but silently dropping

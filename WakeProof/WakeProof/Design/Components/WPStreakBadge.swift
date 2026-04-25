@@ -22,6 +22,18 @@ import SwiftUI
 struct WPStreakBadge: View {
     let currentStreak: Int
     let bestStreak: Int
+    /// E-C4 (Wave 2.3, 2026-04-26): when the SwiftData fetch backing the streak
+    /// failed, render `—` + warning glyph rather than the cached numbers. A
+    /// stale streak (claiming day 7 when the audit trail couldn't be read)
+    /// breaks the trust contract more than a missing one. Default `false` so
+    /// existing call sites that don't pass the flag keep the prior behavior.
+    let isStale: Bool
+
+    init(currentStreak: Int, bestStreak: Int, isStale: Bool = false) {
+        self.currentStreak = currentStreak
+        self.bestStreak = bestStreak
+        self.isStale = isStale
+    }
 
     /// Section-visibility helper. Semantics are identical to the shipped
     /// `StreakBadgeView.shouldRender(currentStreak:bestStreak:)`.
@@ -32,14 +44,16 @@ struct WPStreakBadge: View {
         currentStreak > 0 || bestStreak > 0
     }
 
-    /// Three-way render ladder mirrors the shipped StreakBadgeView.body
-    /// exactly:
+    /// Render ladder:
+    ///   - isStale                    → degraded badge with `—` + warning glyph
     ///   - currentStreak > 0          → active capsule + (optional) "Best" line
     ///   - currentStreak == 0, best > 0 → dormant "Streak reset" capsule (no "Best" line)
     ///   - both zero (or negative)    → render nothing (defensive — shouldRender
     ///     guards the call site, but the view is also safe if called directly)
     var body: some View {
-        if currentStreak > 0 {
+        if isStale {
+            staleBadge
+        } else if currentStreak > 0 {
             HStack(spacing: WPSpacing.sm) {
                 activeBadge
                 if bestStreak > currentStreak {
@@ -58,6 +72,23 @@ struct WPStreakBadge: View {
         // (0, 0) or negatives: render nothing. shouldRender returns false
         // for these inputs, so the caller's guard hides the section entirely
         // — but the body stays safe if WPStreakBadge is called directly.
+    }
+
+    private var staleBadge: some View {
+        HStack(spacing: WPSpacing.xs1) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .imageScale(.small)
+            Text("—")
+                .wpFont(.title3)
+                .monospacedDigit()
+            Text("streak unavailable")
+                .wpFont(.subhead)
+        }
+        .foregroundStyle(Color.wpChar500)
+        .padding(.horizontal, WPSpacing.md)
+        .padding(.vertical, WPSpacing.xs2)
+        .overlay(Capsule().stroke(Color.wpChar500, lineWidth: 1))
+        .accessibilityLabel("Streak unavailable — couldn't read audit history")
     }
 
     private var activeBadge: some View {

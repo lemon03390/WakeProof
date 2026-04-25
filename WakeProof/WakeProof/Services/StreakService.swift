@@ -54,7 +54,22 @@ final class StreakService {
     private(set) var currentStreak: Int = 0
     private(set) var bestStreak: Int = 0
 
+    /// E-C4 (Wave 2.3, 2026-04-26): set when the SwiftData fetch that drives
+    /// recompute fails. The badge view should render `—` + a warning glyph
+    /// rather than the stale (currentStreak, bestStreak) cached values: a
+    /// stale streak is worse than a missing one in a self-commitment app
+    /// (claiming the user is on day 7 when the audit trail couldn't be read
+    /// breaks the trust contract). Cleared on the next successful recompute.
+    private(set) var fetchFailedAt: Date?
+
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "streak")
+
+    /// E-C4 (Wave 2.3): record/clear fetch failure. Called from WakeProofApp's
+    /// recomputeStreakFromStore catch and the main-actor RootView recompute.
+    @MainActor
+    func setFetchFailed(_ failed: Bool) {
+        fetchFailedAt = failed ? .now : nil
+    }
 
     /// Re-derive current + best streak from an array of WakeAttempt snapshots.
     ///
@@ -102,6 +117,8 @@ final class StreakService {
         // Single write so observers see a consistent pair.
         self.currentStreak = computedCurrent
         self.bestStreak = computedBest
+        // E-C4 (Wave 2.3): a successful recompute clears any prior fetch-failed marker.
+        self.fetchFailedAt = nil
 
         logger.debug("recompute attempts=\(attempts.count, privacy: .public) verifiedDays=\(verifiedDays.count, privacy: .public) current=\(computedCurrent, privacy: .public) best=\(computedBest, privacy: .public)")
     }

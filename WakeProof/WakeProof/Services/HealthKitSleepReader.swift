@@ -45,6 +45,12 @@ actor HealthKitSleepReader: SleepReading {
 
     private let healthStore: HKHealthStore
     private let logger = Logger(subsystem: LogSubsystem.overnight, category: "sleep-reader")
+    /// Mirror of `logger` accessible without an actor hop, so the HKSampleQuery
+    /// completion (which fires on HealthKit's queue, not MainActor) can log
+    /// without re-isolating onto self. Same Subsystem/category — Logger is
+    /// Sendable + cheap to construct, sharing the same subsystem keeps Console
+    /// filters consistent.
+    nonisolated private static let nonisolatedLogger = Logger(subsystem: LogSubsystem.overnight, category: "sleep-reader")
 
     init(healthStore: HKHealthStore = HKHealthStore()) {
         self.healthStore = healthStore
@@ -60,6 +66,13 @@ actor HealthKitSleepReader: SleepReading {
     /// Read last-N-hours sleep + HR data. Default window 12 h back.
     func lastNightSleep(windowHours: Int = 12) async throws -> SleepSnapshot {
         logger.info("Fetching sleep samples: window=\(windowHours, privacy: .public)h")
+
+        // S-M4 (Wave 2.5, 2026-04-26): negative or zero window collapses the
+        // HK predicate to start>=end, which yields zero results indistinguishable
+        // from a no-sleep-data return. preconditionFailure on programmer error
+        // surfaces the bug at the call site rather than masking as silent
+        // empty data the agent then misinterprets.
+        precondition(windowHours > 0, "windowHours must be positive (got \(windowHours))")
 
         guard HKHealthStore.isHealthDataAvailable() else {
             logger.info("HealthKit unavailable on this device; returning empty snapshot")
@@ -167,6 +180,13 @@ actor HealthKitSleepReader: SleepReading {
                 sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
             ) { _, results, error in
                 if let error { cont.resume(throwing: error); return }
+                // E-I11 (Wave 2.5, 2026-04-26): cast-failure log. results
+                // returning a non-`[HKCategorySample]` shape would silently
+                // collapse to empty; that is invariant violation, not "no
+                // data". Log at .fault so it shows in Console.
+                if results != nil, (results as? [HKCategorySample]) == nil {
+                    Self.nonisolatedLogger.fault("HKSampleQuery returned non-HKCategorySample results — cast failure")
+                }
                 cont.resume(returning: (results as? [HKCategorySample]) ?? [])
             }
             healthStore.execute(q)
