@@ -610,7 +610,11 @@ final class AlarmScheduler {
             logger.warning("cancelDisableChallenge ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
-        lastCaptureError = "Disable cancelled — alarm stays enabled. Hold the toggle longer to retry."
+        // UAT 缺點 3 (Wave 3.5, 2026-04-26): "Hold the toggle longer" was a
+        // misleading copy — the toggle is tap-to-toggle, not long-press. The
+        // contract is "you must verify with a photo to disable". Direct copy
+        // makes that explicit instead of suggesting a phantom interaction.
+        lastCaptureError = "Disable cancelled — alarm stays enabled. Toggle off again to retry the photo challenge."
         phase = .idle
         logger.info("Disable challenge cancelled — window.isEnabled kept true")
     }

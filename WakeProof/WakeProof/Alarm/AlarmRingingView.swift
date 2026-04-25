@@ -97,10 +97,31 @@ struct AlarmRingingView: View {
 
                 Spacer()
 
-                Button("Prove you're awake", action: onRequestCapture)
-                    .buttonStyle(.primaryAlarm)
-                    .padding(.horizontal, WPSpacing.xl2)
-                    .padding(.bottom, WPSpacing.xl2)
+                // UAT 缺點 2 (Wave 3.5, 2026-04-26): if the baseline image
+                // failed to decode, the verifier has nothing to compare
+                // against — every "Prove you're awake" tap will REJECT. Show
+                // a disabled-looking button + actionable copy so the user
+                // doesn't loop on a broken contract.
+                if baselineDecodeFailed {
+                    VStack(spacing: WPSpacing.sm) {
+                        Text("Reinstall WakeProof to re-capture your baseline.")
+                            .wpFont(.callout)
+                            .foregroundStyle(Color.wpAttempted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, WPSpacing.xl2)
+                        Button("Prove you're awake", action: onRequestCapture)
+                            .buttonStyle(.primaryAlarm)
+                            .disabled(true)
+                            .opacity(0.4)
+                            .padding(.horizontal, WPSpacing.xl2)
+                            .padding(.bottom, WPSpacing.xl2)
+                    }
+                } else {
+                    Button("Prove you're awake", action: onRequestCapture)
+                        .buttonStyle(.primaryAlarm)
+                        .padding(.horizontal, WPSpacing.xl2)
+                        .padding(.bottom, WPSpacing.xl2)
+                }
             }
         }
         .preferredColorScheme(.dark)
