@@ -194,11 +194,12 @@ private final class CameraRecorderViewController: UIViewController {
         CameraRecorderViewController.unwiredLog.fault("onFailed fired but no handler wired — alarm will hang in .capturing")
     }
 
-    /// Recording duration. 2.0s matches the docs/technical-decisions.md design
-    /// intent. Constant rather than parameterised because the downstream
-    /// validator's ≥1s minimum + the H1 vision prompt's tuning both assume
-    /// this clip length.
-    private static let recordingDuration: TimeInterval = 2.0
+    /// Recording duration. Bumped from 2.0s → 3.5s after Phase 8 device
+    /// test feedback: at 2s the camera feels like it flashes open-and-close
+    /// (perceived as a bug), and the auto-stop hits before the user has
+    /// reliably composed the shot. 3.5s gives enough time to feel
+    /// intentional + composed without being tedious.
+    private static let recordingDuration: TimeInterval = 3.5
 
     private let logger = Logger(subsystem: LogSubsystem.verification, category: "cameraRecorder")
     private let sessionQueue = DispatchQueue(label: "com.wakeproof.camera-session", qos: .userInitiated)
@@ -380,12 +381,17 @@ private final class CameraRecorderViewController: UIViewController {
         // team determines spoofing detection benefits from higher resolution.
         captureSession.sessionPreset = .medium
 
-        // Camera input — explicit .builtInWideAngleCamera + .back avoids the
-        // BackTriple discovery path that crashes UIImagePickerController on
-        // iPhone 17 Pro / iOS 26. No front-camera fallback: every iPhone
-        // capable of running iOS 17+ has a rear wide-angle camera; the
-        // .front fallback was unreachable dead code.
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+        // Camera input — front-facing wide-angle (Phase 8 product change).
+        // Selfie format is more verifiable: face proves identity AND the
+        // background scene proves location simultaneously. Back-camera
+        // produced too many false rejections because the user had to point
+        // the lens at a specific framed scene matching the baseline; the
+        // selfie's face anchor + ambient background is more forgiving.
+        // .back fallback in case the device somehow only has a rear cam
+        // (would only fire on hardware regression — every iPhone has
+        // both since iPhone X).
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             logger.error("No wide-angle camera available")
             commit()
             DispatchQueue.main.async { [weak self] in
