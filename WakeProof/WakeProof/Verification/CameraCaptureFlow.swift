@@ -168,7 +168,16 @@ struct CameraCaptureFlow: View {
         let attempt = WakeAttempt(scheduledAt: scheduledFor)
         attempt.capturedAt = .now
         attempt.imageData = result.stillImage.jpegData(compressionQuality: 0.9)
-        attempt.videoPath = durableVideoURL.lastPathComponent // relative to WakeAttempts/
+        // S-I6 (Wave 2.1, 2026-04-26): defence-in-depth — the source is always a
+        // UUID-derived filename from `moveVideoToDocuments`, but validating before
+        // persisting means any future change to the naming convention can't
+        // accidentally introduce a traversal-shaped value into SwiftData.
+        let videoFilename = durableVideoURL.lastPathComponent
+        if WakeAttemptCleaner.isSafeFilename(videoFilename) {
+            attempt.videoPath = videoFilename // relative to WakeAttempts/
+        } else {
+            logger.fault("Refusing to persist unsafe videoPath='\(videoFilename, privacy: .private)' — leaving nil")
+        }
         attempt.triggeredWindowStart = WakeWindow.composeTime(hour: scheduler.window.startHour,
                                                               minute: scheduler.window.startMinute)
         attempt.triggeredWindowEnd = WakeWindow.composeTime(hour: scheduler.window.endHour,

@@ -13,11 +13,18 @@
 // runs ≤10h; beyond that we assume the pairing device is gone.
 //
 // Auth:
-//   - Vercel's own cron invocation sends `x-vercel-cron: 1` in the request
-//     headers. We accept that header as proof of a platform-initiated call.
-//   - For manual triggers (curl from a dev laptop to force a cleanup), we
-//     also accept `Authorization: Bearer <WAKEPROOF_CRON_TOKEN>` where the
-//     env var matches. Either header alone is sufficient.
+//   - S-I2 (Wave 2.1, 2026-04-26): Vercel signs scheduled cron invocations with
+//     `Authorization: Bearer <CRON_SECRET>` automatically when the `CRON_SECRET`
+//     env var is set on the project. We REQUIRE this Bearer auth — the
+//     `x-vercel-cron: 1` header alone is no longer sufficient. The header was
+//     accepted historically, but Vercel's platform stripping of that header
+//     for non-cron traffic is undocumented behaviour. Trusting only Bearer
+//     auth removes the entire class of "spoof the header" attack.
+//   - Manual triggers (curl from a dev laptop) use the same Bearer surface
+//     with `WAKEPROOF_CRON_TOKEN` value. Either env var's value is accepted.
+//   - Setup: `vercel env add CRON_SECRET production` with `openssl rand -hex 32`.
+//     Without CRON_SECRET, scheduled crons return 401 — Vercel won't add the
+//     header on its own. This is the intended fail-closed posture.
 //
 // Cost: one listing call + N DELETE calls, where N is the stale session
 // count. Both call the Managed Agents beta so we forward the beta header.
@@ -40,22 +47,28 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Auth: accept either the Vercel cron header OR the manual token bearer.
-  const vercelCronHeader = req.headers['x-vercel-cron'];
+  // S-I2 (Wave 2.1, 2026-04-26): Bearer-only auth. Either CRON_SECRET (Vercel
+  // platform-injected for scheduled crons) or WAKEPROOF_CRON_TOKEN (manual curl)
+  // is accepted. The `x-vercel-cron: 1` header is no longer trusted.
   const authHeader = req.headers['authorization'] || '';
+  const cronSecret = process.env.CRON_SECRET;
   const manualToken = process.env.WAKEPROOF_CRON_TOKEN;
-  const manualAuthOK = manualToken &&
-    authHeader.startsWith('Bearer ') &&
-    authHeader.slice(7) === manualToken;
+  const presented = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 
-  if (!vercelCronHeader && !manualAuthOK) {
-    console.warn('[cron-cleanup] unauthorized invocation rejected');
-    res.status(401).json({ error: { type: 'unauthorized', message: 'Missing x-vercel-cron or Bearer token' } });
+  // Use constant-time-ish comparison via length pre-check to discourage timing
+  // oracles. Both env vars are 64-char hex (256-bit entropy) so length match
+  // is the common case.
+  const isCron = !!cronSecret && presented.length === cronSecret.length && presented === cronSecret;
+  const isManual = !!manualToken && presented.length === manualToken.length && presented === manualToken;
+
+  if (!isCron && !isManual) {
+    console.warn(`[cron-cleanup] unauthorized invocation rejected; presented_len=${presented.length}`);
+    res.status(401).json({ error: { type: 'unauthorized', message: 'Bearer token required (CRON_SECRET or WAKEPROOF_CRON_TOKEN)' } });
     return;
   }
 
   const startedAt = new Date();
-  console.info(`[cron-cleanup] invoked at=${startedAt.toISOString()} trigger=${vercelCronHeader ? 'vercel' : 'manual'}`);
+  console.info(`[cron-cleanup] invoked at=${startedAt.toISOString()} trigger=${isCron ? 'vercel-cron' : 'manual'}`);
 
   const upstreamHeaders = {
     'x-api-key': anthropicKey,

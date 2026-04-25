@@ -42,6 +42,32 @@ struct WakeProofApp: App {
     private let overnightScheduler: OvernightScheduler
 
     private static let logger = Logger(subsystem: LogSubsystem.app, category: "root")
+
+    /// S-C3 (Wave 2.1): build the backup-excluded SwiftData store URL. Throws on
+    /// directory creation failure so init() can route through its existing
+    /// fatalError-on-init-fail recovery rather than silently falling back to
+    /// Documents (which would re-introduce the iCloud Backup leak).
+    private static func makeStoreURL() throws -> URL {
+        let fm = FileManager.default
+        let appSupport = try fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        var dir = appSupport.appendingPathComponent("WakeProof", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        // Mark the directory excluded from iCloud Backup. setResourceValues throws on
+        // failure rather than `try?`-swallowing — a silent failure here re-introduces
+        // the privacy regression we're closing (E-I6: silent backup-exclusion failure
+        // means bedroom-photo data syncs to iCloud anyway).
+        var rv = URLResourceValues()
+        rv.isExcludedFromBackup = true
+        try dir.setResourceValues(rv)
+        return dir.appendingPathComponent("WakeProof.store", isDirectory: false)
+    }
     /// Weak bridge between `init()`'s synchronously-registered BGTask launch handler and
     /// the scheduler instance. `nonisolated static` so the handler closure can capture
     /// it without reaching into `self` (which the closure can't safely hold at register
@@ -53,8 +79,34 @@ struct WakeProofApp: App {
 
     init() {
         do {
+            // S-C3 (Wave 2.1, 2026-04-26): SwiftData store moved out of Documents
+            // (default location is `Documents/default.store`, included in iCloud
+            // Backup) into `Application Support/WakeProof/` and explicitly marked
+            // `isExcludedFromBackup`. Documents-by-default would have meant every
+            // baseline JPEG and WakeAttempt frame ended up in iCloud Backup —
+            // bedroom photos retained for months across devices on iCloud account
+            // compromise. The captured-video path (CameraCaptureFlow) already
+            // marks `.mov` files excluded; this aligns the SwiftData side.
+            //
+            // Protection level stays `.completeUntilFirstUserAuthentication` (the
+            // default) because the alarm fires while the device is locked — using
+            // `.complete` would block writes mid-ring. CKR is the strongest level
+            // compatible with overnight alarm operation.
+            //
+            // Migration note: hackathon scope = single device, no production rows
+            // to migrate. First launch on a clean install simply creates the new
+            // store; an existing Vincent install carries an orphan
+            // `Documents/default.store` that's harmless (we don't read it). For
+            // a future production migration helper, copy on first run if the new
+            // store doesn't exist + the legacy one does.
+            let storeURL = try Self.makeStoreURL()
+            let configuration = ModelConfiguration(
+                schema: Schema([BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self]),
+                url: storeURL
+            )
             modelContainer = try ModelContainer(
-                for: BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self
+                for: BaselinePhoto.self, WakeAttempt.self, MorningBriefing.self,
+                configurations: configuration
             )
         } catch {
             // Log before the fatal so crash reports carry the decoded reason rather than
@@ -158,6 +210,12 @@ struct WakeProofApp: App {
             await scheduler.flushPendingAttempts()
         }
 
+        // S-C4 (Wave 2.1, 2026-04-26): retention sweep — delete .mov clips
+        // older than 7 days, nil out imageData on rows older than 30 days, and
+        // clean up tmp capture leftovers. Single bounded pass per cold start;
+        // see WakeAttemptCleaner for the full retention contract.
+        WakeAttemptCleaner.runRetentionSweep(context: modelContainer.mainContext)
+
         // Wave 5 H3: prime the streak badge from the existing WakeAttempt
         // history. AlarmSchedulerView also recomputes on appear, but priming
         // here means RootView's first render sees an accurate streak if the
@@ -203,12 +261,28 @@ struct WakeProofApp: App {
             // moving the assignment here makes the invariant visible in the code
             // shape — S6 in memory-tool-findings.md.)
             visionVerifier.memoryStore = memoryStore
+            visionVerifier.setMemoryBootstrapFailed(false)
             await visionVerifier.flushMemoryWriteQueue()
         } catch {
             Self.logger.error("MemoryStore bootstrap failed: \(error.localizedDescription, privacy: .public)")
-            // Bootstrap failed — do NOT expose the store. read() would still work
-            // (it early-returns .empty on missing dir), but writes would fail
-            // repeatedly — better to run memory-less for this launch.
+            // E-C3 / E-M4 (Wave 2.3, 2026-04-26): surface bootstrap failure via the
+            // verifier's `memoryBootstrapFailed` flag (mirrors `requiresReinstall`)
+            // so AlarmSchedulerView's systemBanner displays "Memory unavailable —
+            // verifications running without calibration." The previous behaviour
+            // was a log-only catch — store stayed nil for the rest of the session,
+            // every verify ran memory-less, and the user had no signal.
+            //
+            // Disambiguate UUID-shape failure (requiresReinstall) from filesystem
+            // failure (memoryBootstrapFailed) so the banner can show the right
+            // remediation copy. UUID-shape only flips on `read()` paths.
+            if let storeErr = error as? MemoryStoreError, case .invalidUserUUID = storeErr {
+                // UUID-shape failure: flip requiresReinstall directly so the
+                // user sees the reinstall banner immediately rather than
+                // waiting for the first read() to surface it.
+                visionVerifier.flipRequiresReinstall()
+            } else {
+                visionVerifier.setMemoryBootstrapFailed(true)
+            }
         }
     }
 
@@ -276,13 +350,24 @@ struct WakeProofApp: App {
     /// A fetch failure is non-fatal — the badge stays at (0, 0) and the
     /// next view-level `@Query` update will supply a fresh snapshot via
     /// `AlarmSchedulerView.onChange(of: wakeAttempts.count)`.
+    ///
+    /// P-C4 (Wave 2.2, 2026-04-26): projects to only the columns StreakService
+    /// reads (`verdict`, `capturedAt`, `scheduledAt`) so SwiftData doesn't
+    /// hydrate `imageData` on every cold-start fetch. At 365-day scale that's
+    /// ~22 MB of bytes per launch saved.
     private func recomputeStreakFromStore() {
         let context = modelContainer.mainContext
         do {
-            let attempts = try context.fetch(FetchDescriptor<WakeAttempt>())
+            var descriptor = FetchDescriptor<WakeAttempt>()
+            descriptor.propertiesToFetch = [\.verdict, \.capturedAt, \.scheduledAt]
+            let attempts = try context.fetch(descriptor)
             streakService.recompute(from: attempts)
         } catch {
-            Self.logger.error("Streak recompute fetch failed: \(error.localizedDescription, privacy: .public)")
+            // E-C4 (Wave 2.3): mark fetch-failed so the badge renders `—`
+            // instead of stale numbers. A stale streak (claiming day 7 when
+            // the audit trail couldn't be read) breaks the trust contract.
+            Self.logger.fault("Streak recompute fetch failed — badge will degrade: \(error.localizedDescription, privacy: .public)")
+            streakService.setFetchFailed(true)
         }
     }
 
@@ -316,7 +401,15 @@ struct WakeProofApp: App {
                 soundEngine.start(setVolume: { _ in /* no audio player to mutate */ })
                 return
             }
-            audioKeepalive.playAlarmSound(url: url)
+            // P-C1 (Wave 2.2): playAlarmSound is now async (drops MainActor
+            // block during retry). Wrap in a MainActor Task — both onFire and
+            // the audio keepalive are MainActor, so this is a structured
+            // continuation rather than an actor hop. The volume ramp via
+            // soundEngine starts immediately so first ramp step doesn't wait
+            // on the audio session settling.
+            Task { @MainActor in
+                await audioKeepalive.playAlarmSound(url: url)
+            }
             soundEngine.start(setVolume: { volume in
                 audioKeepalive.setAlarmVolume(volume)
             })
@@ -376,12 +469,26 @@ struct RootView: View {
     /// VERIFIED rows slip to index 1+. The briefing cover is only presented
     /// on the `(.verifying → .idle)` transition so the .first below IS the
     /// current morning's attempt in practice.
-    @Query(
-        filter: #Predicate<WakeAttempt> { $0.verdict == "VERIFIED" && $0.capturedAt != nil },
-        sort: \WakeAttempt.capturedAt,
-        order: .reverse
-    )
+    /// P-I10 (Wave 2.2, 2026-04-26): bounded with `fetchLimit: 1` because the
+    /// only consumer is `verifiedAttempts.first` in the briefing presenter.
+    /// Without the cap, SwiftData materialises every VERIFIED row on every
+    /// model mutation — at scale (one per day for a year) that's 365 rows
+    /// hydrated each tick. With the cap the @Query becomes O(1) regardless of
+    /// history length.
+    ///
+    /// FetchDescriptor variant of @Query is required because the `filter:sort:`
+    /// init signature doesn't expose `fetchLimit`.
+    @Query(Self.briefingFetchDescriptor)
     private var verifiedAttempts: [WakeAttempt]
+
+    private static var briefingFetchDescriptor: FetchDescriptor<WakeAttempt> {
+        var descriptor = FetchDescriptor<WakeAttempt>(
+            predicate: #Predicate<WakeAttempt> { $0.verdict == "VERIFIED" && $0.capturedAt != nil },
+            sortBy: [SortDescriptor(\WakeAttempt.capturedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return descriptor
+    }
 
     @Environment(AlarmScheduler.self) private var scheduler
     @Environment(AudioSessionKeepalive.self) private var audioKeepalive
@@ -523,9 +630,21 @@ struct RootView: View {
                         do {
                             try mainContext.save()
                             Self.logger.info("VERIFIED transition: briefing inserted chars=\(dto.briefingText.count, privacy: .public)")
+                            // E-C2 (Wave 2.3): clear any stale persist-failure
+                            // flag once a successful save lands.
+                            visionVerifier.setBriefingPersistFailed(false)
                         } catch {
-                            Self.logger.error("VERIFIED transition: briefing persist failed: \(error.localizedDescription, privacy: .public)")
+                            Self.logger.fault("VERIFIED transition: briefing persist failed — audit gap: \(error.localizedDescription, privacy: .public)")
                             mainContext.rollback()
+                            // E-C2 (Wave 2.3, 2026-04-26): surface the persist
+                            // failure via the verifier observable so the
+                            // AlarmSchedulerView banner shows "Yesterday's
+                            // briefing wasn't saved to history." The cover
+                            // still renders this morning's briefing from the
+                            // in-memory DTO (user earned it; we don't lie
+                            // visually), but the audit trail gap is now
+                            // observable instead of log-only.
+                            visionVerifier.setBriefingPersistFailed(true)
                         }
                     case .noSession:
                         Self.logger.info("VERIFIED transition: no briefing (no active session)")
@@ -627,10 +746,15 @@ struct RootView: View {
         context: ModelContext
     ) {
         do {
-            let attempts = try context.fetch(FetchDescriptor<WakeAttempt>())
+            // P-C4 (Wave 2.2): same projection as bootstrap-time recompute —
+            // skip imageData hydration on every post-VERIFIED transition.
+            var descriptor = FetchDescriptor<WakeAttempt>()
+            descriptor.propertiesToFetch = [\.verdict, \.capturedAt, \.scheduledAt]
+            let attempts = try context.fetch(descriptor)
             streakService.recompute(from: attempts)
         } catch {
-            logger.error("Post-VERIFIED streak recompute fetch failed: \(error.localizedDescription, privacy: .public)")
+            logger.fault("Post-VERIFIED streak recompute fetch failed — badge will degrade: \(error.localizedDescription, privacy: .public)")
+            streakService.setFetchFailed(true)
         }
     }
 }

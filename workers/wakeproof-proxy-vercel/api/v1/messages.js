@@ -17,7 +17,16 @@
 // through to Anthropic unchanged (the request body is already valid JSON
 // when it leaves the iOS client; re-parsing would cost memory + latency
 // and risk subtle shape changes).
-import { timingSafeEqual } from 'node:crypto';
+import {
+  tokensEqual,
+  isKillSwitchActive,
+  checkBurstLimit,
+  sanitizeUpstreamBody,
+  readWithTimeout,
+  classifyFetchError,
+  BURST_WINDOW_MS,
+  BURST_LIMIT_DEFAULT,
+} from '../../lib/proxy-helpers.js';
 
 export const config = {
   api: {
@@ -25,24 +34,21 @@ export const config = {
   },
 };
 
-// L1 (Wave 2.7): constant-time token compare. JS string `!==` short-circuits
-// on first mismatch so an attacker with timing telemetry could in principle
-// brute-force the token byte-by-byte. `timingSafeEqual` runs in constant time
-// but REQUIRES equal-length Buffers (else it throws), so we pre-check length
-// and bail on mismatch before allocating the second Buffer. Length of the
-// expected token is not secret (it's `openssl rand -hex 32` = 64 chars).
-function tokensEqual(clientToken, expectedToken) {
-  if (typeof clientToken !== 'string' || typeof expectedToken !== 'string') return false;
-  if (clientToken.length !== expectedToken.length) return false;
-  const clientBuf = Buffer.from(clientToken, 'utf8');
-  const expectedBuf = Buffer.from(expectedToken, 'utf8');
-  if (clientBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(clientBuf, expectedBuf);
-}
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(404).json({ error: { type: 'not_found', message: 'POST only' } });
+    return;
+  }
+
+  // S-C1 (Wave 2.1, 2026-04-26): operator kill-switch. Set
+  // `WAKEPROOF_KILL_SWITCH=1` in Vercel env to instantly reject all traffic
+  // without redeploy. Use case: token leak detected → flip switch → rotate
+  // token → unset switch.
+  if (isKillSwitchActive()) {
+    console.warn('[kill-switch] proxy rejecting all traffic — WAKEPROOF_KILL_SWITCH=1');
+    res.status(503).json({
+      error: { type: 'service_unavailable', message: 'Proxy temporarily disabled by operator' },
+    });
     return;
   }
 
@@ -72,15 +78,26 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Wave 2.1 / B1: detective metrics log. We cannot rate-limit in Vercel
-  // Serverless (each invocation cold-starts; shared state does not persist),
-  // so instead we log a masked token + timestamp on every validated call so
-  // post-facto abuse can be spotted from Vercel logs. See README.md
-  // "Cost safety posture" for the full threat model.
+  // S-C1 (Wave 2.1): per-token burst rate limit (best-effort, warm-Lambda only).
+  // Detective `[ratelimit-note]` log lines remain so post-facto abuse is
+  // reconstructable from Vercel logs.
   const tokenSuffix = clientToken.slice(-6);
+  const burstLimit = parseInt(process.env.WAKEPROOF_BURST_LIMIT, 10) || BURST_LIMIT_DEFAULT;
+  const burst = checkBurstLimit(tokenSuffix, burstLimit);
   console.info(
-    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=POST path=/v1/messages`
+    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=POST path=/v1/messages burst=${burst.count}/${burstLimit}`
   );
+  if (!burst.allowed) {
+    console.warn(`[ratelimit-trip] token=***${tokenSuffix} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
+    res.setHeader('Retry-After', String(Math.ceil(BURST_WINDOW_MS / 1000)));
+    res.status(429).json({
+      error: {
+        type: 'rate_limited',
+        message: `Burst limit ${burstLimit}/min exceeded. Retry after ${BURST_WINDOW_MS / 1000}s.`,
+      },
+    });
+    return;
+  }
 
   const anthropicVersion = req.headers['anthropic-version'] || '2023-06-01';
 
@@ -137,13 +154,44 @@ export default async function handler(req, res) {
       body: bodyBuffer,
     });
   } catch (err) {
-    res.status(502).json({ error: { type: 'upstream_fetch_failed', message: String(err) } });
+    // E-L5 (Wave 2.5): classify the failure for postmortem. console.error so it
+    // shows up in Vercel logs at the right severity. Distinguish DNS / TLS /
+    // network from generic failure via err.cause when available.
+    const cause = classifyFetchError(err);
+    console.error(`[upstream_fetch_failed] cause=${cause} err=${String(err)}`);
+    res.status(502).json({
+      error: {
+        type: 'upstream_fetch_failed',
+        message: `Upstream fetch failed (${cause})`,
+      },
+    });
     return;
   }
 
-  const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+  // E-L4 (Wave 2.5): bound upstream body read. Worst-case happy path is ~7s
+  // upload + Anthropic round-trip; we have the rest of the 10s function budget
+  // for body read + response send. Allow up to 1.5s for the body read.
+  const UPSTREAM_BODY_TIMEOUT_MS = 1500;
+  let originalBytes;
+  try {
+    originalBytes = await readWithTimeout(upstream, UPSTREAM_BODY_TIMEOUT_MS);
+  } catch (err) {
+    console.error(`[upstream_response_too_slow] status=${upstream.status} err=${String(err)}`);
+    res.status(502).json({
+      error: {
+        type: 'upstream_response_too_slow',
+        message: `Upstream body read exceeded ${UPSTREAM_BODY_TIMEOUT_MS}ms`,
+      },
+    });
+    return;
+  }
 
-  res.setHeader('Content-Type', upstream.headers.get('Content-Type') || 'application/json');
+  // S-I5 (Wave 2.1): sanitise 4xx response bodies to drop any echoed prompt /
+  // image-data fragments. Pass-through for 2xx and 5xx.
+  const upstreamContentType = upstream.headers.get('Content-Type') || 'application/json';
+  const upstreamBody = sanitizeUpstreamBody(upstream.status, originalBytes, upstreamContentType);
+
+  res.setHeader('Content-Type', upstreamContentType);
   res.setHeader('x-wakeproof-worker', 'vercel-serverless-v1');
   res.setHeader('x-wakeproof-upstream-status', String(upstream.status));
   for (const key of [

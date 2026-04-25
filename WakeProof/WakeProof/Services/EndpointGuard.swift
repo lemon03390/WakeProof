@@ -15,10 +15,12 @@
 //
 //  Adding a new allowed host: append to `allowedHostSuffixes` and document
 //  the reason in a one-liner comment. Prefer exact hostnames over wildcard
-//  suffixes — the ".vercel.app" suffix is the one concession we make for
-//  preview deployment URLs, which change on every PR. If the suffix model
-//  ever feels too loose, switch to an explicit hash-per-deployment allow
-//  list.
+//  suffixes. After S-I1 (Wave 2.1) the wildcard `.vercel.app` was removed
+//  because Vercel hostnames are first-come-first-served; any attacker who
+//  can deploy a `wakeproof-clone.vercel.app` would have passed the suffix
+//  check. Preview deployments are no longer auto-trusted. If you need to
+//  test against a preview, append the specific hash for the duration of
+//  testing and remove before merge.
 //
 //  Not used for outbound auth — auth is the `x-wakeproof-token` header
 //  validated by the proxy. This guard only prevents the client from
@@ -43,16 +45,22 @@ nonisolated enum EndpointGuard {
     ///
     /// Keep ordering alphabetical for diff stability; the guard's time complexity
     /// is O(n) over this list and the list is small.
+    /// S-I1 (Wave 2.1, 2026-04-26): wildcard `.vercel.app` removed. Vercel
+    /// hostnames are first-come-first-served; any attacker who can deploy a
+    /// `evil-foo.vercel.app` would have passed the suffix check. Replaced with
+    /// the production hostname only. Preview-URL deployments (which change per
+    /// PR) are no longer auto-trusted; if needed, append the specific preview
+    /// hash here per environment, or use a build-config to swap allowlists.
     static let allowedHostSuffixes: [String] = [
         "api.anthropic.com",                            // Direct-to-Anthropic fallback (simulator + sanity probes)
         ".aspiratcm.com",                               // Cloudflare Worker archive domain (retained for rollback)
-        ".vercel.app",                                  // Any Vercel-issued hostname (prod + preview hashes)
-        "wakeproof-proxy-vercel.vercel.app",            // Current production proxy (explicit for clarity)
+        "wakeproof-proxy-vercel.vercel.app",            // Current production proxy (exact hostname only — see S-I1)
     ]
 
     enum GuardError: LocalizedError {
         case hostNotAllowed(host: String, url: String)
         case malformedURL(urlString: String)
+        case schemeNotAllowed(scheme: String, url: String)
 
         var errorDescription: String? {
             switch self {
@@ -61,12 +69,15 @@ nonisolated enum EndpointGuard {
                     "Update Secrets.swift or add the host to EndpointGuard.allowedHostSuffixes."
             case .malformedURL(let urlString):
                 return "Endpoint URL could not be parsed: '\(urlString)'."
+            case .schemeNotAllowed(let scheme, _):
+                return "Endpoint scheme '\(scheme)' is not allowed. " +
+                    "Only 'https' is accepted — plaintext or non-HTTP schemes are rejected to prevent token leakage."
             }
         }
     }
 
-    /// Validate that a URL's host is in the allowlist. Returns the URL unchanged
-    /// on success; throws `GuardError.hostNotAllowed` otherwise.
+    /// Validate that a URL's scheme is HTTPS and host is in the allowlist. Returns
+    /// the URL unchanged on success; throws on any mismatch.
     ///
     /// Call at application-launch time from each client's default endpoint
     /// derivation (e.g. `private static let defaultEndpoint: URL = { ... }()`).
@@ -75,14 +86,24 @@ nonisolated enum EndpointGuard {
     /// in current WakeProof the call sites wrap this in a `preconditionFailure`
     /// to preserve the original fail-closed behaviour, but tests can exercise the
     /// throwing path directly.
+    ///
+    /// S-C2 (Wave 2.1, 2026-04-26): scheme is now enforced. ATS will already block
+    /// `http://` to public hosts on a stock build, but ATS is a deployable
+    /// configuration — a future Info.plist edit could disable it. The guard's
+    /// whole job is to fail before that becomes load-bearing. Accepts only
+    /// `https`; rejects `http`, `ftp`, `file`, `data`, etc.
     static func validate(_ url: URL) throws -> URL {
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard scheme == "https" else {
+            throw GuardError.schemeNotAllowed(scheme: scheme, url: url.absoluteString)
+        }
         guard let host = url.host, !host.isEmpty else {
             throw GuardError.malformedURL(urlString: url.absoluteString)
         }
         let allowed = allowedHostSuffixes.contains { suffix in
             if suffix.hasPrefix(".") {
-                // Suffix form: match subdomains of the base (".vercel.app" matches
-                // "foo.vercel.app" but not "vercel.app" or "evilvercel.app").
+                // Suffix form: match subdomains of the base (".aspiratcm.com" matches
+                // "wakeproof.aspiratcm.com" but not "aspiratcm.com" or "evilaspiratcm.com").
                 return host.hasSuffix(suffix)
             }
             // Exact-match form.

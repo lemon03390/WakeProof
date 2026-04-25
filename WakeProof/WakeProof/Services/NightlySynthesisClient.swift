@@ -66,19 +66,22 @@ struct NightlySynthesisClient {
         return EndpointGuard.validateOrCrash(urlString: base, label: "Nightly synthesis endpoint")
     }
 
-    private static var defaultSession: URLSession {
+    /// P-I3 (Wave 2.2, 2026-04-26): `static let` shared URLSession — see the
+    /// rationale in ClaudeAPIClient.defaultSession.
+    private static let defaultSession: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 15
         c.timeoutIntervalForResource = 30
         return URLSession(configuration: c)
-    }
+    }()
 
     func synthesize(
         sleep: SleepSnapshot,
         memoryProfile: String?,
         priorBriefings: [String]
     ) async throws -> String {
-        guard !proxyToken.isEmpty, proxyToken != "REPLACE_WITH_OPENSSL_RAND_HEX_32" else {
+        // S-I8 (Wave 2.1, 2026-04-26): centralised placeholder constant.
+        guard !proxyToken.isEmpty, proxyToken != SecretsConstants.tokenPlaceholder else {
             logger.error("Nightly synthesis aborted: proxy token missing or placeholder")
             throw NightlySynthesisError.missingProxyToken
         }

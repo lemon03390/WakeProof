@@ -16,6 +16,9 @@ import Foundation
 import Observation
 import UserNotifications
 import os
+#if DEBUG
+import Darwin   // sysctl, kinfo_proc, P_TRACED for the debugger-attached check (DEBUG only)
+#endif
 
 /// Four-phase state machine for the alarm. A single ZStack overlay at the root swaps between
 /// the phase-specific views. .verifying and .antiSpoofPrompt were added in Day 3; the comment
@@ -176,10 +179,30 @@ final class AlarmScheduler {
     /// runtime branch in production. The UI-test hook stays inside `#if
     /// DEBUG` as well — we never want a release build to honor a launch
     /// argument that silently defeats the contract.
+    ///
+    /// Build-config invariant: TestFlight + App Store configs MUST be Release
+    /// (no DEBUG flag). Verified by grepping
+    /// `xcodebuild -showBuildSettings -configuration Release | grep DEBUG`.
+    /// If a future config drift makes a Release build define DEBUG, this
+    /// compiles into the shipped binary and the contract weakens.
+    ///
+    /// S-I7 (Wave 2.1, 2026-04-26): defence-in-depth even within DEBUG —
+    /// the bypass is honored only when a debugger is actually attached
+    /// (`isatty(STDERR_FILENO)` for Xcode console, plus the
+    /// `getppid() != 1` check via `kinfo_proc`). This means a DEBUG build
+    /// distributed via ad-hoc TestFlight (which we don't do, but defending
+    /// in depth) doesn't honor the bypass when launched without Xcode.
     static func isDisableChallengeBypassActive(
         defaults: UserDefaults = .standard,
-        arguments: [String] = ProcessInfo.processInfo.arguments
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        debuggerAttached: Bool = isDebuggerAttached()
     ) -> Bool {
+        // Even within DEBUG, never honour the bypass unless a debugger is attached
+        // OR the explicit UI-test argument is present. Both gates require an active
+        // dev workflow — neither is reachable from a TestFlight ad-hoc install.
+        guard debuggerAttached || arguments.contains("-disableBypassForUIT") else {
+            return false
+        }
         if defaults.bool(forKey: disableChallengeBypassKey) {
             return true
         }
@@ -187,6 +210,21 @@ final class AlarmScheduler {
             return true
         }
         return false
+    }
+
+    /// Returns true if a debugger is attached to this process. Implemented via
+    /// `sysctl` on the kinfo_proc P_TRACED flag — same technique Apple's own
+    /// jailbreak-detection routines use. Compiled in DEBUG only.
+    ///
+    /// `nonisolated` so the default-argument expression in
+    /// `isDisableChallengeBypassActive` evaluates without an actor hop.
+    nonisolated static func isDebuggerAttached() -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout.stride(ofValue: info)
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        let result = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0)
+        guard result == 0 else { return false }
+        return (info.kp_proc.p_flag & P_TRACED) != 0
     }
     #endif
     private var fireTask: Task<Void, Never>?
@@ -548,13 +586,19 @@ final class AlarmScheduler {
     /// Wave 5 G1: user cancelled the capture flow before it resolved to a
     /// verdict. Distinct from `disableChallengeFailed` so future UX can
     /// differentiate "claude said no" from "user backed out" if needed.
-    /// Today both paths just return to .idle with the alarm still enabled.
+    /// Today both paths return to .idle with the alarm still enabled.
+    ///
+    /// E-C5 (Wave 2.3, 2026-04-26): set `lastCaptureError` with explicit copy
+    /// so the AlarmSchedulerView banner / hint surface explains why disable
+    /// didn't take effect. Previously `nil`-cleared and the user got no
+    /// feedback — silent failure looks identical to "I tapped the wrong
+    /// button". Explicit copy makes the contract visible.
     func cancelDisableChallenge() {
         guard phase == .disableChallenge else {
             logger.warning("cancelDisableChallenge ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
-        lastCaptureError = nil
+        lastCaptureError = "Disable cancelled — alarm stays enabled. Hold the toggle longer to retry."
         phase = .idle
         logger.info("Disable challenge cancelled — window.isEnabled kept true")
     }
@@ -578,8 +622,22 @@ final class AlarmScheduler {
 
     /// Inserts an UNRESOLVED row for any fire that the previous app session began but never
     /// resolved (force-quit during ring). Call once at app launch from the app root.
+    ///
+    /// S-M3 (Wave 2.5, 2026-04-26): bound the recovered timestamp before
+    /// recording an attempt. A corrupted UserDefaults Date (clock backflip,
+    /// deserialisation glitch) could otherwise produce a row with a 1970 or
+    /// 2099 timestamp, polluting streak math. Reject anything older than 30
+    /// days or in the future — clear the marker and skip the row.
     func recoverUnresolvedFireIfNeeded() {
         guard let firedAt = lastFireAt else { return }
+        let now = Date()
+        let lowerBound = now.addingTimeInterval(-30 * 24 * 3600)
+        let upperBound = now.addingTimeInterval(60) // 1-minute clock-skew tolerance
+        guard firedAt >= lowerBound, firedAt <= upperBound else {
+            logger.fault("Recovered lastFireAt out of bounds (\(firedAt.ISO8601Format(), privacy: .public)) — skipping unresolved row + clearing marker")
+            lastFireAt = nil
+            return
+        }
         logger.warning("Recovering unresolved fire from previous session at \(firedAt.ISO8601Format(), privacy: .public)")
         recordAttempt(.unresolved, at: firedAt)
         lastFireAt = nil

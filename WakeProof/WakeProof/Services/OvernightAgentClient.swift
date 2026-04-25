@@ -144,12 +144,16 @@ actor OvernightAgentClient {
         return EndpointGuard.validateOrCrash(urlString: "\(scheme)://\(host)\(portSuffix)", label: "Overnight agent endpoint")
     }
 
-    private static var defaultSession: URLSession {
+    /// P-I3 (Wave 2.2, 2026-04-26): `static let` shared URLSession — see the
+    /// rationale in ClaudeAPIClient.defaultSession. Same proxy host so HTTP/2
+    /// connection coalescing makes sharing strictly better than per-instance
+    /// sessions.
+    private static let defaultSession: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 15
         c.timeoutIntervalForResource = 30
         return URLSession(configuration: c)
-    }
+    }()
 
     // MARK: - Public API
 
@@ -479,7 +483,8 @@ actor OvernightAgentClient {
     }
 
     private func jsonRequest(url: URL, method: String, body: [String: Any]?) async throws -> Data {
-        guard !proxyToken.isEmpty, proxyToken != "REPLACE_WITH_OPENSSL_RAND_HEX_32" else {
+        // S-I8 (Wave 2.1, 2026-04-26): centralised placeholder constant.
+        guard !proxyToken.isEmpty, proxyToken != SecretsConstants.tokenPlaceholder else {
             logger.error("\(method, privacy: .public) \(url.path, privacy: .public): proxy token missing")
             throw OvernightAgentError.missingProxyToken
         }

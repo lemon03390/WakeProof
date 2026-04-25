@@ -28,24 +28,25 @@
 //   - B1: request-count metrics log line emitted on every validated request
 //     so post-facto rate-limit abuse can be surfaced from Vercel logs.
 
-import { timingSafeEqual } from 'node:crypto';
-
 // P4 (Stage 6 Wave 1): shared allowlist imported so cron + wildcard stay
 // in sync on the current beta identifier. Previously each file declared
 // its own copy and a beta bump required remembering to edit both.
 import { ALLOWED_BETA_HEADERS } from '../lib/beta-headers.js';
 
-// L1 (Wave 2.7): constant-time token compare. See api/v1/messages.js for the
-// full rationale — same implementation mirrored here because Vercel route
-// files are independent modules.
-function tokensEqual(clientToken, expectedToken) {
-  if (typeof clientToken !== 'string' || typeof expectedToken !== 'string') return false;
-  if (clientToken.length !== expectedToken.length) return false;
-  const clientBuf = Buffer.from(clientToken, 'utf8');
-  const expectedBuf = Buffer.from(expectedToken, 'utf8');
-  if (clientBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(clientBuf, expectedBuf);
-}
+// Wave 2.1 (2026-04-26): shared proxy hardening — kill switch, burst rate
+// limit, upstream body sanitisation, fetch error classification — all live
+// in lib/proxy-helpers.js so messages.js and wildcard.js apply identical
+// guards. See that module for the rationale on each helper.
+import {
+  tokensEqual,
+  isKillSwitchActive,
+  checkBurstLimit,
+  sanitizeUpstreamBody,
+  readWithTimeout,
+  classifyFetchError,
+  BURST_WINDOW_MS,
+  BURST_LIMIT_DEFAULT,
+} from '../lib/proxy-helpers.js';
 
 /**
  * R1 allowlist — only these beta header values round-trip to Anthropic.
@@ -81,6 +82,15 @@ export const config = {
 };
 
 export default async function handler(req, res) {
+  // S-C1 (Wave 2.1, 2026-04-26): operator kill-switch — see proxy-helpers.js.
+  if (isKillSwitchActive()) {
+    console.warn('[kill-switch] wildcard rejecting all traffic — WAKEPROOF_KILL_SWITCH=1');
+    res.status(503).json({
+      error: { type: 'service_unavailable', message: 'Proxy temporarily disabled by operator' },
+    });
+    return;
+  }
+
   const expectedToken = process.env.WAKEPROOF_CLIENT_TOKEN;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!expectedToken || !anthropicKey) {
@@ -206,14 +216,24 @@ export default async function handler(req, res) {
     allowedBeta = kept.join(', ');
   }
 
-  // B1: detective-only metrics log. The actual token is masked to last 6
-  // chars so Vercel logs can correlate abuse without exposing the secret.
-  // We log here (post-auth, pre-upstream) so invalid tokens never generate
-  // a log line and thus can't flood the log stream with garbage.
+  // S-C1 (Wave 2.1): per-token burst rate limit (best-effort, warm-Lambda only).
   const tokenSuffix = clientToken.slice(-6);
+  const burstLimit = parseInt(process.env.WAKEPROOF_BURST_LIMIT, 10) || BURST_LIMIT_DEFAULT;
+  const burst = checkBurstLimit(tokenSuffix, burstLimit);
   console.info(
-    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=${method} path=/${upstreamPath}`
+    `[ratelimit-note] token=***${tokenSuffix} ts=${new Date().toISOString()} method=${method} path=/${upstreamPath} burst=${burst.count}/${burstLimit}`
   );
+  if (!burst.allowed) {
+    console.warn(`[ratelimit-trip] token=***${tokenSuffix} burst=${burst.count}/${burstLimit} (warm-Lambda only)`);
+    res.setHeader('Retry-After', String(Math.ceil(BURST_WINDOW_MS / 1000)));
+    res.status(429).json({
+      error: {
+        type: 'rate_limited',
+        message: `Burst limit ${burstLimit}/min exceeded. Retry after ${BURST_WINDOW_MS / 1000}s.`,
+      },
+    });
+    return;
+  }
 
   // Read body for methods that carry one. 8s upload cap + 6MB body cap
   // match messages.js.
@@ -270,12 +290,39 @@ export default async function handler(req, res) {
       body: bodyBuffer,
     });
   } catch (err) {
-    res.status(502).json({ error: { type: 'upstream_fetch_failed', message: String(err) } });
+    // E-L5 (Wave 2.5): classify the failure for postmortem.
+    const cause = classifyFetchError(err);
+    console.error(`[upstream_fetch_failed] path=${upstreamPath} cause=${cause} err=${String(err)}`);
+    res.status(502).json({
+      error: {
+        type: 'upstream_fetch_failed',
+        message: `Upstream fetch failed (${cause})`,
+      },
+    });
     return;
   }
 
-  const upstreamBody = Buffer.from(await upstream.arrayBuffer());
-  res.setHeader('Content-Type', upstream.headers.get('Content-Type') || 'application/json');
+  // E-L4 (Wave 2.5): bound upstream body read.
+  const UPSTREAM_BODY_TIMEOUT_MS = 1500;
+  let originalBytes;
+  try {
+    originalBytes = await readWithTimeout(upstream, UPSTREAM_BODY_TIMEOUT_MS);
+  } catch (err) {
+    console.error(`[upstream_response_too_slow] path=${upstreamPath} status=${upstream.status} err=${String(err)}`);
+    res.status(502).json({
+      error: {
+        type: 'upstream_response_too_slow',
+        message: `Upstream body read exceeded ${UPSTREAM_BODY_TIMEOUT_MS}ms`,
+      },
+    });
+    return;
+  }
+
+  // S-I5 (Wave 2.1): sanitise 4xx response bodies.
+  const upstreamContentType = upstream.headers.get('Content-Type') || 'application/json';
+  const upstreamBody = sanitizeUpstreamBody(upstream.status, originalBytes, upstreamContentType);
+
+  res.setHeader('Content-Type', upstreamContentType);
   res.setHeader('x-wakeproof-worker', 'vercel-serverless-wildcard-v1');
   res.setHeader('x-wakeproof-upstream-status', String(upstream.status));
   res.setHeader('x-wakeproof-upstream-path', upstreamPath);
