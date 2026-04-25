@@ -32,6 +32,13 @@ struct WPMetricCard: View {
                     .wpFont(.subhead)
                     .foregroundStyle(Color.wpChar500)
             }
+            // Combine into one VoiceOver focus stop so the announcement reads
+            // as a cohesive metric ("12. Verified mornings.") rather than two
+            // separate elements with a pause between numeral and label.
+            // Replaces the prior accessibilityElement on InvestmentDashboardView's
+            // hand-rolled metricRow which was lost in the WPMetricCard migration.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(value). \(label)")
         }
     }
 

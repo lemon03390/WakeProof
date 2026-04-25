@@ -13,21 +13,22 @@
 //   - Large streak number is the hero. 300pt bold is deliberately oversized
 //     so a user skimming a cluttered IG feed reads the number before
 //     anything else.
-//   - "day streak" caption at 60pt sits under the number.
-//   - Observation (if present) sits mid-canvas, italic at 54pt, 2-line cap,
-//     horizontally padded. Max 2 lines so a long Claude observation doesn't
-//     overflow into the mark area; the 2-line truncation is acceptable
-//     because the card is a teaser, not a transcript.
-//   - "WakeProof" mark in the bottom-right at 36pt semibold, 0.7 opacity +
-//     tracking(2) + uppercased — brand watermark style.
+//   - "day streak" caption uses WPFont.title1 (34pt) sitting under the number.
+//   - Observation (if present) sits mid-canvas, italic via WPFont.title3
+//     (22pt semibold) so the WCAG large-text 3:1 contrast threshold is met
+//     against the gradient background. Earlier `.callout` (16pt) failed
+//     contrast on the orange end (1.92:1) and only barely met it on the
+//     coral end. 2-line cap, horizontally padded.
+//   - "WakeProof" mark in the bottom-right via WPFont.caption (12pt medium),
+//     0.7 opacity + tracking(2) + uppercased — brand watermark style.
 //
 //  Rendering contract:
 //   - The view MUST be used with `ImageRenderer(content: ShareCardView(...))`
 //     on the main actor. `ImageRenderer.uiImage` returns nil if invoked
 //     off-main-actor on iOS 17 — the MorningBriefingView integration calls
 //     it from within a SwiftUI body context, which is @MainActor.
-//   - The view is sized explicitly to `ShareCardModel.canvasSize` via a
-//     `.frame(width:height:)` modifier inside the view itself, so the
+//   - The view is sized explicitly via `.frame(width: ShareCardModel.canvasWidth,
+//     height: ShareCardModel.canvasHeight)` inside the view itself so the
 //     caller doesn't need to remember to pin the frame. `ImageRenderer`
 //     renders at the view's intrinsic size, so the frame IS the canvas.
 //
@@ -81,8 +82,14 @@ struct ShareCardView: View {
                 // as a quote / secondary note rather than competing with
                 // the hero number.
                 if let observation, !observation.isEmpty {
+                    // .wpFont(.title3) = 22pt semibold — qualifies as WCAG
+                    // large text (≥18pt bold/semibold) so the 3:1 contrast
+                    // threshold is met against the wpPrimary orange end of
+                    // the gradient. .callout (16pt regular) failed contrast
+                    // here. Italic + 0.85 opacity preserved so the line
+                    // still reads as a quote, not headline prose.
                     Text(observation)
-                        .wpFont(.callout)
+                        .wpFont(.title3)
                         .italic()
                         .foregroundStyle(Color.wpCream50.opacity(0.85))
                         .multilineTextAlignment(.center)

@@ -86,28 +86,29 @@ private struct SimulatorCameraStubView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 24) {
+            Color.wpChar900.ignoresSafeArea()
+            VStack(spacing: WPSpacing.xl) {
                 Image(systemName: "camera.metering.unknown")
                     .font(.system(size: 64))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text("Simulator has no camera")
-                    .font(.title3.bold())
-                    .foregroundStyle(.white)
+                    .wpFont(.title3)
+                    .foregroundStyle(Color.wpCream50)
                 Text("Verification is stubbed here. On a real device this is the 2-second video capture screen.")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .wpFont(.callout)
+                    .foregroundStyle(Color.wpCream50.opacity(0.8))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-                VStack(spacing: 12) {
+                    .padding(.horizontal, WPSpacing.xl2)
+                VStack(spacing: WPSpacing.sm) {
                     Button("Inject stub verification") { onProceed() }
                         .buttonStyle(.borderedProminent)
                     Button("Cancel", role: .cancel) { onCancel() }
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.wpCream50)
                 }
-                .padding(.top, 16)
+                .padding(.top, WPSpacing.md)
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
 #endif

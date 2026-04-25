@@ -15,28 +15,29 @@ struct VerifyingView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 24) {
+            Color.wpChar900.ignoresSafeArea()
+            VStack(spacing: WPSpacing.xl) {
                 Image(systemName: "sparkle.magnifyingglass")
                     .font(.system(size: 80))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.wpCream50)
                     .symbolEffect(.pulse, options: .repeating)
                 Text("Verifying you're awake…")
-                    .font(.title2.bold())
-                    .foregroundStyle(.white)
+                    .wpFont(.title2)
+                    .foregroundStyle(Color.wpCream50)
                 if verifier.currentAttemptIndex > 1 {
                     Text("Retry \(verifier.currentAttemptIndex - 1) of 1")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .wpFont(.subhead)
+                        .foregroundStyle(Color.wpCream50.opacity(0.7))
                 }
                 if let err = verifier.lastError {
                     Text(err)
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .wpFont(.footnote)
+                        .foregroundStyle(Color.wpAttempted)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                        .padding(.horizontal, WPSpacing.xl2)
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
