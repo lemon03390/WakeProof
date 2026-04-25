@@ -20,42 +20,39 @@ struct AlarmRingingView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 24) {
+            Color.wpChar900.ignoresSafeArea()
+            VStack(spacing: WPSpacing.xl) {
                 Spacer()
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(context.date.formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 88, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
+                WPHeroTimeDisplay(style: .large)
 
                 if let location = baselines.first?.locationLabel {
                     Text("Meet yourself at \(location).")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.85))
+                        .wpFont(.title3)
+                        .foregroundStyle(Color.wpCream50.opacity(0.85))
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                        .padding(.horizontal, WPSpacing.xl2)
                 } else {
                     Text("Prove you're awake.")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.85))
+                        .wpFont(.title3)
+                        .foregroundStyle(Color.wpCream50.opacity(0.85))
                 }
 
                 if let error = scheduler.lastCaptureError {
                     Text(error)
-                        .font(.callout)
-                        .foregroundStyle(.orange)
+                        .wpFont(.callout)
+                        .foregroundStyle(Color.wpAttempted)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                        .padding(.horizontal, WPSpacing.xl2)
                 }
 
                 Spacer()
 
                 Button("Prove you're awake", action: onRequestCapture)
                     .buttonStyle(.primaryAlarm)
-                    .padding(.horizontal)
-                    .padding(.bottom, 32)
+                    .padding(.horizontal, WPSpacing.xl2)
+                    .padding(.bottom, WPSpacing.xl2)
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
