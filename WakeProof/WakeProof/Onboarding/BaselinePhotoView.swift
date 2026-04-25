@@ -7,7 +7,6 @@
 //  three things that must work end-to-end by end of Apr 22 HKT.
 //
 
-import AVFoundation
 import SwiftUI
 import os
 
@@ -94,8 +93,20 @@ struct BaselinePhotoView: View {
                 .disabled(locationLabel.isEmpty)
             }
         }
-        .sheet(isPresented: $showCamera) {
-            CameraPicker(
+        .fullScreenCover(isPresented: $showCamera) {
+            // Phase 8 device-test fix: BaselineCameraView replaces the prior
+            // UIImagePickerController-based CameraPicker. The picker
+            // letterboxed the preview (top/bottom black bars + system
+            // toolbar strip) on non-camera-aspect screens; AVCaptureSession
+            // with .resizeAspectFill fills the screen edge-to-edge. Also
+            // gives us framework parity with the alarm-time
+            // CameraCaptureView (same selfie format, same chrome shape, same
+            // session-config order).
+            //
+            // .fullScreenCover instead of .sheet so the camera takes over
+            // the screen without a sheet drag-handle competing with the
+            // shutter button at the bottom.
+            BaselineCameraView(
                 image: $capturedImage,
                 onCameraUnavailable: {
                     showCamera = false
@@ -128,63 +139,5 @@ struct BaselinePhotoView: View {
     }
 }
 
-// MARK: - Minimal camera picker
-
-struct CameraPicker: UIViewControllerRepresentable {
-    @Binding var image: UIImage?
-    let onCameraUnavailable: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    func makeUIViewController(context: Context) -> UIViewController {
-        // Camera availability must be checked before constructing UIImagePickerController:
-        // setting sourceType=.camera on a device without a camera throws. We return a placeholder
-        // VC and signal the parent so it can dismiss the sheet and show its error banner.
-        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-            DispatchQueue.main.async { onCameraUnavailable() }
-            return UIViewController()
-        }
-        let picker = UIImagePickerController()
-        picker.sourceType = .camera
-        // Phase 8 device-test fix: baseline capture defaults to FRONT camera
-        // for parity with the alarm-time CameraCaptureView. Selfie format
-        // means the user's face is the visual anchor and the background is
-        // the wake-location — same image shape as morning verification, so
-        // Claude is comparing apples-to-apples. Rear fallback if front is
-        // unavailable (older iPad without front camera, hardware regression).
-        if UIImagePickerController.isCameraDeviceAvailable(.front) {
-            picker.cameraDevice = .front
-        } else if UIImagePickerController.isCameraDeviceAvailable(.rear) {
-            picker.cameraDevice = .rear
-        }
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-
-    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: CameraPicker
-
-        init(_ parent: CameraPicker) {
-            self.parent = parent
-        }
-
-        func imagePickerController(
-            _ picker: UIImagePickerController,
-            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-        ) {
-            if let image = info[.originalImage] as? UIImage {
-                parent.image = image
-            }
-            parent.dismiss()
-        }
-
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            parent.dismiss()
-        }
-    }
-}
+// CameraPicker (UIImagePickerController-based) removed in Phase 8 in favour
+// of BaselineCameraView (AVCaptureSession-based). See BaselineCameraView.swift.
