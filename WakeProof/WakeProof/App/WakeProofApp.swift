@@ -295,41 +295,26 @@ struct WakeProofApp: App {
 
     private func wireSchedulerOnFireIfNeeded() {
         guard scheduler.onFire == nil else { return }
-        scheduler.onFire = { [audioKeepalive, soundEngine, weak scheduler] firedAt in
+        scheduler.onFire = { [audioKeepalive, soundEngine] firedAt in
             Self.logger.info("onFire received fire at \(firedAt.ISO8601Format(), privacy: .public)")
-            // onCeilingReached is the same closure regardless of whether audio starts —
-            // hoisted so both the happy path and the R7 missing-asset fallback share it.
-            let ceilingHandler: @MainActor () -> Void = { [weak soundEngine, weak audioKeepalive, weak scheduler] in
-                // weak everywhere: a strong capture of `scheduler` would form a retain
-                // cycle through scheduler.onFire → this closure → scheduler.
-                Self.logger.warning("Hard-stopping alarm at ring ceiling")
-                soundEngine?.stop()
-                audioKeepalive?.stopAlarmSound()
-                // handleRingCeiling persists a TIMEOUT WakeAttempt then calls stopRinging,
-                // keeping the audit-trail bookkeeping in one place.
-                scheduler?.handleRingCeiling()
-            }
-
+            // Phase 8 product fix: ring-ceiling subsystem removed. The alarm
+            // now plays until the user completes Proof (markCaptureCompleted
+            // → stop) or force-quits the app. See AlarmSoundEngine header
+            // for the rationale; tl;dr a self-commitment alarm cannot
+            // contain its own escape hatch without breaking the contract.
             guard let url = Bundle.main.url(forResource: "alarm", withExtension: "m4a") else {
-                // R7 fix: on a build-config regression that drops alarm.m4a we previously
-                // early-returned, which meant soundEngine was never started → ceiling never
-                // fired → the unresolved-fire marker dangled forever and the WakeAttempt
-                // row stayed UNRESOLVED even after the user interacted. Start the ceiling
-                // timer anyway so the state machine reaches a terminal audit row.
-                Self.logger.fault("alarm.m4a missing from bundle — silent alarm, but ceiling armed so audit row lands")
-                soundEngine.start(
-                    setVolume: { _ in /* no audio player to mutate */ },
-                    onCeilingReached: ceilingHandler
-                )
+                // R7 fix retained: if alarm.m4a is missing from the bundle
+                // (build-config regression), we still start the soundEngine
+                // so the ramp logger fires. Audio will be silent but the
+                // ringing UI + verification flow still progress.
+                Self.logger.fault("alarm.m4a missing from bundle — silent alarm")
+                soundEngine.start(setVolume: { _ in /* no audio player to mutate */ })
                 return
             }
             audioKeepalive.playAlarmSound(url: url)
-            soundEngine.start(
-                setVolume: { volume in
-                    audioKeepalive.setAlarmVolume(volume)
-                },
-                onCeilingReached: ceilingHandler
-            )
+            soundEngine.start(setVolume: { volume in
+                audioKeepalive.setAlarmVolume(volume)
+            })
         }
     }
 

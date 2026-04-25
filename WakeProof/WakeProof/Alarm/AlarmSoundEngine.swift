@@ -2,10 +2,24 @@
 //  AlarmSoundEngine.swift
 //  WakeProof
 //
-//  Escalation policy: how alarm volume and sound selection evolve while the
-//  user is dragging their feet. Decoupled from AudioSessionKeepalive so the
-//  audio-critical file stays append-only. This engine only asks the keepalive
-//  to mutate volume; it never touches AVAudioPlayer directly.
+//  Escalation policy: how alarm volume evolves while the user is dragging
+//  their feet. Decoupled from AudioSessionKeepalive so the audio-critical
+//  file stays append-only. This engine only asks the keepalive to mutate
+//  volume; it never touches AVAudioPlayer directly.
+//
+//  Phase 8 product fix: the ring ceiling (auto-stop after 10 minutes) was
+//  REMOVED. A self-commitment alarm whose whole pitch is "an alarm your
+//  future self can't unsign" cannot ALSO contain a 10-minute escape hatch
+//  — sleep-deprived users (the exact users this product targets) miss the
+//  window and silently sleep through. The alarm now rings until the user
+//  completes Proof or force-quits the app (which itself breaks the streak,
+//  preserving the contract's accountability surface).
+//
+//  Volume reaches 1.0 after 60s and stays there indefinitely. There is no
+//  software ceiling — the only natural terminations are:
+//    1. user completes Proof → AlarmScheduler.markCaptureCompleted() → stop()
+//    2. user force-quits → process death stops audio at the OS level
+//    3. battery dies → device powers down
 //
 
 import Foundation
@@ -16,28 +30,16 @@ import os
 @MainActor
 final class AlarmSoundEngine {
 
-    /// Max wall-clock duration the alarm is allowed to ring before we hard-stop.
-    /// Rationale: if the capture flow silently fails (extraction error, camera crash,
-    /// or the user simply ignores the alarm), the self-commitment promise of "can't be
-    /// bypassed" devolves into "device blares at full volume forever" which is worse.
-    /// The ceiling trades a correctness gap (user can wait out the alarm) for a
-    /// reliability floor (we never deadlock a demo device).
-    static let ringCeiling: Duration = .seconds(10 * 60)
-
     private let logger = Logger(subsystem: LogSubsystem.alarm, category: "soundEngine")
     private var escalationTask: Task<Void, Never>?
-    private var ceilingTask: Task<Void, Never>?
 
-    /// Begins the escalation loop and arms the ring-ceiling safety net.
+    /// Begins the escalation ramp. The alarm itself loops indefinitely at
+    /// the AVAudioPlayer level (numberOfLoops = -1); this engine only drives
+    /// the volume curve and exits once max volume is reached.
     ///
-    /// - Parameters:
-    ///   - setVolume: invoked at each ramp step; caller maps this to the AVAudioPlayer.
-    ///   - onCeilingReached: invoked (on MainActor) if the alarm is still running at
-    ///     the ceiling. Expected to stop audio + clear ringing state + log a WakeAttempt.
-    func start(
-        setVolume: @MainActor @escaping (Float) -> Void,
-        onCeilingReached: @MainActor @escaping () -> Void
-    ) {
+    /// - Parameter setVolume: invoked at each ramp step; caller maps this
+    ///   to the AVAudioPlayer.
+    func start(setVolume: @MainActor @escaping (Float) -> Void) {
         stop()
         logger.info("Escalation started at \(Date().ISO8601Format(), privacy: .public)")
         escalationTask = Task { [weak self] in
@@ -64,43 +66,30 @@ final class AlarmSoundEngine {
                     return
                 }
             }
-        }
-        ceilingTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: Self.ringCeiling)
-            } catch is CancellationError {
-                return
-            } catch {
-                self?.logger.warning("Ceiling sleep threw non-cancellation: \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            guard !Task.isCancelled, let self else { return }
-            await MainActor.run {
-                self.logger.warning("Ring ceiling reached (\(Self.ringCeiling, privacy: .public)) — forcing alarm stop")
-                onCeilingReached()
-            }
+            // Ramp complete — volume stays at 1.0 (last setVolume call). The
+            // AVAudioPlayer loops indefinitely at the keepalive layer; no
+            // ceiling task here, by design (see file header).
         }
     }
 
     func stop() {
         escalationTask?.cancel()
         escalationTask = nil
-        ceilingTask?.cancel()
-        ceilingTask = nil
         logger.info("Escalation stopped")
     }
 
-    /// B6 fix: cancels ONLY the escalation ramp task, leaving the ring-ceiling safety net
-    /// armed. Called when UI wants to externally override volume (e.g. dip to 0.2 during
-    /// verification) without the ramp's next tick overwriting our externally-set value.
+    /// Cancels ONLY the escalation ramp task (B6 fix). Called when UI wants
+    /// to externally override volume (e.g. dip to 0.2 during verification)
+    /// without the ramp's next tick overwriting the externally-set value.
     ///
-    /// Intentionally one-way: once paused for a fire, we don't resume. A failed
-    /// verification transitions the alarm back to `.ringing` with volume restored to 1.0
-    /// and we want to stay at 1.0 rather than re-ramping from 0.3 — the user has
-    /// already engaged at least once, full-attention is warranted for the retry.
+    /// Intentionally one-way: once paused for a fire, we don't resume. A
+    /// failed verification transitions the alarm back to `.ringing` with
+    /// volume restored to 1.0 and we stay at 1.0 rather than re-ramping
+    /// from 0.3 — the user has already engaged at least once, full-volume
+    /// attention is warranted on the retry path.
     func pauseRamp() {
         escalationTask?.cancel()
         escalationTask = nil
-        logger.info("Ramp paused (ceiling still armed)")
+        logger.info("Ramp paused")
     }
 }
