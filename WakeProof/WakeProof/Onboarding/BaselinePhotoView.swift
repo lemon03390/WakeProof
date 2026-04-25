@@ -32,21 +32,32 @@ struct BaselinePhotoView: View {
                 .multilineTextAlignment(.center)
 
             // Explainer card: location ritual + lighting guidance.
-            // Rendered above the preview image so the user reads the instruction
-            // before capturing — on dark surface WPCard uses wpChar800 fill.
-            WPCard(padding: WPSpacing.md) {
-                Text("Pick the spot in your home where you will physically be when you successfully wake up — kitchen counter, bathroom sink, your desk. Capture it now in the lighting you'll see it in tomorrow morning.")
-                    .wpFont(.body)
-                    .foregroundStyle(Color.wpCream50.opacity(0.75))
-                    .multilineTextAlignment(.leading)
+            // Rendered above the preview image ONLY before capture — once the
+            // user has captured a photo they've already acted on the
+            // instruction, so we hide the explainer and give the preview
+            // image its full vertical real estate (the user needs to actually
+            // see whether the photo is good enough to commit to).
+            // On dark surface WPCard uses wpChar800 fill.
+            if capturedImage == nil {
+                WPCard(padding: WPSpacing.md) {
+                    Text("Pick the spot in your home where you will physically be when you successfully wake up — kitchen counter, bathroom sink, your desk. Capture it now in the lighting you'll see it in tomorrow morning.")
+                        .wpFont(.body)
+                        .foregroundStyle(Color.wpCream50.opacity(0.75))
+                        .multilineTextAlignment(.leading)
+                }
+                .environment(\.colorScheme, .dark)
             }
-            .environment(\.colorScheme, .dark)
 
             if let capturedImage {
+                // 480pt max (was 260pt — too small for the user to confidently
+                // judge whether the framing / lighting is good enough to lock
+                // in as the wake-location). The explainer above hides post-
+                // capture so this larger preview fits comfortably on iPhone
+                // SE through Pro Max.
                 Image(uiImage: capturedImage)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxHeight: 260)
+                    .frame(maxWidth: .infinity, maxHeight: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
             }
 
