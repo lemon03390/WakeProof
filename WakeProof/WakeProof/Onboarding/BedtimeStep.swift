@@ -85,10 +85,6 @@ struct BedtimeStep: View {
                     // letting the user proceed thinking bedtime was persisted.
                     if settings.save() {
                         contractConfirmed = true
-                        Task {
-                            try? await Task.sleep(for: .seconds(2))
-                            onAdvance()
-                        }
                     } else {
                         saveFailureMessage = "Couldn't save bedtime — try once more."
                     }
@@ -102,6 +98,14 @@ struct BedtimeStep: View {
     }
 
     // MARK: - Contract-active confirmation
+    //
+    // User-driven advance via the "Enter WakeProof" button — no auto-dismiss.
+    // The plan calls for this button so the commitment-contract transition
+    // is an explicit acknowledgement (matches iOS norms for confirmation
+    // steps; auto-advance would also have required a `try? await Task.sleep`
+    // pattern that violates the CLAUDE.md auto-promoted rule banning `try?`
+    // — `Task.sleep` throws `CancellationError` on teardown, and `try?` would
+    // silently advance even after the view was gone).
 
     private var contractConfirmationCard: some View {
         VStack(spacing: WPSpacing.xl) {
@@ -115,6 +119,10 @@ struct BedtimeStep: View {
                 }
             }
             .environment(\.colorScheme, .dark)
+
+            Button("Enter WakeProof", action: onAdvance)
+                .buttonStyle(.primaryWhite)
+
             Spacer()
         }
     }
