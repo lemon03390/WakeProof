@@ -18,28 +18,29 @@ struct AntiSpoofActionPromptView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 28) {
+            Color.wpChar900.ignoresSafeArea()
+            VStack(spacing: WPSpacing.xl) {
                 Spacer()
                 Text("Now:")
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .wpFont(.title3)
+                    .foregroundStyle(Color.wpCream50.opacity(0.7))
                 Text(instruction)
                     .font(.system(size: 52, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.wpCoral)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, WPSpacing.xl)
                 Text("When you're ready, tap to re-capture.")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .wpFont(.subhead)
+                    .foregroundStyle(Color.wpCream50.opacity(0.55))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                    .padding(.horizontal, WPSpacing.xl2)
                 Spacer()
                 Button("I'm ready", action: onReady)
                     .buttonStyle(.primaryAlarm)
-                    .padding(.horizontal)
-                    .padding(.bottom, 40)
+                    .padding(.horizontal, WPSpacing.xl2)
+                    .padding(.bottom, WPSpacing.xl3)
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
