@@ -2,9 +2,10 @@ import XCTest
 import SwiftUI
 @testable import WakeProof
 
-/// Component construction + public-API smoke. `WPStreakBadge.shouldRender`
-/// MUST behave identically to the existing `StreakBadgeView.shouldRender`
-/// so the AlarmSchedulerView call site can swap callers without branching.
+/// Component construction + public-API smoke for the WakeProof design system.
+/// The cross-check test `testShouldRender_agreesWithShippedStreakBadgeView`
+/// was removed in Phase 6 (UI 6.5) after `StreakBadgeView.swift` was deleted.
+/// `WPStreakBadge` is now the canonical implementation; the migration is complete.
 final class ComponentSmokeTests: XCTestCase {
     // ── WPStreakBadge.shouldRender contract ─────────────────────────────
     func testShouldRender_bothZero_false() {
@@ -45,28 +46,5 @@ final class ComponentSmokeTests: XCTestCase {
 
     func testWPStreakBadgeConstructs() {
         _ = WPStreakBadge(currentStreak: 3, bestStreak: 5)
-    }
-
-    /// Cross-check: the new shouldRender static must agree with the shipped
-    /// StreakBadgeView.shouldRender for every test case. Phase 6 will delete
-    /// StreakBadgeView once call sites migrate; until then both must agree.
-    ///
-    /// NOTE: This validates only the `shouldRender(...)` static function.
-    /// Render-branch parity (the body's 3-way ladder: active → dormant →
-    /// nothing) is not covered here; visual inspection via #Preview and
-    /// Phase 3 UAT serve as that gate.
-    func testShouldRender_agreesWithShippedStreakBadgeView() {
-        let cases: [(Int, Int)] = [
-            (0, 0), (1, 1), (3, 5), (0, 5), (-1, -1),
-            (5, 0),   // best > current with current high — preserved 'best' floor
-            (0, 1)    // tiniest dormant
-        ]
-        for (current, best) in cases {
-            XCTAssertEqual(
-                WPStreakBadge.shouldRender(currentStreak: current, bestStreak: best),
-                StreakBadgeView.shouldRender(currentStreak: current, bestStreak: best),
-                "Disagreement at (current: \(current), best: \(best))"
-            )
-        }
     }
 }
