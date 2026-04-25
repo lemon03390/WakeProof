@@ -399,10 +399,20 @@ struct AlarmSchedulerView: View {
                     #endif
 
                     // MARK: — Weekly insight
+                    // Phase 8 fix: WeeklyCoach loads a bundled seed insight at
+                    // init so even fresh installs see something — but on a
+                    // user's first day with zero attempts, a "Your Mondays
+                    // consistently take an extra try…" insight is misleading
+                    // (it pretends to summarise data the user hasn't generated
+                    // yet). Suppress the seed on fresh-install so the empty
+                    // state copy renders instead. Once the user has even one
+                    // WakeAttempt the coach can surface its content; until
+                    // then the empty state ("Your first insight will appear…")
+                    // is the honest UX.
                     WPSection("Weekly insight") {
                         WeeklyInsightView(
-                            insight: weeklyCoach.currentInsight,
-                            generatedAt: weeklyCoach.generatedAt
+                            insight: wakeAttempts.isEmpty ? nil : weeklyCoach.currentInsight,
+                            generatedAt: wakeAttempts.isEmpty ? nil : weeklyCoach.generatedAt
                         )
                     }
 
