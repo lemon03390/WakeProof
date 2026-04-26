@@ -32,6 +32,8 @@
 	<string>WakeProof records a brief (≤4s) clip alongside your wake-up photo. The microphone is only accessed during the wake-up verification; audio is kept local on your device for up to 7 days, then automatically deleted, and is never uploaded.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>WakeProof reads your sleep data from Apple Health to show you a summary of last night's rest when you successfully wake up.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>WakeProof does not write to your Health data. This key is required by Apple when the HealthKit entitlement is enabled.</string>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>WakeProof sends alarm notifications so you wake up on time, even if the app is backgrounded.</string>
 	<key>UIApplicationSceneManifest</key>
