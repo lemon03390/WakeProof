@@ -5,6 +5,8 @@
 
 Built for the Cerebral Valley × Anthropic **"Built with Opus 4.7: a Claude Code hackathon"** (Apr 21–26, 2026).
 
+🎥 **[Watch the 3-minute demo](https://www.youtube.com/watch?v=ZmX75DBO_xA)** — full failure → contract → success arc with anti-spoof reasoning trace shown live.
+
 ## The problem
 
 iOS Clock alarms can be dismissed with a thumb on the lock screen, eyes still closed, body still horizontal. Third-party "alarm" apps give you a math puzzle you solve in bed. None of them prove you're *out of bed*.
@@ -16,6 +18,16 @@ iOS Clock alarms can be dismissed with a thumb on the lock screen, eyes still cl
 3. **Verification** — Claude Opus 4.7 compares new photo to baseline: same location, eyes open, upright, room lit, appears alert.
 4. **Anti-spoofing** — retries add random action prompts: "blink twice", "show your right hand".
 5. **Fail** — alarm continues escalating. No dismiss button.
+
+## The commitment loop
+
+Verification is one moment. The product wraps it with retention hooks that keep the contract alive between alarms — each tied to a specific behavioural-economics signal:
+
+- **Streak Calendar** (`HOOK_S7_6` — continuity visual feedback) — month-grid showing per-day verification status. Green filled = verified, red/orange outlined = engaged-but-broke-contract, gray dim = no attempt. Makes a "break" concrete instead of abstract — the user sees exactly which days they upheld vs. broke the commitment.
+- **Investment Dashboard** (`HOOK_S5_2` + `HOOK_S7_8` — accumulated-data loss aversion) — surfaces baseline age, count of verified mornings, count of Opus-generated insights. Replacing the app means abandoning data the user has built up. Tangible switching cost.
+- **Share Card** (`HOOK_S7_7` — social reward; `HOOK_S4_5` — autonomy preservation) — opt-in 1080×1920 portrait card with brand gradient + streak number rendered offscreen via `ImageRenderer` and handed to `ShareLink`. Default OFF — forced sharing breaks autonomy; opt-in respects it.
+
+None of these need Opus 4.7. They make the verification *meaningful* beyond the ten seconds it takes to fire — and they're what turn a one-time demo into something that compounds over weeks.
 
 ## Why Opus 4.7
 
