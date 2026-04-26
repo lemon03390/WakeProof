@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1920" width="1080" height="1920">
+  <!-- Definitions: gradients, fonts -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1A120C"/>
+      <stop offset="60%" stop-color="#2B1F17"/>
+      <stop offset="100%" stop-color="#1A120C"/>
+    </linearGradient>
+
+    <linearGradient id="sunriseGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFA047"/>
+      <stop offset="100%" stop-color="#F54F4F"/>
+    </linearGradient>
+
+    <radialGradient id="topGlow" cx="50%" cy="0%" r="50%">
+      <stop offset="0%" stop-color="#FFA047" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#FFA047" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1080" height="1920" fill="url(#bgGrad)"/>
+  <!-- Subtle sunrise glow at top -->
+  <rect width="1080" height="600" fill="url(#topGlow)"/>
+
+  <!-- Top eyebrow -->
+  <text x="540" y="240"
+        text-anchor="middle"
+        font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+        font-size="30"
+        font-weight="500"
+        letter-spacing="8"
+        fill="#8A6B55">POWERED BY</text>
+
+  <!-- Hero title: Claude Opus 4.7 -->
+  <text x="540" y="350"
+        text-anchor="middle"
+        font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+        font-size="84"
+        font-weight="600"
+        letter-spacing="-1"
+        fill="#FBEEDB">Claude Opus 4.7</text>
+
+  <!-- Gradient divider -->
+  <rect x="500" y="400" width="80" height="4" rx="2" fill="url(#sunriseGrad)"/>
+
+  <!-- Subtitle -->
+  <text x="540" y="470"
+        text-anchor="middle"
+        font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+        font-size="36"
+        font-weight="400"
+        fill="#8A6B55">One model. Three jobs.</text>
+
+  <!-- ============== Pillar 1: VISION (cream accent) ============== -->
+  <g transform="translate(140, 720)">
+    <!-- Icon: outline circle + eye -->
+    <circle cx="64" cy="64" r="58" fill="none" stroke="#FBEEDB" stroke-width="3"/>
+    <ellipse cx="64" cy="64" rx="34" ry="22" fill="none" stroke="#FBEEDB" stroke-width="4"/>
+    <circle cx="64" cy="64" r="10" fill="#FBEEDB"/>
+
+    <!-- Label -->
+    <text x="180" y="56"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="52"
+          font-weight="600"
+          letter-spacing="3"
+          fill="#FBEEDB">VISION</text>
+
+    <!-- Description -->
+    <text x="180" y="116"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="32"
+          font-weight="400"
+          fill="#8A6B55">Verifies your face. Reads your eyes.</text>
+  </g>
+
+  <!-- ============== Pillar 2: REASONING (orange accent) ============== -->
+  <g transform="translate(140, 970)">
+    <!-- Icon: outline circle + connected nodes (graph) -->
+    <circle cx="64" cy="64" r="58" fill="none" stroke="#FFA047" stroke-width="3"/>
+    <line x1="42" y1="44" x2="86" y2="44" stroke="#FFA047" stroke-width="3"/>
+    <line x1="42" y1="44" x2="64" y2="86" stroke="#FFA047" stroke-width="3"/>
+    <line x1="86" y1="44" x2="64" y2="86" stroke="#FFA047" stroke-width="3"/>
+    <circle cx="42" cy="44" r="8" fill="#FFA047"/>
+    <circle cx="86" cy="44" r="8" fill="#FFA047"/>
+    <circle cx="64" cy="86" r="8" fill="#FFA047"/>
+
+    <!-- Label -->
+    <text x="180" y="56"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="52"
+          font-weight="600"
+          letter-spacing="3"
+          fill="#FBEEDB">REASONING</text>
+
+    <!-- Description -->
+    <text x="180" y="116"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="32"
+          font-weight="400"
+          fill="#8A6B55">Catches every shortcut. Every cheat.</text>
+  </g>
+
+  <!-- ============== Pillar 3: INSIGHT (coral accent) ============== -->
+  <g transform="translate(140, 1220)">
+    <!-- Icon: outline circle + document with text lines -->
+    <circle cx="64" cy="64" r="58" fill="none" stroke="#F54F4F" stroke-width="3"/>
+    <rect x="38" y="34" width="52" height="60" rx="5" fill="none" stroke="#F54F4F" stroke-width="3"/>
+    <line x1="50" y1="52" x2="78" y2="52" stroke="#F54F4F" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="50" y1="64" x2="78" y2="64" stroke="#F54F4F" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="50" y1="76" x2="70" y2="76" stroke="#F54F4F" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- Label -->
+    <text x="180" y="56"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="52"
+          font-weight="600"
+          letter-spacing="3"
+          fill="#FBEEDB">INSIGHT</text>
+
+    <!-- Description -->
+    <text x="180" y="116"
+          font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+          font-size="32"
+          font-weight="400"
+          fill="#8A6B55">Writes your weekly mirror. Every Sunday.</text>
+  </g>
+
+  <!-- Bottom wordmark -->
+  <text x="540" y="1820"
+        text-anchor="middle"
+        font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif"
+        font-size="64"
+        font-weight="700"
+        letter-spacing="-0.5"
+        fill="url(#sunriseGrad)">WakeProof</text>
+</svg>
